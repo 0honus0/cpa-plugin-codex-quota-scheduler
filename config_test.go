@@ -3,6 +3,8 @@ package main
 import (
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 )
 
 func TestDecodeConfigDefaults(t *testing.T) {
@@ -79,10 +81,31 @@ func TestDecodeConfigRejectsInvalidMonthlyMode(t *testing.T) {
 	}
 }
 
+func TestDecodeConfigRejectsNonPositiveQuotaRefreshInterval(t *testing.T) {
+	_, err := DecodeConfig([]byte("quota_refresh_interval: 0s\n"))
+	if err == nil {
+		t.Fatalf("DecodeConfig accepted non-positive quota refresh interval")
+	}
+}
+
+func TestDecodeConfigRejectsNonPositiveStaleAfter(t *testing.T) {
+	_, err := DecodeConfig([]byte("stale_after: -1s\n"))
+	if err == nil {
+		t.Fatalf("DecodeConfig accepted non-positive stale after")
+	}
+}
+
+func TestDecodeConfigRejectsNonPositiveMaxRefreshConcurrency(t *testing.T) {
+	_, err := DecodeConfig([]byte("max_refresh_concurrency: 0\n"))
+	if err == nil {
+		t.Fatalf("DecodeConfig accepted non-positive max refresh concurrency")
+	}
+}
+
 func TestPluginRegistrationDeclaresCapabilitiesAndFields(t *testing.T) {
 	reg := PluginRegistration()
-	if reg.SchemaVersion != 1 {
-		t.Fatalf("SchemaVersion = %d, want 1", reg.SchemaVersion)
+	if reg.SchemaVersion != pluginabi.SchemaVersion {
+		t.Fatalf("SchemaVersion = %d, want %d", reg.SchemaVersion, pluginabi.SchemaVersion)
 	}
 	if !reg.Capabilities.Scheduler || !reg.Capabilities.UsagePlugin || !reg.Capabilities.ManagementAPI {
 		t.Fatalf("capabilities = %#v, want scheduler, usage_plugin, management_api", reg.Capabilities)

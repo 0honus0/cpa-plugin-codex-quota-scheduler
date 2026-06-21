@@ -89,12 +89,18 @@ func DecodeConfig(raw []byte) (Config, error) {
 		if err != nil {
 			return Config{}, fmt.Errorf("quota_refresh_interval: %w", err)
 		}
+		if d <= 0 {
+			return Config{}, fmt.Errorf("quota_refresh_interval must be positive")
+		}
 		cfg.QuotaRefreshInterval = d
 	}
 	if decoded.StaleAfter != "" {
 		d, err := time.ParseDuration(decoded.StaleAfter)
 		if err != nil {
 			return Config{}, fmt.Errorf("stale_after: %w", err)
+		}
+		if d <= 0 {
+			return Config{}, fmt.Errorf("stale_after must be positive")
 		}
 		cfg.StaleAfter = d
 	}
@@ -117,6 +123,9 @@ func DecodeConfig(raw []byte) (Config, error) {
 		cfg.AnnotationStatePath = decoded.AnnotationStatePath
 	}
 	if decoded.MaxRefreshConcurrency != nil {
+		if *decoded.MaxRefreshConcurrency <= 0 {
+			return Config{}, fmt.Errorf("max_refresh_concurrency must be positive")
+		}
 		cfg.MaxRefreshConcurrency = *decoded.MaxRefreshConcurrency
 	}
 	if decoded.QuotaEndpoint != "" {
