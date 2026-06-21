@@ -34,6 +34,9 @@ func PickCodexAccount(req pluginapi.SchedulerPickRequest, snapshot StateSnapshot
 	}
 
 	ordered := BuildOrderedAccounts(req, snapshot, now)
+	if len(ordered) == 0 {
+		return PickDecision{Reason: "no_codex_candidates", Ordered: ordered}
+	}
 	for _, account := range ordered {
 		if account.Available {
 			return PickDecision{

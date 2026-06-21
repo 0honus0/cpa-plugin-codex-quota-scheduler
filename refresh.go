@@ -67,12 +67,40 @@ func (r *QuotaRefresher) RefreshOnce() error {
 	if err != nil {
 		return fmt.Errorf("list auths: %w", err)
 	}
+	eligible := make([]pluginapi.HostAuthFileEntry, 0, len(auths))
 	for _, auth := range auths {
-		if !isRefreshEligible(auth) {
-			continue
+		if isRefreshEligible(auth) {
+			eligible = append(eligible, auth)
 		}
-		r.refreshAuth(auth)
 	}
+	if len(eligible) == 0 {
+		return nil
+	}
+
+	concurrency := r.state.Config().MaxRefreshConcurrency
+	if concurrency <= 0 {
+		concurrency = 1
+	}
+	if concurrency > len(eligible) {
+		concurrency = len(eligible)
+	}
+
+	jobs := make(chan pluginapi.HostAuthFileEntry)
+	var wg sync.WaitGroup
+	wg.Add(concurrency)
+	for i := 0; i < concurrency; i++ {
+		go func() {
+			defer wg.Done()
+			for auth := range jobs {
+				r.refreshAuth(auth)
+			}
+		}()
+	}
+	for _, auth := range eligible {
+		jobs <- auth
+	}
+	close(jobs)
+	wg.Wait()
 	return nil
 }
 

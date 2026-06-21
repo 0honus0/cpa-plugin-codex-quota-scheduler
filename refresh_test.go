@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -477,6 +478,84 @@ func TestRefreshOnceContinuesAfterOneAccountFails(t *testing.T) {
 	if success.LastSuccessAt.IsZero() || success.Quota.FiveHour == nil {
 		t.Fatalf("success account was not refreshed: %#v", success)
 	}
+}
+
+func TestRefreshOnceHonorsMaxRefreshConcurrency(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	auths := []pluginapi.HostAuthFileEntry{}
+	authJSON := map[string]json.RawMessage{}
+	expected := map[string]string{}
+	responses := map[string]pluginapi.HTTPResponse{}
+	for i := 1; i <= 5; i++ {
+		authID := fmt.Sprintf("auth-%d", i)
+		authIndex := fmt.Sprintf("idx-%d", i)
+		accountID := fmt.Sprintf("acct-%d", i)
+		accessToken := fmt.Sprintf("access-%d", i)
+		idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": accountID})
+		auths = append(auths, pluginapi.HostAuthFileEntry{
+			ID: authID, AuthIndex: authIndex, Provider: "codex",
+		})
+		authJSON[authIndex] = json.RawMessage(`{"access_token":"` + accessToken + `","id_token":"` + idToken + `"}`)
+		expected[accountID] = "Bearer " + accessToken
+		responses[accountID] = pluginapi.HTTPResponse{
+			StatusCode: http.StatusOK,
+			Headers:    http.Header{},
+			Body:       []byte(`{"rate_limit":{"primary_window":{"used_percent":30,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":40,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+		}
+	}
+	host := &fakeHostClient{
+		authList:              auths,
+		authJSON:              authJSON,
+		expectedAuthByAccount: expected,
+		responseByAccount:     responses,
+		doStarted:             make(chan struct{}, len(auths)),
+		releaseDo:             make(chan struct{}),
+	}
+	cfg := DefaultConfig()
+	cfg.MaxRefreshConcurrency = 2
+	store := NewPluginState(cfg)
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+
+	done := make(chan error, 1)
+	go func() {
+		done <- refresher.RefreshOnce()
+	}()
+
+	for i := 0; i < cfg.MaxRefreshConcurrency; i++ {
+		select {
+		case <-host.doStarted:
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for HTTP call %d to start", i+1)
+		}
+	}
+	if got := host.activeHTTPCount(); got != cfg.MaxRefreshConcurrency {
+		t.Fatalf("active HTTP = %d, want %d concurrent calls", got, cfg.MaxRefreshConcurrency)
+	}
+	select {
+	case <-host.doStarted:
+		t.Fatalf("third HTTP call started before a concurrency slot was released")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	for i := 0; i < len(auths); i++ {
+		host.releaseDo <- struct{}{}
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RefreshOnce returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for RefreshOnce to finish")
+	}
+
+	if got := host.maxActiveHTTP(); got != cfg.MaxRefreshConcurrency {
+		t.Fatalf("max active HTTP = %d, want %d", got, cfg.MaxRefreshConcurrency)
+	}
+	if got := host.httpCallCount(); got != len(auths) {
+		t.Fatalf("http calls = %d, want %d", got, len(auths))
+	}
+	host.assertNoHeaderErrors(t)
 }
 
 func TestRefreshSoonDoesNotOverlapRefreshes(t *testing.T) {

@@ -183,6 +183,27 @@ func TestPickDisabledHandleReturnsUnhandled(t *testing.T) {
 	}
 }
 
+func TestPickCodexRequestWithNoCodexCandidatesReturnsUnhandled(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	cfg := DefaultConfig()
+	cfg.Fallback = FallbackFillFirst
+	snapshot := StateSnapshot{Config: cfg, Now: now, Accounts: []AccountState{
+		weeklyAccount("available", 5, now.Add(time.Hour), false),
+	}}
+	req := pluginapi.SchedulerPickRequest{
+		Provider:  "codex",
+		Providers: []string{"codex"},
+		Candidates: []pluginapi.SchedulerAuthCandidate{
+			{ID: "not-codex", Provider: "openai", Priority: 10, Status: "active"},
+		},
+	}
+
+	decision := PickCodexAccount(req, snapshot, now)
+	if decision.Handled {
+		t.Fatalf("Handled = true, want false; decision=%#v", decision)
+	}
+}
+
 func TestPickDelegatesFillFirstWhenNoSelectableAccount(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	cfg := DefaultConfig()

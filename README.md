@@ -51,7 +51,9 @@ monthly accounts before weekly accounts within the same CPA priority.
 2. Enable global plugins and this plugin in CPA config.
 3. Start CPA and confirm `GET /v0/management/plugins` reports `registered: true` and `effective_enabled: true`.
 4. Open `/v0/resource/plugins/codex-quota-scheduler/status`.
-5. Confirm the first account in the status page matches the scheduler order:
-   CPA priority descending, then monthly mode ordering inside the priority tier.
-6. Send a Codex request and confirm the selected auth ID matches the status page's top selectable account.
+5. Confirm the status table follows scheduler order: CPA priority descending,
+   then monthly mode ordering inside the priority tier. Unavailable accounts can
+   appear before available accounts when they sort earlier.
+6. Compare the `Next` value, or the top available account in the table, with the
+   auth ID selected for the next Codex request.
 7. Simulate or observe a 429 `usage_limit_reached` response and confirm the next scheduler pick avoids that account.
