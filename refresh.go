@@ -18,6 +18,7 @@ const quotaUserAgent = "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTermi
 const maxErrorBodySummaryLen = 220
 
 var (
+	rawCookiePattern   = regexp.MustCompile(`(?i)\b(cookie\s*[:=]\s*)[^;\s,}"']+(?:\s*;\s*[^;\s,}"']+)*`)
 	rawSecretPattern   = regexp.MustCompile(`(?i)\b((?:access[_-]?token|id[_-]?token|refresh[_-]?token|authorization|cookie|api[_-]?key|session[_-]?token)\s*[:=]\s*)(?:bearer\s+)?[^\s,}"']+`)
 	secretFieldPattern = regexp.MustCompile(`(?i)((?:"?(?:access[_-]?token|id[_-]?token|refresh[_-]?token|authorization|cookie|api[_-]?key|session[_-]?token)"?)\s*[:=]\s*)("[^"]*"|[^\s,}\]]+)`)
 	bearerPattern      = regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+/=-]+`)
@@ -265,6 +266,7 @@ func redactWithCredentials(message string, credentials CodexCredentials) string 
 }
 
 func redactSecrets(message string) string {
+	message = rawCookiePattern.ReplaceAllString(message, `${1}[redacted]`)
 	message = rawSecretPattern.ReplaceAllString(message, `${1}[redacted]`)
 	message = secretFieldPattern.ReplaceAllString(message, `${1}"[redacted]"`)
 	message = bearerPattern.ReplaceAllString(message, "Bearer [redacted]")

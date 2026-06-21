@@ -393,7 +393,7 @@ func TestRefreshOnceNon2xxStoresBoundedSanitizedSummary(t *testing.T) {
 			"Cookie": "session=json-cookie",
 			"ACCESS_TOKEN" : "json-access",
 			"id_token": "json-id-token",
-			"raw": "Authorization: Bearer raw-secret Cookie: session=raw-cookie access_token = raw-access",
+			"raw": "Authorization: Bearer raw-secret Cookie: session=raw-cookie access_token = raw-access Cookie: session=secret-session; csrf=secret-csrf",
 			"detail": "` + longBody + `"
 		}`),
 	}
@@ -407,7 +407,7 @@ func TestRefreshOnceNon2xxStoresBoundedSanitizedSummary(t *testing.T) {
 	if account.LastError == "" {
 		t.Fatal("LastError empty, want non-2xx summary")
 	}
-	for _, leaked := range []string{"json-secret", "json-cookie", "json-access", "json-id-token", "raw-secret", "raw-cookie", "raw-access"} {
+	for _, leaked := range []string{"json-secret", "json-cookie", "json-access", "json-id-token", "raw-secret", "raw-cookie", "raw-access", "secret-session", "secret-csrf"} {
 		if strings.Contains(account.LastError, leaked) {
 			t.Fatalf("LastError leaked %q: %q", leaked, account.LastError)
 		}
@@ -417,6 +417,15 @@ func TestRefreshOnceNon2xxStoresBoundedSanitizedSummary(t *testing.T) {
 	}
 	if len(account.LastError) > 360 {
 		t.Fatalf("LastError length = %d, want bounded summary: %q", len(account.LastError), account.LastError)
+	}
+}
+
+func TestRedactSecretsRedactsFullRawCookieHeader(t *testing.T) {
+	redacted := redactSecrets("Cookie: session=secret-session; csrf=secret-csrf")
+	for _, leaked := range []string{"secret-session", "secret-csrf"} {
+		if strings.Contains(redacted, leaked) {
+			t.Fatalf("redactSecrets leaked %q: %q", leaked, redacted)
+		}
 	}
 }
 
