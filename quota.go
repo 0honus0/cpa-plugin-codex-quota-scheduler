@@ -28,44 +28,67 @@ func ParseCodexUsagePayload(raw []byte, now time.Time) (ParsedQuota, error) {
 		}
 	}
 
+	if codeReviewRateLimit, ok := getMap(doc, "code_review_rate_limit", "codeReviewRateLimit"); ok {
+		parsed.CodeReviewWindows = append(parsed.CodeReviewWindows, parseRateLimitWindows(codeReviewRateLimit, now)...)
+	}
+	if additionalLimits, ok := getSlice(doc, "additional_rate_limits", "additionalRateLimits"); ok {
+		for _, rawLimit := range additionalLimits {
+			limit, ok := rawLimit.(map[string]any)
+			if !ok {
+				continue
+			}
+			rateLimit, ok := getMap(limit, "rate_limit", "rateLimit")
+			if !ok {
+				continue
+			}
+			parsed.AdditionalWindows = append(parsed.AdditionalWindows, parseRateLimitWindows(rateLimit, now)...)
+		}
+	}
+
 	rateLimit, ok := getMap(doc, "rate_limit", "rateLimit")
 	if !ok {
 		return parsed, nil
 	}
-	allowed, allowedOK := getBool(rateLimit, "allowed")
-	limitReached, _ := getBool(rateLimit, "limit_reached", "limitReached")
-	exhaustedByEnvelope := (allowedOK && !allowed) || limitReached
-
-	var windows []*QuotaWindow
-	if primary, ok := getMap(rateLimit, "primary_window", "primaryWindow"); ok {
-		windows = append(windows, parseQuotaWindow(primary, now, WindowFiveHour, exhaustedByEnvelope))
-	}
-	if secondary, ok := getMap(rateLimit, "secondary_window", "secondaryWindow"); ok {
-		windows = append(windows, parseQuotaWindow(secondary, now, WindowWeekly, exhaustedByEnvelope))
-	}
-
-	for i, window := range windows {
-		classifyWindow(window, i)
+	for _, window := range parseRateLimitWindows(rateLimit, now) {
+		window := window
 		switch window.Kind {
 		case WindowFiveHour:
-			parsed.FiveHour = window
+			parsed.FiveHour = &window
 		case WindowWeekly, WindowMonthly:
-			parsed.LongWindow = window
+			parsed.LongWindow = &window
 			if window.Kind == WindowWeekly {
 				parsed.Family = AccountFamilyWeekly
 			} else {
 				parsed.Family = AccountFamilyMonthly
 			}
 		default:
-			parsed.AdditionalWindows = append(parsed.AdditionalWindows, *window)
+			parsed.AdditionalWindows = append(parsed.AdditionalWindows, window)
 		}
 	}
 
 	return parsed, nil
 }
 
-func parseQuotaWindow(raw map[string]any, now time.Time, fallbackKind WindowKind, exhaustedByEnvelope bool) *QuotaWindow {
-	window := &QuotaWindow{Kind: fallbackKind, Exhausted: exhaustedByEnvelope}
+func parseRateLimitWindows(rateLimit map[string]any, now time.Time) []QuotaWindow {
+	allowed, allowedOK := getBool(rateLimit, "allowed")
+	limitReached, _ := getBool(rateLimit, "limit_reached", "limitReached")
+	exhaustedByEnvelope := (allowedOK && !allowed) || limitReached
+
+	var windows []QuotaWindow
+	if primary, ok := getMap(rateLimit, "primary_window", "primaryWindow"); ok {
+		windows = append(windows, parseQuotaWindow(primary, now, WindowFiveHour, exhaustedByEnvelope))
+	}
+	if secondary, ok := getMap(rateLimit, "secondary_window", "secondaryWindow"); ok {
+		windows = append(windows, parseQuotaWindow(secondary, now, WindowWeekly, exhaustedByEnvelope))
+	}
+	for i := range windows {
+		classifyWindow(&windows[i], i)
+	}
+	return windows
+}
+
+func parseQuotaWindow(raw map[string]any, now time.Time, fallbackKind WindowKind, exhaustedByEnvelope bool) QuotaWindow {
+	window := QuotaWindow{Kind: fallbackKind, Exhausted: exhaustedByEnvelope}
 	if usedPercent, ok := getFloat64(raw, "used_percent", "usedPercent"); ok {
 		window.UsedPercent = &usedPercent
 		if usedPercent >= 100 {
@@ -122,6 +145,15 @@ func getMap(m map[string]any, keys ...string) (map[string]any, bool) {
 	}
 	child, ok := raw.(map[string]any)
 	return child, ok
+}
+
+func getSlice(m map[string]any, keys ...string) ([]any, bool) {
+	raw, ok := getAny(m, keys...)
+	if !ok {
+		return nil, false
+	}
+	value, ok := raw.([]any)
+	return value, ok
 }
 
 func getString(m map[string]any, keys ...string) string {
