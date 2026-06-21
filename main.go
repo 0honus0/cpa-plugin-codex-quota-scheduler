@@ -52,7 +52,6 @@ import "C"
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -96,6 +95,7 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 	refresherMu.Lock()
 	callHostCallback = callHostCallbackABI
 	globalRefresher = NewQuotaRefresher(ABIHostClient{}, globalState, time.Now)
+	managementRefreshSoon = refreshGlobalRefresherSoon
 	refresherMu.Unlock()
 	plugin.abi_version = C.uint32_t(pluginabi.ABIVersion)
 	plugin.call = C.cliproxy_plugin_call_fn(C.cliproxyPluginCall)
@@ -158,9 +158,9 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 	case pluginabi.MethodUsageHandle:
 		return handleUsageHandle(request)
 	case pluginabi.MethodManagementRegister:
-		return okEnvelope(pluginapi.ManagementRegistrationResponse{})
+		return okEnvelope(RegisterManagement())
 	case pluginabi.MethodManagementHandle:
-		return okEnvelope(pluginapi.ManagementResponse{StatusCode: http.StatusNotFound})
+		return handleManagementHandle(request)
 	default:
 		return errorEnvelope("unknown_method", "unknown method: "+method), nil
 	}
@@ -212,6 +212,16 @@ func handleUsageHandle(raw []byte) ([]byte, error) {
 	return okEnvelope(map[string]any{})
 }
 
+func handleManagementHandle(raw []byte) ([]byte, error) {
+	var req pluginapi.ManagementRequest
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, err
+		}
+	}
+	return okEnvelope(HandleManagementRequest(globalState, req, time.Now()))
+}
+
 func okEnvelope(v any) ([]byte, error) {
 	raw, err := json.Marshal(v)
 	if err != nil {
@@ -246,6 +256,15 @@ func startGlobalRefresher() {
 	}
 	refresher.Start()
 	refresher.RefreshSoon()
+}
+
+func refreshGlobalRefresherSoon() {
+	refresherMu.Lock()
+	refresher := globalRefresher
+	refresherMu.Unlock()
+	if refresher != nil {
+		refresher.RefreshSoon()
+	}
 }
 
 func callHostCallbackABI(method string, payload any) (json.RawMessage, error) {
