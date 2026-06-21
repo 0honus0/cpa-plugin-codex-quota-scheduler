@@ -49,11 +49,26 @@ quota_endpoint: https://example.test/usage
 	if cfg.MonthlyMode != MonthlyModePriority {
 		t.Fatalf("MonthlyMode = %q, want %q", cfg.MonthlyMode, MonthlyModePriority)
 	}
+	if cfg.QuotaRefreshInterval != 30*time.Second {
+		t.Fatalf("QuotaRefreshInterval = %s, want 30s", cfg.QuotaRefreshInterval)
+	}
+	if cfg.StaleAfter != 2*time.Minute {
+		t.Fatalf("StaleAfter = %s, want 2m", cfg.StaleAfter)
+	}
+	if cfg.Fallback != FallbackFillFirst {
+		t.Fatalf("Fallback = %q, want %q", cfg.Fallback, FallbackFillFirst)
+	}
 	if cfg.EnableUsageFeedback {
 		t.Fatalf("EnableUsageFeedback = true, want false")
 	}
+	if cfg.AnnotationStatePath != "C:\\state\\annotations.json" {
+		t.Fatalf("AnnotationStatePath = %q, want %q", cfg.AnnotationStatePath, "C:\\state\\annotations.json")
+	}
 	if cfg.MaxRefreshConcurrency != 8 {
 		t.Fatalf("MaxRefreshConcurrency = %d, want 8", cfg.MaxRefreshConcurrency)
+	}
+	if cfg.QuotaEndpoint != "https://example.test/usage" {
+		t.Fatalf("QuotaEndpoint = %q, want %q", cfg.QuotaEndpoint, "https://example.test/usage")
 	}
 }
 
