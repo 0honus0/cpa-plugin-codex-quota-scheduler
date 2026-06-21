@@ -2,13 +2,47 @@ package main
 
 import (
 	"encoding/json"
+	"sync/atomic"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
+func cleanupIntegrationGlobals(t *testing.T) {
+	t.Helper()
+
+	previousState := globalState
+	previousConfig, hadConfig := currentConfig.Load().(Config)
+	refresherMu.Lock()
+	previousRefresher := globalRefresher
+	globalRefresher = nil
+	refresherMu.Unlock()
+	previousRefreshSoon := managementRefreshSoon
+	managementRefreshSoon = func() {}
+	currentConfig = atomic.Value{}
+
+	t.Cleanup(func() {
+		refresherMu.Lock()
+		testRefresher := globalRefresher
+		if testRefresher != nil && testRefresher != previousRefresher {
+			testRefresher.Stop()
+		}
+		globalRefresher = previousRefresher
+		refresherMu.Unlock()
+
+		globalState = previousState
+		currentConfig = atomic.Value{}
+		if hadConfig {
+			currentConfig.Store(previousConfig)
+		}
+		managementRefreshSoon = previousRefreshSoon
+	})
+}
+
 func TestHandleMethodRegisterEnvelope(t *testing.T) {
+	cleanupIntegrationGlobals(t)
+
 	raw, err := handleMethod(pluginabi.MethodPluginRegister, []byte(`{"config_yaml":"aGFuZGxlX2VuYWJsZWQ6IHRydWUK"}`))
 	if err != nil {
 		t.Fatalf("handle register: %v", err)
@@ -24,6 +58,8 @@ func TestHandleMethodRegisterEnvelope(t *testing.T) {
 }
 
 func TestHandleMethodSchedulerPickFallbackEnvelope(t *testing.T) {
+	cleanupIntegrationGlobals(t)
+
 	globalState = NewPluginState(DefaultConfig())
 	rawReq, err := json.Marshal(pluginapi.SchedulerPickRequest{
 		Provider: "codex",
