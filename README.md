@@ -38,8 +38,12 @@ monthly accounts before weekly accounts within the same CPA priority.
 
 ## Management Routes
 
-- `GET /v0/resource/plugins/codex-quota-scheduler/status`
-- `POST /v0/resource/plugins/codex-quota-scheduler/annotations`
+- `GET /v0/management/plugins/codex-quota-scheduler/status`
+- `POST /v0/management/plugins/codex-quota-scheduler/refresh`
+- `GET /v0/management/plugins/codex-quota-scheduler/annotations`
+- `PUT /v0/management/plugins/codex-quota-scheduler/annotations`
+- `PATCH /v0/management/plugins/codex-quota-scheduler/annotations/account`
+- `PATCH /v0/management/plugins/codex-quota-scheduler/annotations/group`
 
 ## Manual Verification
 
