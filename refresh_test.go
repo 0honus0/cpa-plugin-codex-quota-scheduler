@@ -216,6 +216,80 @@ func TestRefreshOnceRecordsRedactedErrorWithoutTokenLeak(t *testing.T) {
 	}
 }
 
+func TestRefreshOnceMissingAccessTokenRecordsErrorWithoutQuotaSuccess(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1", "nonce": "token-ish-claim"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{
+			ID: "auth-1", AuthIndex: "idx-1", Provider: "codex",
+		}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"id_token":"` + idToken + `"}`),
+		},
+		httpBody: []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+	}
+	store := NewPluginState(DefaultConfig())
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	if err := refresher.RefreshOnce(); err != nil {
+		t.Fatalf("RefreshOnce returned error: %v", err)
+	}
+
+	account := accountByAuthID(t, store.Snapshot(now), "auth-1")
+	if account.LastError == "" {
+		t.Fatalf("LastError empty, want missing access_token error")
+	}
+	if strings.Contains(account.LastError, idToken) || strings.Contains(account.LastError, "token-ish-claim") {
+		t.Fatalf("LastError leaked token-ish content: %q", account.LastError)
+	}
+	if !account.LastSuccessAt.IsZero() {
+		t.Fatalf("LastSuccessAt = %v, want zero", account.LastSuccessAt)
+	}
+	if account.Quota.FiveHour != nil {
+		t.Fatalf("FiveHour quota = %#v, want nil", account.Quota.FiveHour)
+	}
+	if got := host.httpCallCount(); got != 0 {
+		t.Fatalf("http calls = %d, want 0", got)
+	}
+}
+
+func TestRefreshOnceMissingChatGPTAccountIDRecordsErrorWithoutQuotaSuccess(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"sub": "user-1", "nonce": "token-ish-claim"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{
+			ID: "auth-1", AuthIndex: "idx-1", Provider: "codex",
+		}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"secret-access-missing-account","id_token":"` + idToken + `"}`),
+		},
+		httpBody: []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+	}
+	store := NewPluginState(DefaultConfig())
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	if err := refresher.RefreshOnce(); err != nil {
+		t.Fatalf("RefreshOnce returned error: %v", err)
+	}
+
+	account := accountByAuthID(t, store.Snapshot(now), "auth-1")
+	if account.LastError == "" {
+		t.Fatalf("LastError empty, want missing chatgpt_account_id error")
+	}
+	for _, leaked := range []string{"secret-access-missing-account", idToken, "token-ish-claim"} {
+		if strings.Contains(account.LastError, leaked) {
+			t.Fatalf("LastError leaked token-ish content %q: %q", leaked, account.LastError)
+		}
+	}
+	if !account.LastSuccessAt.IsZero() {
+		t.Fatalf("LastSuccessAt = %v, want zero", account.LastSuccessAt)
+	}
+	if account.Quota.FiveHour != nil {
+		t.Fatalf("FiveHour quota = %#v, want nil", account.Quota.FiveHour)
+	}
+	if got := host.httpCallCount(); got != 0 {
+		t.Fatalf("http calls = %d, want 0", got)
+	}
+}
+
 func TestRefreshOnceHTTPNon2xxRecordsRedactedErrorWithoutQuotaSuccess(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
