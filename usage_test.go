@@ -85,6 +85,90 @@ func TestDetectQuotaFailureTopLevelResetFields(t *testing.T) {
 	}
 }
 
+func TestDetectQuotaFailureNumericErrorResetAt(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	record := pluginapi.UsageRecord{
+		Provider: "codex",
+		AuthID:   "auth-1",
+		Failed:   true,
+		Failure: pluginapi.UsageFailure{
+			StatusCode: 429,
+			Body:       `{"error":{"type":"usage_limit_reached","resets_at":1782043200}}`,
+		},
+	}
+
+	event, ok := DetectQuotaFailure(record, now)
+	if !ok {
+		t.Fatalf("DetectQuotaFailure did not detect quota failure")
+	}
+	if !event.ResetAt.Equal(time.Unix(1782043200, 0).UTC()) {
+		t.Fatalf("ResetAt = %s, want %s", event.ResetAt, time.Unix(1782043200, 0).UTC())
+	}
+}
+
+func TestDetectQuotaFailureNumericTopLevelResetAt(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	record := pluginapi.UsageRecord{
+		Provider: "codex",
+		AuthID:   "auth-1",
+		Failed:   true,
+		Failure: pluginapi.UsageFailure{
+			StatusCode: 429,
+			Body:       `{"error":{"type":"usage_limit_reached"},"resets_at":1782043200}`,
+		},
+	}
+
+	event, ok := DetectQuotaFailure(record, now)
+	if !ok {
+		t.Fatalf("DetectQuotaFailure did not detect quota failure")
+	}
+	if !event.ResetAt.Equal(time.Unix(1782043200, 0).UTC()) {
+		t.Fatalf("ResetAt = %s, want %s", event.ResetAt, time.Unix(1782043200, 0).UTC())
+	}
+}
+
+func TestDetectQuotaFailureInvalidResetAtUsesResetsInSeconds(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	record := pluginapi.UsageRecord{
+		Provider: "codex",
+		AuthID:   "auth-1",
+		Failed:   true,
+		Failure: pluginapi.UsageFailure{
+			StatusCode: 429,
+			Body:       `{"error":{"type":"usage_limit_reached","resets_at":"not-a-time","resets_in_seconds":120}}`,
+		},
+	}
+
+	event, ok := DetectQuotaFailure(record, now)
+	if !ok {
+		t.Fatalf("DetectQuotaFailure did not detect quota failure")
+	}
+	if !event.ResetAt.Equal(now.Add(120 * time.Second)) {
+		t.Fatalf("ResetAt = %s, want %s", event.ResetAt, now.Add(120*time.Second))
+	}
+}
+
+func TestDetectQuotaFailureInvalidResetFieldsFallsBack(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	record := pluginapi.UsageRecord{
+		Provider: "codex",
+		AuthID:   "auth-1",
+		Failed:   true,
+		Failure: pluginapi.UsageFailure{
+			StatusCode: 429,
+			Body:       `{"error":{"type":"usage_limit_reached","resets_at":"not-a-time","resets_in_seconds":"later"}}`,
+		},
+	}
+
+	event, ok := DetectQuotaFailure(record, now)
+	if !ok {
+		t.Fatalf("DetectQuotaFailure did not detect quota failure")
+	}
+	if !event.ResetAt.Equal(now.Add(2*time.Minute)) || event.Reason != "usage_limit_reached_no_reset" {
+		t.Fatalf("event = %#v", event)
+	}
+}
+
 func TestDetectQuotaFailureUsesFallbackResetWhenMissing(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	record := pluginapi.UsageRecord{
@@ -103,6 +187,22 @@ func TestDetectQuotaFailureUsesFallbackResetWhenMissing(t *testing.T) {
 	}
 	if !event.ResetAt.Equal(now.Add(2*time.Minute)) || event.Reason != "usage_limit_reached_no_reset" {
 		t.Fatalf("event = %#v", event)
+	}
+}
+
+func TestDetectQuotaFailureIgnoresMalformedBody(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	record := pluginapi.UsageRecord{
+		Provider: "codex",
+		AuthID:   "auth-1",
+		Failed:   true,
+		Failure: pluginapi.UsageFailure{
+			StatusCode: 429,
+			Body:       `not-json`,
+		},
+	}
+	if event, ok := DetectQuotaFailure(record, now); ok {
+		t.Fatalf("unexpected event = %#v", event)
 	}
 }
 
