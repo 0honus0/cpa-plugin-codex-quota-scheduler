@@ -139,11 +139,17 @@ func accountAvailable(account AccountState, now time.Time) (bool, string) {
 		if account.Quota.FiveHour == nil {
 			return false, "missing_five_hour_window"
 		}
+		if account.Quota.FiveHour.ResetAt.IsZero() {
+			return false, "missing_five_hour_reset"
+		}
 		if windowExhausted(account.Quota.FiveHour, now) {
 			return false, "five_hour_exhausted"
 		}
 		if account.Quota.LongWindow == nil {
 			return false, "missing_weekly_window"
+		}
+		if account.Quota.LongWindow.ResetAt.IsZero() {
+			return false, "missing_weekly_reset"
 		}
 		if windowExhausted(account.Quota.LongWindow, now) {
 			return false, "weekly_exhausted"
@@ -151,6 +157,9 @@ func accountAvailable(account AccountState, now time.Time) (bool, string) {
 	case AccountFamilyMonthly:
 		if account.Quota.LongWindow == nil {
 			return false, "missing_monthly_window"
+		}
+		if account.Quota.LongWindow.ResetAt.IsZero() {
+			return false, "missing_monthly_reset"
 		}
 		if windowExhausted(account.Quota.LongWindow, now) {
 			return false, "monthly_exhausted"
@@ -181,5 +190,8 @@ func accountSortTime(account AccountState) time.Time {
 }
 
 func windowExhausted(window *QuotaWindow, now time.Time) bool {
-	return window != nil && window.Exhausted
+	if window == nil || !window.Exhausted {
+		return false
+	}
+	return window.ResetAt.IsZero() || window.ResetAt.After(now)
 }

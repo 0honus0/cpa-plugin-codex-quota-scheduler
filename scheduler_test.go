@@ -135,8 +135,10 @@ func TestPickMonthlyExpiryOrderMode(t *testing.T) {
 func TestPickSkipsWeeklyWhenFiveHourExhausted(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	cfg := DefaultConfig()
+	blocked := weeklyAccount("blocked", 5, now.Add(time.Hour), true)
+	blocked.Quota.FiveHour.ResetAt = now.Add(time.Hour)
 	snapshot := StateSnapshot{Config: cfg, Now: now, Accounts: []AccountState{
-		weeklyAccount("blocked", 5, now.Add(time.Hour), true),
+		blocked,
 		weeklyAccount("available", 5, now.Add(2*time.Hour), false),
 	}}
 	req := pluginapi.SchedulerPickRequest{
@@ -185,8 +187,10 @@ func TestPickDelegatesFillFirstWhenNoSelectableAccount(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	cfg := DefaultConfig()
 	cfg.Fallback = FallbackFillFirst
+	blocked := weeklyAccount("blocked", 5, now.Add(time.Hour), true)
+	blocked.Quota.FiveHour.ResetAt = now.Add(time.Hour)
 	snapshot := StateSnapshot{Config: cfg, Now: now, Accounts: []AccountState{
-		weeklyAccount("blocked", 5, now.Add(time.Hour), true),
+		blocked,
 	}}
 
 	decision := PickCodexAccount(requestWithCandidates("blocked"), snapshot, now)
@@ -238,6 +242,100 @@ func TestPickSkipsMonthlyWhenLongWindowExhausted(t *testing.T) {
 	snapshot := StateSnapshot{Config: DefaultConfig(), Now: now, Accounts: []AccountState{
 		blocked,
 		monthlyAccount("available", 5, now.Add(2*time.Hour)),
+	}}
+
+	decision := PickCodexAccount(requestWithCandidates("blocked", "available"), snapshot, now)
+	if decision.AuthID != "available" {
+		t.Fatalf("AuthID = %q, want available", decision.AuthID)
+	}
+}
+
+func TestPickAllowsWeeklyWhenExhaustedFiveHourResetPassed(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	account := weeklyAccount("available", 5, now.Add(24*time.Hour), true)
+	account.Quota.FiveHour.ResetAt = now
+	snapshot := StateSnapshot{Config: DefaultConfig(), Now: now, Accounts: []AccountState{account}}
+
+	decision := PickCodexAccount(requestWithCandidates("available"), snapshot, now)
+	if decision.AuthID != "available" {
+		t.Fatalf("AuthID = %q, want available", decision.AuthID)
+	}
+}
+
+func TestPickAllowsWeeklyWhenExhaustedLongResetPassed(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	account := weeklyAccount("available", 5, now, false)
+	account.Quota.FiveHour.ResetAt = now.Add(5 * time.Hour)
+	account.Quota.LongWindow.Exhausted = true
+	snapshot := StateSnapshot{Config: DefaultConfig(), Now: now, Accounts: []AccountState{account}}
+
+	decision := PickCodexAccount(requestWithCandidates("available"), snapshot, now)
+	if decision.AuthID != "available" {
+		t.Fatalf("AuthID = %q, want available", decision.AuthID)
+	}
+}
+
+func TestPickAllowsMonthlyWhenExhaustedResetPassed(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	account := monthlyAccount("available", 5, now)
+	account.Quota.LongWindow.Exhausted = true
+	snapshot := StateSnapshot{Config: DefaultConfig(), Now: now, Accounts: []AccountState{account}}
+
+	decision := PickCodexAccount(requestWithCandidates("available"), snapshot, now)
+	if decision.AuthID != "available" {
+		t.Fatalf("AuthID = %q, want available", decision.AuthID)
+	}
+}
+
+func TestPickSkipsWeeklyWhenFiveHourResetMissing(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	blocked := weeklyAccount("blocked", 5, now.Add(time.Hour), false)
+	blocked.Quota.FiveHour.ResetAt = time.Time{}
+	snapshot := StateSnapshot{Config: DefaultConfig(), Now: now, Accounts: []AccountState{
+		blocked,
+		weeklyAccount("available", 5, now.Add(2*time.Hour), false),
+	}}
+
+	decision := PickCodexAccount(requestWithCandidates("blocked", "available"), snapshot, now)
+	if decision.AuthID != "available" {
+		t.Fatalf("AuthID = %q, want available", decision.AuthID)
+	}
+}
+
+func TestPickSkipsWeeklyWhenLongResetMissing(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	blocked := weeklyAccount("blocked", 5, now.Add(time.Hour), false)
+	blocked.Quota.LongWindow.ResetAt = time.Time{}
+	snapshot := StateSnapshot{Config: DefaultConfig(), Now: now, Accounts: []AccountState{
+		blocked,
+		weeklyAccount("available", 5, now.Add(2*time.Hour), false),
+	}}
+
+	decision := PickCodexAccount(requestWithCandidates("blocked", "available"), snapshot, now)
+	if decision.AuthID != "available" {
+		t.Fatalf("AuthID = %q, want available", decision.AuthID)
+	}
+}
+
+func TestPickDelegatesWhenMonthlyResetMissing(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	account := monthlyAccount("blocked", 5, now.Add(time.Hour))
+	account.Quota.LongWindow.ResetAt = time.Time{}
+	snapshot := StateSnapshot{Config: DefaultConfig(), Now: now, Accounts: []AccountState{account}}
+
+	decision := PickCodexAccount(requestWithCandidates("blocked"), snapshot, now)
+	if !decision.Handled || decision.DelegateBuiltin != pluginapi.SchedulerBuiltinFillFirst {
+		t.Fatalf("decision = %#v", decision)
+	}
+}
+
+func TestPickSkipsStaleAccount(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	blocked := weeklyAccount("blocked", 5, now.Add(time.Hour), false)
+	blocked.Stale = true
+	snapshot := StateSnapshot{Config: DefaultConfig(), Now: now, Accounts: []AccountState{
+		blocked,
+		weeklyAccount("available", 5, now.Add(2*time.Hour), false),
 	}}
 
 	decision := PickCodexAccount(requestWithCandidates("blocked", "available"), snapshot, now)
