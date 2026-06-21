@@ -33,12 +33,27 @@ typedef struct {
 extern int cliproxyPluginCall(char*, uint8_t*, size_t, cliproxy_buffer*);
 extern void cliproxyPluginFree(void*, size_t);
 extern void cliproxyPluginShutdown(void);
+
+static int call_host_api(cliproxy_host_api* host, const char* method, const uint8_t* request, size_t request_len, cliproxy_buffer* response) {
+	if (host == NULL || host->call == NULL) {
+		return 1;
+	}
+	return host->call(host->host_ctx, method, request, request_len, response);
+}
+
+static void free_host_buffer(cliproxy_host_api* host, void* ptr, size_t len) {
+	if (host != NULL && host->free_buffer != NULL && ptr != NULL) {
+		host->free_buffer(ptr, len);
+	}
+}
 */
 import "C"
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -48,9 +63,11 @@ import (
 )
 
 var (
-	hostAPI       atomic.Pointer[C.cliproxy_host_api]
-	currentConfig atomic.Value
-	globalState   = NewPluginState(DefaultConfig())
+	hostAPI         atomic.Pointer[C.cliproxy_host_api]
+	currentConfig   atomic.Value
+	globalState     = NewPluginState(DefaultConfig())
+	refresherMu     sync.Mutex
+	globalRefresher *QuotaRefresher
 )
 
 type envelope struct {
@@ -76,6 +93,10 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 		return 1
 	}
 	hostAPI.Store(host)
+	refresherMu.Lock()
+	callHostCallback = callHostCallbackABI
+	globalRefresher = NewQuotaRefresher(ABIHostClient{}, globalState, time.Now)
+	refresherMu.Unlock()
 	plugin.abi_version = C.uint32_t(pluginabi.ABIVersion)
 	plugin.call = C.cliproxy_plugin_call_fn(C.cliproxyPluginCall)
 	plugin.free_buffer = C.cliproxy_plugin_free_fn(C.cliproxyPluginFree)
@@ -115,7 +136,14 @@ func cliproxyPluginFree(ptr unsafe.Pointer, len C.size_t) {
 }
 
 //export cliproxyPluginShutdown
-func cliproxyPluginShutdown() {}
+func cliproxyPluginShutdown() {
+	refresherMu.Lock()
+	refresher := globalRefresher
+	refresherMu.Unlock()
+	if refresher != nil {
+		refresher.Stop()
+	}
+}
 
 func handleMethod(method string, request []byte) ([]byte, error) {
 	switch method {
@@ -123,6 +151,7 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 		if err := configure(request); err != nil {
 			return nil, err
 		}
+		startGlobalRefresher()
 		return okEnvelope(PluginRegistration())
 	case pluginabi.MethodSchedulerPick:
 		return handleSchedulerPick(request)
@@ -206,4 +235,67 @@ func writeResponse(response *C.cliproxy_buffer, raw []byte) {
 	}
 	response.ptr = ptr
 	response.len = C.size_t(len(raw))
+}
+
+func startGlobalRefresher() {
+	refresherMu.Lock()
+	refresher := globalRefresher
+	refresherMu.Unlock()
+	if refresher == nil {
+		return
+	}
+	refresher.Start()
+	refresher.RefreshSoon()
+}
+
+func callHostCallbackABI(method string, payload any) (json.RawMessage, error) {
+	host := hostAPI.Load()
+	if host == nil {
+		return nil, fmt.Errorf("host callback %s unavailable", method)
+	}
+	rawPayload, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal host callback payload %s: %w", method, err)
+	}
+
+	cMethod := C.CString(method)
+	defer C.free(unsafe.Pointer(cMethod))
+
+	var response C.cliproxy_buffer
+	var requestPtr *C.uint8_t
+	if len(rawPayload) > 0 {
+		cPayload := C.CBytes(rawPayload)
+		if cPayload == nil {
+			return nil, fmt.Errorf("allocate host callback payload %s", method)
+		}
+		defer C.free(cPayload)
+		requestPtr = (*C.uint8_t)(cPayload)
+	}
+
+	callCode := C.call_host_api(host, cMethod, requestPtr, C.size_t(len(rawPayload)), &response)
+	var rawResponse []byte
+	if response.ptr != nil && response.len > 0 {
+		rawResponse = C.GoBytes(response.ptr, C.int(response.len))
+	}
+	if response.ptr != nil {
+		C.free_host_buffer(host, response.ptr, response.len)
+	}
+	if len(rawResponse) == 0 {
+		return nil, fmt.Errorf("host callback %s returned no response, code=%d", method, int(callCode))
+	}
+
+	var env envelope
+	if err := json.Unmarshal(rawResponse, &env); err != nil {
+		return nil, fmt.Errorf("decode host callback envelope %s: %w", method, err)
+	}
+	if !env.OK {
+		if env.Error != nil {
+			return nil, fmt.Errorf("%s: %s", env.Error.Code, env.Error.Message)
+		}
+		return nil, fmt.Errorf("host callback %s failed", method)
+	}
+	if callCode != 0 {
+		return nil, fmt.Errorf("host callback %s returned code=%d", method, int(callCode))
+	}
+	return append(json.RawMessage(nil), env.Result...), nil
 }
