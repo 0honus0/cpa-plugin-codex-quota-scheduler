@@ -222,9 +222,10 @@ built-in selector mode, so v1 cannot reliably auto-detect whether CPA is set to
 Fill First or Round Robin. The explicit `handle_enabled` switch is the control
 surface.
 
-If the plugin cannot make a confident pick, it returns `Handled=false` and CPA
-falls back to its built-in scheduler. The recommended fallback is CPA's built-in
-Fill First.
+If the plugin is disabled or the request is not for Codex, it returns
+`Handled=false`. If the plugin is enabled for a Codex request but cannot make a
+confident pick from fresh quota state, it delegates to the configured built-in
+fallback. The default and recommended fallback is CPA's built-in Fill First.
 
 ### CPA Priority First
 
@@ -269,7 +270,7 @@ monthly window resets.
 
 Accounts with unknown family or missing quota data are not preferred by the
 plugin. If all candidates in the active CPA priority tier are unknown or stale,
-the plugin should return `Handled=false` so CPA's built-in scheduler can pick.
+the plugin should delegate to the configured built-in fallback.
 
 ### Weekly Ordering
 
@@ -503,8 +504,8 @@ Error categories:
 - network/proxy failure: keep last good state and retry with backoff
 
 If all candidates in the active CPA priority tier have missing or stale quota
-state, the plugin returns `Handled=false` rather than guessing from incomplete
-data.
+state, the plugin delegates to the configured built-in fallback rather than
+guessing from incomplete data.
 
 The management resource must redact tokens, cookies, full authorization headers,
 and raw auth JSON.
