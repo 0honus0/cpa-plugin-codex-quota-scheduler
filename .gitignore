@@ -1,6 +1,7 @@
 # Build outputs
 build/
 dist/
+.worktrees/
 *.exe
 *.dll
 *.so
