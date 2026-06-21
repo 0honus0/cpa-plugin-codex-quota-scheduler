@@ -53,7 +53,7 @@ func RegisterManagement() pluginapi.ManagementRegistrationResponse {
 			},
 		},
 		Routes: []pluginapi.ManagementRoute{
-			{Method: http.MethodGet, Path: managementBasePath + "/status", Menu: "Status", Description: "Scheduler quota status."},
+			{Method: http.MethodGet, Path: managementBasePath + "/status", Description: "Scheduler quota status."},
 			{Method: http.MethodPost, Path: managementBasePath + "/refresh", Description: "Refresh quota status soon."},
 			{Method: http.MethodGet, Path: managementBasePath + "/annotations", Description: "Read quota annotations."},
 			{Method: http.MethodPut, Path: managementBasePath + "/annotations", Description: "Replace quota annotations."},
@@ -199,10 +199,10 @@ func handlePutAnnotations(store *PluginState, req pluginapi.ManagementRequest) p
 		return jsonManagementResponse(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
 	state = NormalizeAnnotationState(state)
-	store.SetAnnotations(state)
-	if err := persistAnnotations(store); err != nil {
+	if err := persistAnnotationState(store, state); err != nil {
 		return jsonManagementResponse(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
+	store.SetAnnotations(state)
 	return jsonManagementResponse(http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -237,10 +237,10 @@ func handlePatchAccountAnnotation(store *PluginState, req pluginapi.ManagementRe
 	}
 	state.Accounts[key] = annotation
 	state = NormalizeAnnotationState(state)
-	store.SetAnnotations(state)
-	if err := persistAnnotations(store); err != nil {
+	if err := persistAnnotationState(store, state); err != nil {
 		return jsonManagementResponse(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
+	store.SetAnnotations(state)
 	return jsonManagementResponse(http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -275,10 +275,10 @@ func handlePatchGroupAnnotation(store *PluginState, req pluginapi.ManagementRequ
 	}
 	state.Groups[key] = annotation
 	state = NormalizeAnnotationState(state)
-	store.SetAnnotations(state)
-	if err := persistAnnotations(store); err != nil {
+	if err := persistAnnotationState(store, state); err != nil {
 		return jsonManagementResponse(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
+	store.SetAnnotations(state)
 	return jsonManagementResponse(http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -316,11 +316,15 @@ func (p annotationPatch) groupKey() string {
 }
 
 func persistAnnotations(store *PluginState) error {
+	return persistAnnotationState(store, store.Annotations())
+}
+
+func persistAnnotationState(store *PluginState, state AnnotationState) error {
 	cfg := store.Config()
 	if cfg.AnnotationStatePath == "" {
 		return nil
 	}
-	return SaveAnnotations(cfg.AnnotationStatePath, store.Annotations())
+	return SaveAnnotations(cfg.AnnotationStatePath, state)
 }
 
 func triggerRefreshSoon() {
@@ -328,8 +332,18 @@ func triggerRefreshSoon() {
 }
 
 func normalizeManagementPath(path string) string {
-	if strings.HasPrefix(path, managementBasePath) {
-		path = strings.TrimPrefix(path, managementBasePath)
+	for _, prefix := range []string{
+		"/v0/management" + managementBasePath,
+		"/v0/resource" + managementBasePath,
+		managementBasePath,
+	} {
+		if path == prefix {
+			return "/"
+		}
+		if strings.HasPrefix(path, prefix+"/") {
+			path = strings.TrimPrefix(path, prefix)
+			break
+		}
 	}
 	if path == "" {
 		return "/"

@@ -22,6 +22,9 @@ func TestManagementRegisterExposesStatusResourceAndRoutes(t *testing.T) {
 	paths := map[string]string{}
 	for _, route := range resp.Routes {
 		paths[route.Method+" "+route.Path] = route.Path
+		if route.Method == http.MethodGet && route.Path == "/plugins/codex-quota-scheduler/status" && route.Menu != "" {
+			t.Fatalf("management status route Menu = %q, want empty", route.Menu)
+		}
 	}
 	for _, key := range []string{
 		"GET /plugins/codex-quota-scheduler/status",
@@ -34,6 +37,80 @@ func TestManagementRegisterExposesStatusResourceAndRoutes(t *testing.T) {
 		if paths[key] == "" {
 			t.Fatalf("missing route %s in %#v", key, paths)
 		}
+	}
+}
+
+func TestManagementRoutesDispatchFullCPAPaths(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	store.UpsertQuota(weeklyAccount("auth-1", 5, now.Add(24*time.Hour), false))
+
+	refreshes := 0
+	previousRefreshSoon := managementRefreshSoon
+	managementRefreshSoon = func() { refreshes++ }
+	t.Cleanup(func() { managementRefreshSoon = previousRefreshSoon })
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		query  url.Values
+		want   int
+	}{
+		{
+			name:   "management status",
+			method: http.MethodGet,
+			path:   "/v0/management/plugins/codex-quota-scheduler/status",
+			query:  url.Values{"format": []string{"json"}},
+			want:   http.StatusOK,
+		},
+		{
+			name:   "resource status",
+			method: http.MethodGet,
+			path:   "/v0/resource/plugins/codex-quota-scheduler/status",
+			query:  url.Values{"format": []string{"json"}},
+			want:   http.StatusOK,
+		},
+		{
+			name:   "management annotations",
+			method: http.MethodGet,
+			path:   "/v0/management/plugins/codex-quota-scheduler/annotations",
+			want:   http.StatusOK,
+		},
+		{
+			name:   "resource annotations",
+			method: http.MethodGet,
+			path:   "/v0/resource/plugins/codex-quota-scheduler/annotations",
+			want:   http.StatusOK,
+		},
+		{
+			name:   "management refresh",
+			method: http.MethodPost,
+			path:   "/v0/management/plugins/codex-quota-scheduler/refresh",
+			want:   http.StatusAccepted,
+		},
+		{
+			name:   "resource refresh",
+			method: http.MethodPost,
+			path:   "/v0/resource/plugins/codex-quota-scheduler/refresh",
+			want:   http.StatusAccepted,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
+				Method: tt.method,
+				Path:   tt.path,
+				Query:  tt.query,
+			}, now)
+			if resp.StatusCode != tt.want {
+				t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, tt.want, resp.Body)
+			}
+		})
+	}
+	if refreshes != 2 {
+		t.Fatalf("refreshes = %d, want 2", refreshes)
 	}
 }
 
@@ -202,5 +279,79 @@ func TestAnnotationsEndpointsNormalizePatchAndPersist(t *testing.T) {
 	state = store.Annotations()
 	if state.Groups["group-1"].Name != "Existing" || state.Groups["group-2"].Name != "Blue" || len(state.Groups["group-2"].Tags) != 1 {
 		t.Fatalf("group annotations = %#v", state.Groups)
+	}
+}
+
+func TestAnnotationsPersistenceFailureDoesNotMutateMemory(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   []byte
+		check  func(t *testing.T, state AnnotationState)
+	}{
+		{
+			name:   "put",
+			method: http.MethodPut,
+			path:   "/plugins/codex-quota-scheduler/annotations",
+			body:   []byte(`{"accounts":{"auth:new":{"alias":"New"}}}`),
+			check: func(t *testing.T, state AnnotationState) {
+				if _, ok := state.Accounts["auth:new"]; ok {
+					t.Fatalf("failed PUT mutated annotations: %#v", state.Accounts)
+				}
+			},
+		},
+		{
+			name:   "patch account",
+			method: http.MethodPatch,
+			path:   "/plugins/codex-quota-scheduler/annotations/account",
+			body:   []byte(`{"key":"auth:new","alias":"New"}`),
+			check: func(t *testing.T, state AnnotationState) {
+				if _, ok := state.Accounts["auth:new"]; ok {
+					t.Fatalf("failed account PATCH mutated annotations: %#v", state.Accounts)
+				}
+			},
+		},
+		{
+			name:   "patch group",
+			method: http.MethodPatch,
+			path:   "/plugins/codex-quota-scheduler/annotations/group",
+			body:   []byte(`{"id":"group-new","name":"New"}`),
+			check: func(t *testing.T, state AnnotationState) {
+				if _, ok := state.Groups["group-new"]; ok {
+					t.Fatalf("failed group PATCH mutated annotations: %#v", state.Groups)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.AnnotationStatePath = filepath.Join(t.TempDir(), "annotations.json") + string(rune(0))
+			store := NewPluginState(cfg)
+			store.SetAnnotations(AnnotationState{
+				Accounts: map[string]AccountAnnotation{
+					"auth:keep": {Alias: "Keep"},
+				},
+				Groups: map[string]GroupAnnotation{
+					"group-keep": {Name: "Keep"},
+				},
+			})
+
+			resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
+				Method: tt.method,
+				Path:   tt.path,
+				Body:   tt.body,
+			}, time.Now())
+			if resp.StatusCode != http.StatusInternalServerError {
+				t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusInternalServerError, resp.Body)
+			}
+			state := store.Annotations()
+			if state.Accounts["auth:keep"].Alias != "Keep" || state.Groups["group-keep"].Name != "Keep" {
+				t.Fatalf("existing annotations changed after failed persistence: %#v", state)
+			}
+			tt.check(t, state)
+		})
 	}
 }
