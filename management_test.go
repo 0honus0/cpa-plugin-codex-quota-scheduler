@@ -81,7 +81,7 @@ func TestManagementRoutesDispatchFullCPAPaths(t *testing.T) {
 			name:   "resource annotations",
 			method: http.MethodGet,
 			path:   "/v0/resource/plugins/codex-quota-scheduler/annotations",
-			want:   http.StatusOK,
+			want:   http.StatusNotFound,
 		},
 		{
 			name:   "management refresh",
@@ -93,7 +93,7 @@ func TestManagementRoutesDispatchFullCPAPaths(t *testing.T) {
 			name:   "resource refresh",
 			method: http.MethodPost,
 			path:   "/v0/resource/plugins/codex-quota-scheduler/refresh",
-			want:   http.StatusAccepted,
+			want:   http.StatusNotFound,
 		},
 	}
 
@@ -109,8 +109,8 @@ func TestManagementRoutesDispatchFullCPAPaths(t *testing.T) {
 			}
 		})
 	}
-	if refreshes != 2 {
-		t.Fatalf("refreshes = %d, want 2", refreshes)
+	if refreshes != 1 {
+		t.Fatalf("refreshes = %d, want 1", refreshes)
 	}
 }
 
@@ -139,6 +139,42 @@ func TestStatusJSONOrdersAccountsBySchedulerOrder(t *testing.T) {
 	}
 	if len(body.Accounts) != 2 || body.Accounts[0].AuthID != "earlier" {
 		t.Fatalf("accounts = %#v, want earlier first", body.Accounts)
+	}
+}
+
+func TestStatusJSONIncludesUnavailableAccountsInSchedulerOrder(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	exhausted := weeklyAccount("exhausted", 5, now.Add(25*time.Hour), true)
+	available := weeklyAccount("available", 5, now.Add(48*time.Hour), false)
+	available.LastSuccessAt = now
+	store.UpsertQuota(exhausted)
+	store.UpsertQuota(available)
+
+	resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
+		Method: "GET",
+		Path:   "/plugins/codex-quota-scheduler/status",
+		Query:  url.Values{"format": []string{"json"}},
+	}, now)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, resp.Body)
+	}
+	var body StatusPayload
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		t.Fatalf("json.Unmarshal returned error: %v; body=%s", err, resp.Body)
+	}
+	if len(body.Accounts) != 2 {
+		t.Fatalf("accounts len = %d, want 2; accounts=%#v", len(body.Accounts), body.Accounts)
+	}
+	if body.Accounts[0].AuthID != "exhausted" || body.Accounts[1].AuthID != "available" {
+		t.Fatalf("accounts = %#v, want exhausted then available", body.Accounts)
+	}
+	if body.Accounts[0].Available || body.Accounts[0].UnavailableReason == "" {
+		t.Fatalf("unavailable account = %#v, want available=false with reason", body.Accounts[0])
+	}
+	if !body.Accounts[1].Available {
+		t.Fatalf("available account = %#v, want available=true", body.Accounts[1])
 	}
 }
 

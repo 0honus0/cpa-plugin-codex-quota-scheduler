@@ -334,7 +334,6 @@ func triggerRefreshSoon() {
 func normalizeManagementPath(path string) string {
 	for _, prefix := range []string{
 		"/v0/management" + managementBasePath,
-		"/v0/resource" + managementBasePath,
 		managementBasePath,
 	} {
 		if path == prefix {
@@ -344,6 +343,9 @@ func normalizeManagementPath(path string) string {
 			path = strings.TrimPrefix(path, prefix)
 			break
 		}
+	}
+	if path == "/v0/resource"+managementBasePath+"/status" {
+		return "/status"
 	}
 	if path == "" {
 		return "/"
