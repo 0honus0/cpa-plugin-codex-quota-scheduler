@@ -42,3 +42,29 @@ func TestPluginStateMarksStale(t *testing.T) {
 		t.Fatalf("snapshot = %#v", snapshot.Accounts)
 	}
 }
+
+func TestPluginStateTemporaryExhaustedIgnoresEmptyAuthID(t *testing.T) {
+	store := NewPluginState(DefaultConfig())
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	store.MarkAccountTemporaryExhausted("", now.Add(time.Hour), "usage exhausted")
+	snapshot := store.Snapshot(now)
+	if len(snapshot.Accounts) != 0 {
+		t.Fatalf("accounts = %#v, want none", snapshot.Accounts)
+	}
+}
+
+func TestPluginStateMarksTemporaryExhaustedByAuthIndex(t *testing.T) {
+	store := NewPluginState(DefaultConfig())
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	resetAt := now.Add(time.Hour)
+	store.UpsertQuota(AccountState{AuthID: "auth-1", AuthIndex: "idx-1"})
+	store.MarkAccountTemporaryExhaustedByAuthIndex("idx-1", resetAt, "usage exhausted")
+	snapshot := store.Snapshot(now)
+	if len(snapshot.Accounts) != 1 {
+		t.Fatalf("accounts = %d, want 1", len(snapshot.Accounts))
+	}
+	account := snapshot.Accounts[0]
+	if !account.TemporaryExhausted || !account.TemporaryResetAt.Equal(resetAt) || account.LastError != "usage exhausted" {
+		t.Fatalf("account = %#v", account)
+	}
+}

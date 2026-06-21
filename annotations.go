@@ -72,7 +72,10 @@ func SaveAnnotations(path string, state AnnotationState) error {
 		return err
 	}
 	raw = append(raw, '\n')
-	return os.WriteFile(path, raw, 0600)
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0600)
 }
 
 func ApplyAnnotations(accounts []AccountState, state AnnotationState) []AccountState {

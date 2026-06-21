@@ -3,6 +3,8 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"testing"
 )
 
@@ -48,5 +50,55 @@ func TestAnnotationStoreRoundTrip(t *testing.T) {
 	}
 	if len(raw) == 0 || raw[0] != '{' {
 		t.Fatalf("annotation file is not JSON object: %q", raw)
+	}
+}
+
+func TestSaveAnnotationsTightensExistingFilePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission bits are not meaningful on Windows")
+	}
+	path := filepath.Join(t.TempDir(), "annotations.json")
+	if err := os.WriteFile(path, []byte("{}"), 0644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := SaveAnnotations(path, AnnotationState{}); err != nil {
+		t.Fatalf("SaveAnnotations returned error: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat returned error: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("mode = %v, want 0600", got)
+	}
+}
+
+func TestLoadAnnotationsMissingFileReturnsNormalizedState(t *testing.T) {
+	state, err := LoadAnnotations(filepath.Join(t.TempDir(), "missing.json"))
+	if err != nil {
+		t.Fatalf("LoadAnnotations returned error: %v", err)
+	}
+	if state.Accounts == nil {
+		t.Fatal("Accounts map is nil")
+	}
+	if state.Groups == nil {
+		t.Fatal("Groups map is nil")
+	}
+}
+
+func TestNormalizeAnnotationStateCleansTags(t *testing.T) {
+	state := NormalizeAnnotationState(AnnotationState{
+		Accounts: map[string]AccountAnnotation{
+			"auth:auth-1": {Tags: []string{" team-a ", "", "team-a", "shared"}},
+		},
+		Groups: map[string]GroupAnnotation{
+			"team-a": {Tags: []string{" team ", "team", "weekly"}},
+		},
+	})
+	if got, want := state.Accounts["auth:auth-1"].Tags, []string{"team-a", "shared"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("account tags = %#v, want %#v", got, want)
+	}
+	if got, want := state.Groups["team-a"].Tags, []string{"team", "weekly"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("group tags = %#v, want %#v", got, want)
 	}
 }

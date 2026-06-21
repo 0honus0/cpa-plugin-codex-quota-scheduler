@@ -58,16 +58,33 @@ func (s *PluginState) UpsertQuota(account AccountState) {
 }
 
 func (s *PluginState) MarkAccountTemporaryExhausted(authID string, resetAt time.Time, reason string) {
+	if authID == "" {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	account, ok := s.accounts["auth:"+authID]
 	if !ok {
 		account = AccountState{AuthID: authID}
 	}
-	account.TemporaryExhausted = true
-	account.TemporaryResetAt = resetAt
-	account.LastError = reason
+	markTemporaryExhausted(&account, resetAt, reason)
 	s.accounts["auth:"+authID] = account
+}
+
+func (s *PluginState) MarkAccountTemporaryExhaustedByAuthIndex(authIndex string, resetAt time.Time, reason string) {
+	if authIndex == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, account := range s.accounts {
+		if account.AuthIndex != authIndex {
+			continue
+		}
+		markTemporaryExhausted(&account, resetAt, reason)
+		s.accounts[key] = account
+		return
+	}
 }
 
 func (s *PluginState) RecordSelection(authID, reason string) {
@@ -107,6 +124,12 @@ func accountStateKey(account AccountState) string {
 		return key
 	}
 	return ""
+}
+
+func markTemporaryExhausted(account *AccountState, resetAt time.Time, reason string) {
+	account.TemporaryExhausted = true
+	account.TemporaryResetAt = resetAt
+	account.LastError = reason
 }
 
 func cloneAnnotationState(state AnnotationState) AnnotationState {
