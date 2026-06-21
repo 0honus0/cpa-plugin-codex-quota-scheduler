@@ -127,7 +127,7 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 	case pluginabi.MethodSchedulerPick:
 		return handleSchedulerPick(request)
 	case pluginabi.MethodUsageHandle:
-		return okEnvelope(map[string]any{})
+		return handleUsageHandle(request)
 	case pluginabi.MethodManagementRegister:
 		return okEnvelope(pluginapi.ManagementRegistrationResponse{})
 	case pluginabi.MethodManagementHandle:
@@ -170,6 +170,17 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 		DelegateBuiltin: decision.DelegateBuiltin,
 		Handled:         decision.Handled,
 	})
+}
+
+func handleUsageHandle(raw []byte) ([]byte, error) {
+	var record pluginapi.UsageRecord
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &record); err != nil {
+			return nil, err
+		}
+	}
+	HandleUsageFeedback(globalState, record, time.Now())
+	return okEnvelope(map[string]any{})
 }
 
 func okEnvelope(v any) ([]byte, error) {
