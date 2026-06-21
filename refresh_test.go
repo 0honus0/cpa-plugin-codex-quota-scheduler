@@ -325,6 +325,101 @@ func TestRefreshOnceHTTPNon2xxRecordsRedactedErrorWithoutQuotaSuccess(t *testing
 	}
 }
 
+func TestRefreshOnceFailurePreservesPriorSuccessfulQuota(t *testing.T) {
+	firstNow := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	secondNow := firstNow.Add(2 * time.Minute)
+	currentNow := firstNow
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{
+			ID: "auth-1", AuthIndex: "idx-1", Provider: "codex",
+		}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"access-1","id_token":"` + idToken + `"}`),
+		},
+		httpBody: []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+	}
+	store := NewPluginState(DefaultConfig())
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return currentNow })
+	if err := refresher.RefreshOnce(); err != nil {
+		t.Fatalf("first RefreshOnce returned error: %v", err)
+	}
+	before := accountByAuthID(t, store.Snapshot(firstNow), "auth-1")
+	if before.Quota.FiveHour == nil || before.LastSuccessAt.IsZero() || before.Family != AccountFamilyWeekly {
+		t.Fatalf("initial refresh did not populate quota: %#v", before)
+	}
+
+	currentNow = secondNow
+	host.httpStatus = http.StatusUnauthorized
+	host.httpBody = []byte(`{"Authorization":"Bearer leaked-token","Cookie":"session=leaked-cookie","access_token" : "leaked-access"}`)
+	if err := refresher.RefreshOnce(); err != nil {
+		t.Fatalf("second RefreshOnce returned error: %v", err)
+	}
+
+	after := accountByAuthID(t, store.Snapshot(secondNow), "auth-1")
+	if after.LastError == "" {
+		t.Fatalf("LastError empty, want failed refresh metadata")
+	}
+	for _, leaked := range []string{"leaked-token", "leaked-cookie", "leaked-access"} {
+		if strings.Contains(after.LastError, leaked) {
+			t.Fatalf("LastError leaked %q: %q", leaked, after.LastError)
+		}
+	}
+	if after.LastSuccessAt != before.LastSuccessAt {
+		t.Fatalf("LastSuccessAt = %v, want preserved %v", after.LastSuccessAt, before.LastSuccessAt)
+	}
+	if after.Family != before.Family {
+		t.Fatalf("Family = %q, want preserved %q", after.Family, before.Family)
+	}
+	if after.Quota.FiveHour == nil || before.Quota.FiveHour == nil || *after.Quota.FiveHour.UsedPercent != *before.Quota.FiveHour.UsedPercent {
+		t.Fatalf("quota not preserved after failure: before=%#v after=%#v", before.Quota.FiveHour, after.Quota.FiveHour)
+	}
+}
+
+func TestRefreshOnceNon2xxStoresBoundedSanitizedSummary(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	longBody := strings.Repeat("x", 400)
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{
+			ID: "auth-1", AuthIndex: "idx-1", Provider: "codex",
+		}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"access-1","id_token":"` + idToken + `"}`),
+		},
+		httpStatus: http.StatusForbidden,
+		httpBody: []byte(`{
+			"Authorization": "Bearer json-secret",
+			"Cookie": "session=json-cookie",
+			"ACCESS_TOKEN" : "json-access",
+			"id_token": "json-id-token",
+			"raw": "Authorization: Bearer raw-secret Cookie: session=raw-cookie access_token = raw-access",
+			"detail": "` + longBody + `"
+		}`),
+	}
+	store := NewPluginState(DefaultConfig())
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	if err := refresher.RefreshOnce(); err != nil {
+		t.Fatalf("RefreshOnce returned error: %v", err)
+	}
+
+	account := accountByAuthID(t, store.Snapshot(now), "auth-1")
+	if account.LastError == "" {
+		t.Fatal("LastError empty, want non-2xx summary")
+	}
+	for _, leaked := range []string{"json-secret", "json-cookie", "json-access", "json-id-token", "raw-secret", "raw-cookie", "raw-access"} {
+		if strings.Contains(account.LastError, leaked) {
+			t.Fatalf("LastError leaked %q: %q", leaked, account.LastError)
+		}
+	}
+	if strings.Contains(account.LastError, longBody) {
+		t.Fatalf("LastError contains raw long body: %q", account.LastError)
+	}
+	if len(account.LastError) > 360 {
+		t.Fatalf("LastError length = %d, want bounded summary: %q", len(account.LastError), account.LastError)
+	}
+}
+
 func TestRefreshOnceContinuesAfterOneAccountFails(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	idToken2 := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-2"})
@@ -411,6 +506,50 @@ func TestRefreshSoonDoesNotOverlapRefreshes(t *testing.T) {
 	}
 	if host.maxActiveHTTP() != 1 {
 		t.Fatalf("max active HTTP = %d, want 1", host.maxActiveHTTP())
+	}
+	host.assertNoHeaderErrors(t)
+}
+
+func TestStopWaitsForActiveRefreshSoon(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{
+			ID: "auth-1", AuthIndex: "idx-1", Provider: "codex",
+		}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"access-1","id_token":"` + idToken + `"}`),
+		},
+		httpBody:  []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+		doStarted: make(chan struct{}, 1),
+		releaseDo: make(chan struct{}),
+	}
+	store := NewPluginState(DefaultConfig())
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+
+	refresher.RefreshSoon()
+	select {
+	case <-host.doStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for refresh to start")
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		refresher.Stop()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned while refresh was still blocked")
+	case <-time.After(50 * time.Millisecond):
+	}
+	host.releaseDo <- struct{}{}
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not return after refresh completed")
 	}
 	host.assertNoHeaderErrors(t)
 }

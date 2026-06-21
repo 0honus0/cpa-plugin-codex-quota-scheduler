@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +14,14 @@ import (
 )
 
 const quotaUserAgent = "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal"
+
+const maxErrorBodySummaryLen = 220
+
+var (
+	rawSecretPattern   = regexp.MustCompile(`(?i)\b((?:access[_-]?token|id[_-]?token|refresh[_-]?token|authorization|cookie|api[_-]?key|session[_-]?token)\s*[:=]\s*)(?:bearer\s+)?[^\s,}"']+`)
+	secretFieldPattern = regexp.MustCompile(`(?i)((?:"?(?:access[_-]?token|id[_-]?token|refresh[_-]?token|authorization|cookie|api[_-]?key|session[_-]?token)"?)\s*[:=]\s*)("[^"]*"|[^\s,}\]]+)`)
+	bearerPattern      = regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+/=-]+`)
+)
 
 var callHostCallback = func(method string, payload any) (json.RawMessage, error) {
 	return nil, fmt.Errorf("host callback %s unavailable", method)
@@ -35,8 +44,10 @@ type QuotaRefresher struct {
 	mu         sync.Mutex
 	running    bool
 	refreshing bool
+	stopping   bool
 	stop       chan struct{}
 	done       chan struct{}
+	wg         sync.WaitGroup
 }
 
 func NewQuotaRefresher(host HostClient, state *PluginState, now func() time.Time) *QuotaRefresher {
@@ -75,6 +86,7 @@ func (r *QuotaRefresher) Start() {
 	r.stop = stop
 	r.done = done
 	r.running = true
+	r.stopping = false
 	r.mu.Unlock()
 
 	go func() {
@@ -85,7 +97,6 @@ func (r *QuotaRefresher) Start() {
 			r.mu.Unlock()
 		}()
 
-		r.RefreshSoon()
 		for {
 			interval := r.state.Config().QuotaRefreshInterval
 			timer := time.NewTimer(interval)
@@ -104,25 +115,30 @@ func (r *QuotaRefresher) Start() {
 
 func (r *QuotaRefresher) Stop() {
 	r.mu.Lock()
-	if !r.running {
-		r.mu.Unlock()
-		return
-	}
+	r.stopping = true
+	running := r.running
 	stop := r.stop
 	done := r.done
+	if running {
+		r.running = false
+	}
 	r.mu.Unlock()
 
-	close(stop)
-	<-done
+	if running {
+		close(stop)
+		<-done
+	}
+	r.wg.Wait()
 }
 
 func (r *QuotaRefresher) RefreshSoon() {
 	r.mu.Lock()
-	if r.refreshing {
+	if r.refreshing || r.stopping {
 		r.mu.Unlock()
 		return
 	}
 	r.refreshing = true
+	r.wg.Add(1)
 	r.mu.Unlock()
 
 	go func() {
@@ -130,6 +146,7 @@ func (r *QuotaRefresher) RefreshSoon() {
 			r.mu.Lock()
 			r.refreshing = false
 			r.mu.Unlock()
+			r.wg.Done()
 		}()
 		if err := r.RefreshOnce(); err != nil {
 			r.host.Log("error", "quota refresh failed", map[string]any{"error": redactSecrets(err.Error())})
@@ -142,15 +159,13 @@ func (r *QuotaRefresher) refreshAuth(auth pluginapi.HostAuthFileEntry) {
 
 	authResp, err := r.host.GetAuth(auth.AuthIndex)
 	if err != nil {
-		account.LastError = redactSecrets(fmt.Sprintf("get auth: %v", err))
-		r.state.UpsertQuota(account)
+		r.upsertRefreshFailure(account, redactSecrets(fmt.Sprintf("get auth: %v", err)))
 		return
 	}
 
 	credentials, err := ExtractCodexCredentials(authResp.JSON)
 	if err != nil {
-		account.LastError = redactWithCredentials(fmt.Sprintf("extract credentials: %v", err), credentials)
-		r.state.UpsertQuota(account)
+		r.upsertRefreshFailure(account, redactWithCredentials(fmt.Sprintf("extract credentials: %v", err), credentials))
 		return
 	}
 	account.ChatGPTAccountID = credentials.ChatGPTAccountID
@@ -168,20 +183,18 @@ func (r *QuotaRefresher) refreshAuth(auth pluginapi.HostAuthFileEntry) {
 	}
 	resp, err := r.host.Do(req)
 	if err != nil {
-		account.LastError = redactWithCredentials(fmt.Sprintf("quota request: %v", err), credentials)
-		r.state.UpsertQuota(account)
+		r.upsertRefreshFailure(account, redactWithCredentials(fmt.Sprintf("quota request: %v", err), credentials))
 		return
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		account.LastError = redactWithCredentials(fmt.Sprintf("quota request returned status %d: %s", resp.StatusCode, string(resp.Body)), credentials)
-		r.state.UpsertQuota(account)
+		message := fmt.Sprintf("quota request returned status %d: response body: %s", resp.StatusCode, sanitizedBodySummary(resp.Body))
+		r.upsertRefreshFailure(account, redactWithCredentials(message, credentials))
 		return
 	}
 
 	quota, err := ParseCodexUsagePayload(resp.Body, r.now())
 	if err != nil {
-		account.LastError = redactWithCredentials(fmt.Sprintf("parse quota: %v", err), credentials)
-		r.state.UpsertQuota(account)
+		r.upsertRefreshFailure(account, redactWithCredentials(fmt.Sprintf("parse quota: %v", err), credentials))
 		return
 	}
 	account.Quota = quota
@@ -189,6 +202,37 @@ func (r *QuotaRefresher) refreshAuth(auth pluginapi.HostAuthFileEntry) {
 	account.LastError = ""
 	account.LastSuccessAt = r.now()
 	r.state.UpsertQuota(account)
+}
+
+func (r *QuotaRefresher) upsertRefreshFailure(account AccountState, message string) {
+	merged := r.mergeExistingAccount(account)
+	merged.LastRefreshAt = account.LastRefreshAt
+	merged.LastError = message
+	r.state.UpsertQuota(merged)
+}
+
+func (r *QuotaRefresher) mergeExistingAccount(account AccountState) AccountState {
+	key := accountStateKey(account)
+	if key == "" {
+		return account
+	}
+	for _, existing := range r.state.Snapshot(r.now()).Accounts {
+		if accountStateKey(existing) != key {
+			continue
+		}
+		merged := existing
+		merged.AuthID = account.AuthID
+		merged.AuthIndex = account.AuthIndex
+		merged.DisplayName = account.DisplayName
+		merged.Email = account.Email
+		merged.Provider = account.Provider
+		merged.Priority = account.Priority
+		if account.ChatGPTAccountID != "" {
+			merged.ChatGPTAccountID = account.ChatGPTAccountID
+		}
+		return merged
+	}
+	return account
 }
 
 func accountStateFromAuth(auth pluginapi.HostAuthFileEntry, now time.Time) AccountState {
@@ -221,30 +265,22 @@ func redactWithCredentials(message string, credentials CodexCredentials) string 
 }
 
 func redactSecrets(message string) string {
-	fields := []string{"access_token", "id_token", "refresh_token"}
-	for _, field := range fields {
-		for {
-			key := `"` + field + `":"`
-			start := strings.Index(message, key)
-			if start < 0 {
-				break
-			}
-			valueStart := start + len(key)
-			valueEnd := strings.Index(message[valueStart:], `"`)
-			if valueEnd < 0 {
-				break
-			}
-			message = message[:valueStart] + "[redacted]" + message[valueStart+valueEnd:]
-		}
-	}
-	if idx := strings.Index(message, "Bearer "); idx >= 0 {
-		end := idx + len("Bearer ")
-		for end < len(message) && message[end] != ' ' && message[end] != '\n' && message[end] != '\t' && message[end] != '\r' {
-			end++
-		}
-		message = message[:idx+len("Bearer ")] + "[redacted]" + message[end:]
-	}
+	message = rawSecretPattern.ReplaceAllString(message, `${1}[redacted]`)
+	message = secretFieldPattern.ReplaceAllString(message, `${1}"[redacted]"`)
+	message = bearerPattern.ReplaceAllString(message, "Bearer [redacted]")
 	return message
+}
+
+func sanitizedBodySummary(body []byte) string {
+	if len(body) == 0 {
+		return "<empty>"
+	}
+	summary := redactSecrets(string(body))
+	summary = strings.Join(strings.Fields(summary), " ")
+	if len(summary) > maxErrorBodySummaryLen {
+		summary = summary[:maxErrorBodySummaryLen] + "..."
+	}
+	return summary
 }
 
 func (ABIHostClient) ListAuths() ([]pluginapi.HostAuthFileEntry, error) {
