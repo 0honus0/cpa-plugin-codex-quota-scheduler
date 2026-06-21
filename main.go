@@ -40,6 +40,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
@@ -49,6 +50,7 @@ import (
 var (
 	hostAPI       atomic.Pointer[C.cliproxy_host_api]
 	currentConfig atomic.Value
+	globalState   = NewPluginState(DefaultConfig())
 )
 
 type envelope struct {
@@ -123,7 +125,7 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 		}
 		return okEnvelope(PluginRegistration())
 	case pluginabi.MethodSchedulerPick:
-		return okEnvelope(pluginapi.SchedulerPickResponse{Handled: false})
+		return handleSchedulerPick(request)
 	case pluginabi.MethodUsageHandle:
 		return okEnvelope(map[string]any{})
 	case pluginabi.MethodManagementRegister:
@@ -147,7 +149,27 @@ func configure(raw []byte) error {
 		return err
 	}
 	currentConfig.Store(cfg)
+	globalState.ReplaceConfig(cfg)
 	return nil
+}
+
+func handleSchedulerPick(raw []byte) ([]byte, error) {
+	var req pluginapi.SchedulerPickRequest
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, err
+		}
+	}
+	now := time.Now()
+	decision := PickCodexAccount(req, globalState.Snapshot(now), now)
+	if decision.AuthID != "" {
+		globalState.RecordSelection(decision.AuthID, decision.Reason)
+	}
+	return okEnvelope(pluginapi.SchedulerPickResponse{
+		AuthID:          decision.AuthID,
+		DelegateBuiltin: decision.DelegateBuiltin,
+		Handled:         decision.Handled,
+	})
 }
 
 func okEnvelope(v any) ([]byte, error) {
