@@ -91,6 +91,33 @@ func TestStatusJSONIncludesSchedulerSummary(t *testing.T) {
 	}
 }
 
+func TestStatusJSONIncludesEmptyLastSelectionFields(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+
+	resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
+		Method: "GET",
+		Path:   "/plugins/codex-quota-scheduler/status",
+		Query:  url.Values{"format": []string{"json"}},
+	}, now)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, resp.Body)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		t.Fatalf("json.Unmarshal returned error: %v; body=%s", err, resp.Body)
+	}
+	lastSelected, ok := body["last_selected"]
+	if !ok || lastSelected != "" {
+		t.Fatalf("last_selected = %#v, present=%t; body=%s", lastSelected, ok, resp.Body)
+	}
+	lastReason, ok := body["last_reason"]
+	if !ok || lastReason != "" {
+		t.Fatalf("last_reason = %#v, present=%t; body=%s", lastReason, ok, resp.Body)
+	}
+}
+
 func TestStatusHTMLRedactsSensitiveFieldsAndEscapesUserFields(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	store := NewPluginState(DefaultConfig())

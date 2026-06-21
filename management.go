@@ -21,8 +21,8 @@ type StatusPayload struct {
 	NextAuthID    string          `json:"next_auth_id"`
 	MonthlyMode   MonthlyMode     `json:"monthly_mode"`
 	HandleEnabled bool            `json:"handle_enabled"`
-	LastSelected  string          `json:"last_selected,omitempty"`
-	LastReason    string          `json:"last_reason,omitempty"`
+	LastSelected  string          `json:"last_selected"`
+	LastReason    string          `json:"last_reason"`
 	Accounts      []StatusAccount `json:"accounts"`
 }
 
