@@ -4,13 +4,23 @@ Date: 2026-06-21
 
 ## Goal
 
-Build a CLIProxyAPI scheduler plugin for Codex accounts that keeps Fill First's
-simple preference for deterministic account choice, but avoids burning one
-account to exhaustion while other accounts remain unused.
+Build a CLIProxyAPI scheduler plugin for Codex accounts that behaves like an
+optimized Fill First scheduler. The plugin should avoid burning one account to
+exhaustion while other accounts with earlier quota expiry remain unused.
+
+The v1 scheduler is intentionally rule-based, not score-based:
+
+1. Respect CPA's configured auth priority first.
+2. Inside the selected CPA priority tier, classify accounts as weekly-limited or
+   monthly-limited.
+3. Exclude accounts that are unavailable because a required quota window is
+   exhausted.
+4. Sort the remaining accounts by the relevant reset or expiry time according to
+   the configured monthly mode.
 
 The plugin must work without modifying CLIProxyAPI core. It should read Codex
-quota information through host callbacks, keep quota state in plugin memory, and
-use that state to score scheduler candidates.
+quota information through host callbacks, keep quota state inside the plugin,
+and use that state to classify, filter, and order scheduler candidates.
 
 ## Plugin Name And Workspace
 
@@ -93,11 +103,12 @@ Each account stores:
 - `auth_index`
 - display name or email
 - provider
+- CPA auth priority
 - plan type
 - account type: weekly, monthly, unknown
 - quota windows: 5h, weekly, monthly, code-review, additional
 - remaining percentage and used percentage
-- reset time
+- reset or expiry time used by scheduler ordering
 - rate-limit reset credits count
 - last refresh time
 - last successful refresh time
@@ -130,7 +141,6 @@ Group metadata stores:
 - notes
 - tags
 - optional color
-- optional scheduling hint
 
 Annotations are separate from quota state. They do not affect the upstream
 credential unless the user explicitly chooses a future auth-file sync feature.
@@ -179,10 +189,8 @@ Annotation data model:
 }
 ```
 
-Scheduling behavior in v1 remains account-scored. Groups are used for display,
-filtering, and aggregate summaries. The score engine reads group metadata only
-for optional future policy hooks, such as group-level drain balancing or
-group-level backup preference.
+Scheduling behavior in v1 ignores annotation metadata. Groups, tags, aliases,
+and notes are used only for display, filtering, and aggregate summaries.
 
 ## Refresh Model
 
@@ -199,60 +207,127 @@ network calls; they read the current cache only.
 
 If quota refresh fails for one account, that account keeps its last good quota
 state until `stale_after` expires. After that, the account is treated as stale
-and receives a conservative score.
+and is not selected by the plugin unless every candidate in the relevant CPA
+priority tier lacks usable fresh quota data.
 
 ## Scheduler Behavior
 
-The scheduler only handles Codex candidates. Non-Codex requests return
-`Handled=false` so CPA can continue with its normal scheduling.
+The scheduler only handles Codex candidates when `handle_enabled` is true.
+Non-Codex requests return `Handled=false` so CPA can continue with its normal
+scheduling.
 
-Candidate filtering:
+The plugin is intended to be enabled when the user wants optimized Fill First
+behavior. Current CPA scheduler plugin requests do not expose the active CPA
+built-in selector mode, so v1 cannot reliably auto-detect whether CPA is set to
+Fill First or Round Robin. The explicit `handle_enabled` switch is the control
+surface.
 
-- Ignore disabled or non-active candidates already filtered out by CPA if they
-  still appear.
-- Ignore candidates with internal quota state marked exhausted and reset time in
-  the future, unless every candidate is exhausted.
-- Prefer candidates with fresh quota data.
-- Fall back to the configured builtin scheduler when quota data is unavailable.
+If the plugin cannot make a confident pick, it returns `Handled=false` and CPA
+falls back to its built-in scheduler. The recommended fallback is CPA's built-in
+Fill First.
 
-Default account family policy:
+### CPA Priority First
 
-- Weekly-limit accounts are primary.
-- Monthly-limit accounts are backup.
-- If a monthly account expires or resets earlier than all weekly accounts'
-  weekly reset times, monthly accounts become primary until they are no longer
-  urgent or are exhausted.
+CPA auth priority has higher precedence than all plugin ordering rules.
 
-The initial scoring formula is intentionally simple and configurable:
+The plugin groups scheduler candidates by `SchedulerAuthCandidate.Priority`.
+Higher numeric priority wins. It evaluates the highest priority tier first. It
+only considers a lower priority tier when every candidate in the higher tier is
+unavailable, stale without usable quota data, unknown, or otherwise not
+selectable by the plugin.
+
+This preserves the same high-level semantics as CPA's built-in schedulers:
 
 ```text
-score =
-  family_score
-  + five_hour_remaining_weight * five_hour_remaining
-  + long_window_remaining_weight * long_window_remaining
-  + reset_urgency_weight * reset_urgency
-  + freshness_weight * freshness
-  + priority_weight * normalized_cpa_priority
-  - stale_penalty
-  - recent_failure_penalty
+priority 10 candidates
+  -> plugin ordering rules
+
+priority 5 candidates
+  -> considered only if priority 10 has no selectable account
 ```
 
-Where:
+### Account Availability
 
-- `five_hour_remaining` is 0-1.
-- `long_window_remaining` is weekly or monthly remaining, 0-1.
-- `reset_urgency` increases when a long window reset or subscription expiry is
-  near and there is still quota to consume.
-- `freshness` decreases as quota cache ages.
-- account family policy can override the final candidate pool before scoring.
+Weekly-limited accounts are available only when both required windows are
+available:
 
-Ties are broken by:
+```text
+5h remaining > 0 && weekly remaining > 0
+```
 
-1. higher score
-2. lower current usage for the account family
-3. CPA priority
-4. stable round-robin cursor
-5. stable auth ID ordering
+If either the 5-hour quota or weekly quota is exhausted, the account is
+unavailable until the exhausted window resets.
+
+Monthly-limited accounts are available when monthly quota remains:
+
+```text
+monthly remaining > 0
+```
+
+If a monthly account's monthly quota is exhausted, it is unavailable until the
+monthly window resets.
+
+Accounts with unknown family or missing quota data are not preferred by the
+plugin. If all candidates in the active CPA priority tier are unknown or stale,
+the plugin should return `Handled=false` so CPA's built-in scheduler can pick.
+
+### Weekly Ordering
+
+Within the active CPA priority tier, available weekly accounts are ordered by
+their weekly reset or expiry time:
+
+```text
+earlier weekly reset/expiry first
+```
+
+The 5-hour window is an availability gate only. It does not decide the main
+ordering among weekly accounts.
+
+### Monthly Modes
+
+The plugin supports two monthly scheduling modes.
+
+#### `priority`
+
+Monthly accounts are preferred inside the active CPA priority tier.
+
+Ordering:
+
+1. Available monthly accounts, sorted by monthly reset/expiry time.
+2. Available weekly accounts, sorted by weekly reset/expiry time.
+
+This mode is for users who intentionally want to consume monthly-limited
+accounts before weekly-limited accounts at the same CPA priority.
+
+#### `expiry_order`
+
+Weekly and monthly accounts are merged into one ordered list inside the active
+CPA priority tier.
+
+Ordering:
+
+```text
+earlier long-window reset/expiry first
+```
+
+For weekly accounts, the long-window time is the weekly reset/expiry time. For
+monthly accounts, the long-window time is the monthly reset/expiry time.
+
+This mode naturally handles cases where a monthly account expires earlier than
+weekly accounts and cases where a weekly account expires earlier than monthly
+accounts. No separate special override is needed.
+
+### Tie Breakers
+
+When two selectable accounts have the same CPA priority, same account family
+ordering position, and same reset/expiry time, ties are broken by:
+
+1. CPA auth priority, already equal in the current tier.
+2. provider-specific candidate readiness from CPA status.
+3. stable `auth_id` ordering.
+
+No remaining-usage percentage is used as a tie breaker in v1. Remaining usage is
+only used to decide whether a quota window is available.
 
 ## Failure Feedback
 
@@ -273,8 +348,8 @@ Quota-like failure signals include:
 
 When a signal has reset timing:
 
-- mark the relevant account exhausted
-- set the account or window reset time from the response
+- mark the relevant account or quota window exhausted
+- set the reset time from the response when available
 - force a refresh soon after the reset time
 
 When a signal has no reset timing:
@@ -297,13 +372,13 @@ changes.
 The plugin registration metadata exposes `ConfigFields` so CPA Management Center
 can render basic plugin configuration:
 
+- `handle_enabled`
 - `quota_refresh_interval`
 - `stale_after`
-- `monthly_policy`: `backup`, `prefer_when_expiring`, `prefer`
-- `fallback`: `fill-first`, `round-robin`
+- `monthly_mode`: `priority`, `expiry_order`
+- `fallback`: `fill-first`
 - `enable_usage_feedback`
 - `annotation_state_path`
-- optional scoring weights
 
 The plugin still validates config in `plugin.register` and
 `plugin.reconfigure`; UI fields are not the source of truth.
@@ -316,25 +391,33 @@ The plugin registers a resource such as:
 /v0/resource/plugins/codex-quota-scheduler/status
 ```
 
+The resource displays the current scheduler priority order. Opening the page
+should make it immediately clear which account would be selected if a Codex
+request arrived at that moment.
+
+The primary account list is sorted by the plugin's effective scheduling order,
+not by account name, CPA auth ID, or original config order.
+
 The resource displays:
 
-- account list
+- ordered account list with the next selected account at the top
+- CPA priority tier
 - account alias, notes, tags, and group
 - group list with aggregate quota status
 - plan type
 - account family: weekly, monthly, unknown
 - 5h, weekly, monthly windows
-- remaining/used percentage
-- reset time
+- remaining/used percentage for display
+- reset or expiry time used for ordering
+- availability state and unavailable reason
 - cache age and stale state
-- current score and score components
+- monthly mode and effective config
 - last selected account and selection reason
 - last refresh error, redacted
 - manual refresh action
 - account annotation editor
 - group editor
 - tag filter and group filter
-- effective config
 
 This is enough for day-to-day operation. A native quota page inside CPA
 Management Center can be added later, but it is not required for v1.
@@ -366,9 +449,10 @@ plugins:
   configs:
     codex-quota-scheduler:
       enabled: true
+      handle_enabled: true
       quota_refresh_interval: 60s
       stale_after: 10m
-      monthly_policy: backup
+      monthly_mode: expiry_order
       fallback: fill-first
       enable_usage_feedback: true
       annotation_state_path: ""
@@ -381,9 +465,10 @@ plugins:
   configs:
     codex-quota-scheduler:
       enabled: true
+      handle_enabled: true
       quota_refresh_interval: 60s
       stale_after: 10m
-      monthly_policy: prefer_when_expiring
+      monthly_mode: priority
       fallback: fill-first
       enable_usage_feedback: true
       max_refresh_concurrency: 4
@@ -401,14 +486,6 @@ plugins:
             notes: Keep for backend work
             tags: [team-a, plus]
             group_id: team-a
-      weights:
-        five_hour_remaining: 45
-        long_window_remaining: 35
-        reset_urgency: 15
-        freshness: 5
-        priority: 2
-        stale_penalty: 30
-        recent_failure_penalty: 40
 ```
 
 ## Error Handling
@@ -417,13 +494,17 @@ Refresh errors do not block scheduler picks.
 
 Error categories:
 
-- missing auth index: account cannot be queried; fallback score only
-- missing access token: account cannot be queried; fallback score only
-- missing ChatGPT account ID: account cannot be queried; fallback score only
+- missing auth index: account cannot be queried; fallback ordering only
+- missing access token: account cannot be queried; fallback ordering only
+- missing ChatGPT account ID: account cannot be queried; fallback ordering only
 - upstream unauthorized: mark refresh error, let CPA auth lifecycle handle auth
-- upstream forbidden/payment issue: lower score and show diagnostic
+- upstream forbidden/payment issue: mark account unavailable until refreshed
 - upstream quota response invalid: keep last good state, mark stale later
 - network/proxy failure: keep last good state and retry with backoff
+
+If all candidates in the active CPA priority tier have missing or stale quota
+state, the plugin returns `Handled=false` rather than guessing from incomplete
+data.
 
 The management resource must redact tokens, cookies, full authorization headers,
 and raw auth JSON.
@@ -436,8 +517,12 @@ Unit tests:
 - JWT/id token account ID extraction
 - quota payload parsing
 - window classification: 5h, weekly, monthly
-- scoring
-- monthly policy
+- account family classification
+- availability rules for weekly and monthly accounts
+- CPA priority tier selection
+- weekly ordering by weekly reset/expiry
+- monthly `priority` mode
+- monthly `expiry_order` mode
 - stale cache behavior
 - quota-like failure detection
 - annotation key resolution
@@ -448,14 +533,17 @@ Integration-style tests:
 
 - fake host callbacks for auth list/get/http
 - scheduler pick with mixed weekly/monthly accounts
+- scheduler pick preserves CPA priority before plugin ordering
 - usage feedback immediately changes next pick
 - management resource returns redacted status
+- management status list matches effective scheduler order
 - management routes edit account alias, notes, tags, and groups
 
 Manual verification:
 
 - run plugin against local CPA with several Codex accounts
 - compare displayed quota with CPA Management Center
+- confirm UI top account matches the account selected by scheduler
 - simulate 429 usage-limit failure and confirm the next pick avoids that account
 
 ## Open Questions
