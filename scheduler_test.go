@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -166,6 +167,66 @@ func TestOrderedAccountsPutAvailableBeforeExhaustedWithinPriority(t *testing.T) 
 	ordered := BuildOrderedAccounts(requestWithCandidates("blocked", "available"), snapshot, now)
 	if len(ordered) != 2 || ordered[0].AuthID != "available" || !ordered[0].Available {
 		t.Fatalf("ordered = %#v, want available account first", ordered)
+	}
+}
+
+func TestOrderedAccountsSeparateAvailableTemporaryAndLongExhausted(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	tempLater := weeklyAccount("temp-later", 5, now.Add(24*time.Hour), true)
+	tempLater.Quota.FiveHour.ResetAt = now.Add(4 * time.Hour)
+	tempEarlier := weeklyAccount("temp-earlier", 5, now.Add(72*time.Hour), true)
+	tempEarlier.Quota.FiveHour.ResetAt = now.Add(2 * time.Hour)
+	longEarlier := weeklyAccount("long-earlier", 5, now.Add(12*time.Hour), false)
+	longEarlier.Quota.LongWindow.Exhausted = true
+	longLater := monthlyAccount("long-later", 5, now.Add(48*time.Hour))
+	longLater.Quota.LongWindow.Exhausted = true
+	availableLater := weeklyAccount("available-later", 5, now.Add(36*time.Hour), false)
+	availableSoon := weeklyAccount("available-soon", 5, now.Add(6*time.Hour), false)
+	snapshot := StateSnapshot{Config: DefaultConfig(), Now: now, Accounts: []AccountState{
+		tempLater,
+		longLater,
+		availableLater,
+		longEarlier,
+		tempEarlier,
+		availableSoon,
+	}}
+
+	ordered := BuildOrderedAccounts(requestWithCandidates("temp-later", "long-later", "available-later", "long-earlier", "temp-earlier", "available-soon"), snapshot, now)
+	got := make([]string, 0, len(ordered))
+	gotStatus := make([]string, 0, len(ordered))
+	for _, account := range ordered {
+		got = append(got, account.AuthID)
+		gotStatus = append(gotStatus, string(account.QueueStatus))
+	}
+	want := []string{"available-soon", "available-later", "temp-earlier", "temp-later", "long-earlier", "long-later"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("ordered = %#v, want %#v; statuses=%#v", got, want, gotStatus)
+	}
+	wantStatus := []string{"available", "available", "five_hour_exhausted", "five_hour_exhausted", "long_window_exhausted", "long_window_exhausted"}
+	if strings.Join(gotStatus, ",") != strings.Join(wantStatus, ",") {
+		t.Fatalf("statuses = %#v, want %#v", gotStatus, wantStatus)
+	}
+}
+
+func TestOrderedAccountsMonthlyPriorityOnlyMovesAvailableMonthlyAhead(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	cfg := DefaultConfig()
+	cfg.MonthlyMode = MonthlyModePriority
+	blockedMonthly := monthlyAccount("blocked-monthly", 5, now.Add(time.Hour))
+	blockedMonthly.Quota.LongWindow.Exhausted = true
+	availableWeekly := weeklyAccount("available-weekly", 5, now.Add(72*time.Hour), false)
+	availableMonthly := monthlyAccount("available-monthly", 5, now.Add(96*time.Hour))
+	snapshot := StateSnapshot{Config: cfg, Now: now, Accounts: []AccountState{
+		blockedMonthly,
+		availableWeekly,
+		availableMonthly,
+	}}
+
+	ordered := BuildOrderedAccounts(requestWithCandidates("blocked-monthly", "available-weekly", "available-monthly"), snapshot, now)
+	got := []string{ordered[0].AuthID, ordered[1].AuthID, ordered[2].AuthID}
+	want := []string{"available-monthly", "available-weekly", "blocked-monthly"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("ordered = %#v, want %#v", got, want)
 	}
 }
 

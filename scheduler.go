@@ -19,11 +19,21 @@ type ScheduledAccount struct {
 	AuthID            string
 	Priority          int
 	Family            AccountFamily
+	QueueStatus       QueueStatus
 	Available         bool
 	UnavailableReason string
 	SortTime          time.Time
 	Annotation        AccountAnnotation
 }
+
+type QueueStatus string
+
+const (
+	QueueStatusAvailable           QueueStatus = "available"
+	QueueStatusFiveHourExhausted   QueueStatus = "five_hour_exhausted"
+	QueueStatusLongWindowExhausted QueueStatus = "long_window_exhausted"
+	QueueStatusUnavailable         QueueStatus = "unavailable"
+)
 
 func PickCodexAccount(req pluginapi.SchedulerPickRequest, snapshot StateSnapshot, now time.Time) PickDecision {
 	if !snapshot.Config.HandleEnabled {
@@ -85,19 +95,21 @@ func BuildOrderedAccounts(req pluginapi.SchedulerPickRequest, snapshot StateSnap
 				AuthID:            candidate.ID,
 				Priority:          candidate.Priority,
 				Family:            AccountFamilyUnknown,
+				QueueStatus:       QueueStatusUnavailable,
 				UnavailableReason: "unknown_account",
 			})
 			continue
 		}
 
-		available, reason := accountAvailable(account, now)
+		queueStatus, available, reason, sortTime := accountQueueState(account, now)
 		ordered = append(ordered, ScheduledAccount{
 			AuthID:            candidate.ID,
 			Priority:          candidate.Priority,
 			Family:            account.Family,
+			QueueStatus:       queueStatus,
 			Available:         available,
 			UnavailableReason: reason,
-			SortTime:          accountSortTime(account),
+			SortTime:          sortTime,
 			Annotation:        account.Annotation,
 		})
 	}
@@ -108,10 +120,12 @@ func BuildOrderedAccounts(req pluginapi.SchedulerPickRequest, snapshot StateSnap
 		if left.Priority != right.Priority {
 			return left.Priority > right.Priority
 		}
-		if left.Available != right.Available {
-			return left.Available
+		leftRank := queueStatusRank(left.QueueStatus)
+		rightRank := queueStatusRank(right.QueueStatus)
+		if leftRank != rightRank {
+			return leftRank < rightRank
 		}
-		if snapshot.Config.MonthlyMode == MonthlyModePriority && left.Family != right.Family {
+		if left.QueueStatus == QueueStatusAvailable && snapshot.Config.MonthlyMode == MonthlyModePriority && left.Family != right.Family {
 			if left.Family == AccountFamilyMonthly {
 				return true
 			}
@@ -134,46 +148,52 @@ func BuildOrderedAccounts(req pluginapi.SchedulerPickRequest, snapshot StateSnap
 }
 
 func accountAvailable(account AccountState, now time.Time) (bool, string) {
+	_, available, reason, _ := accountQueueState(account, now)
+	return available, reason
+}
+
+func accountQueueState(account AccountState, now time.Time) (QueueStatus, bool, string, time.Time) {
 	if account.Stale {
-		return false, "stale_quota"
+		return QueueStatusUnavailable, false, "stale_quota", time.Time{}
 	}
 	if account.TemporaryExhausted && (account.TemporaryResetAt.IsZero() || account.TemporaryResetAt.After(now)) {
-		return false, "temporary_exhausted"
+		return QueueStatusFiveHourExhausted, false, "temporary_exhausted", account.TemporaryResetAt
 	}
 	switch account.Family {
 	case AccountFamilyWeekly:
 		if account.Quota.FiveHour == nil {
-			return false, "missing_five_hour_window"
+			return QueueStatusUnavailable, false, "missing_five_hour_window", time.Time{}
 		}
 		if account.Quota.FiveHour.ResetAt.IsZero() {
-			return false, "missing_five_hour_reset"
+			return QueueStatusUnavailable, false, "missing_five_hour_reset", time.Time{}
+		}
+		if account.Quota.LongWindow == nil {
+			return QueueStatusUnavailable, false, "missing_weekly_window", time.Time{}
+		}
+		if account.Quota.LongWindow.ResetAt.IsZero() {
+			return QueueStatusUnavailable, false, "missing_weekly_reset", time.Time{}
+		}
+		if windowExhausted(account.Quota.LongWindow, now) {
+			return QueueStatusLongWindowExhausted, false, "weekly_exhausted", account.Quota.LongWindow.ResetAt
 		}
 		if windowExhausted(account.Quota.FiveHour, now) {
-			return false, "five_hour_exhausted"
+			return QueueStatusFiveHourExhausted, false, "five_hour_exhausted", account.Quota.FiveHour.ResetAt
 		}
-		if account.Quota.LongWindow == nil {
-			return false, "missing_weekly_window"
-		}
-		if account.Quota.LongWindow.ResetAt.IsZero() {
-			return false, "missing_weekly_reset"
-		}
-		if windowExhausted(account.Quota.LongWindow, now) {
-			return false, "weekly_exhausted"
-		}
+		return QueueStatusAvailable, true, "", account.Quota.LongWindow.ResetAt
 	case AccountFamilyMonthly:
 		if account.Quota.LongWindow == nil {
-			return false, "missing_monthly_window"
+			return QueueStatusUnavailable, false, "missing_monthly_window", time.Time{}
 		}
 		if account.Quota.LongWindow.ResetAt.IsZero() {
-			return false, "missing_monthly_reset"
+			return QueueStatusUnavailable, false, "missing_monthly_reset", time.Time{}
 		}
 		if windowExhausted(account.Quota.LongWindow, now) {
-			return false, "monthly_exhausted"
+			return QueueStatusLongWindowExhausted, false, "monthly_exhausted", account.Quota.LongWindow.ResetAt
 		}
+		return QueueStatusAvailable, true, "", account.Quota.LongWindow.ResetAt
 	default:
-		return false, "unknown_family"
+		return QueueStatusUnavailable, false, "unknown_family", time.Time{}
 	}
-	return true, ""
 }
 
 func requestIncludesCodex(req pluginapi.SchedulerPickRequest) bool {
@@ -193,6 +213,19 @@ func accountSortTime(account AccountState) time.Time {
 		return account.Quota.LongWindow.ResetAt
 	}
 	return time.Time{}
+}
+
+func queueStatusRank(status QueueStatus) int {
+	switch status {
+	case QueueStatusAvailable:
+		return 0
+	case QueueStatusFiveHourExhausted:
+		return 1
+	case QueueStatusLongWindowExhausted:
+		return 2
+	default:
+		return 3
+	}
 }
 
 func windowExhausted(window *QuotaWindow, now time.Time) bool {

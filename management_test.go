@@ -382,11 +382,43 @@ func TestStatusJSONIncludesQuotaWindowsForProgressBars(t *testing.T) {
 		t.Fatalf("accounts len = %d, want 1", len(body.Accounts))
 	}
 	accountBody := body.Accounts[0]
-	if accountBody.FiveHour.UsedPercent != 100 || !accountBody.FiveHour.Exhausted {
-		t.Fatalf("five hour window = %#v, want exhausted 100 percent", accountBody.FiveHour)
+	if accountBody.FiveHour.UsedPercent != 100 || accountBody.FiveHour.RemainingPercent != 0 || accountBody.FiveHour.DisplayText != "已用完" || !accountBody.FiveHour.Exhausted {
+		t.Fatalf("five hour window = %#v, want exhausted with zero remaining", accountBody.FiveHour)
 	}
-	if accountBody.LongWindow.UsedPercent != 40 || accountBody.LongWindow.Label == "" {
-		t.Fatalf("long window = %#v, want weekly usage label and percent", accountBody.LongWindow)
+	if accountBody.LongWindow.UsedPercent != 40 || accountBody.LongWindow.RemainingPercent != 60 || accountBody.LongWindow.DisplayText != "剩余 60%" || accountBody.LongWindow.Label == "" {
+		t.Fatalf("long window = %#v, want weekly remaining label and percent", accountBody.LongWindow)
+	}
+}
+
+func TestStatusHTMLShowsRemainingQuotaLocalResetTimesAndCompactMetadata(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	store.SetAnnotations(AnnotationState{
+		Accounts: map[string]AccountAnnotation{
+			"auth:auth-1": {Alias: "主力号", Notes: "账号备注内容", Tags: []string{"team", "paid"}, GroupID: "ops"},
+		},
+		Groups: map[string]GroupAnnotation{
+			"ops": {Name: "运营组", Notes: "分组备注内容"},
+		},
+	})
+	usedFive := 25.0
+	usedLong := 40.0
+	account := weeklyAccount("auth-1", 5, now.Add(24*time.Hour), false)
+	account.LastSuccessAt = now
+	account.Quota.FiveHour.UsedPercent = &usedFive
+	account.Quota.FiveHour.ResetAt = now.Add(3 * time.Hour)
+	account.Quota.LongWindow.UsedPercent = &usedLong
+	store.UpsertQuota(account)
+
+	resp := HandleManagementRequest(store, pluginapi.ManagementRequest{Method: "GET", Path: "/status"}, now)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, resp.Body)
+	}
+	html := string(resp.Body)
+	for _, want := range []string{"剩余 75%", "剩余 60%", "5 小时重置", "长额度重置", "localTime", "data-time=\"2026-06-21T12:00:00Z\"", "主力号", "运营组", "账号备注内容", "分组备注内容"} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("html missing %q: %s", want, html)
+		}
 	}
 }
 
