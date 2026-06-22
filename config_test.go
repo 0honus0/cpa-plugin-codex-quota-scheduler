@@ -37,7 +37,6 @@ stale_after: 2m
 monthly_mode: priority
 fallback: fill-first
 enable_usage_feedback: false
-annotation_state_path: C:\state\annotations.json
 max_refresh_concurrency: 8
 quota_endpoint: https://example.test/usage
 `)
@@ -62,9 +61,6 @@ quota_endpoint: https://example.test/usage
 	}
 	if cfg.EnableUsageFeedback {
 		t.Fatalf("EnableUsageFeedback = true, want false")
-	}
-	if cfg.AnnotationStatePath != "C:\\state\\annotations.json" {
-		t.Fatalf("AnnotationStatePath = %q, want %q", cfg.AnnotationStatePath, "C:\\state\\annotations.json")
 	}
 	if cfg.MaxRefreshConcurrency != 8 {
 		t.Fatalf("MaxRefreshConcurrency = %d, want 8", cfg.MaxRefreshConcurrency)
@@ -110,16 +106,10 @@ func TestPluginRegistrationDeclaresCapabilitiesAndFields(t *testing.T) {
 	if reg.Metadata.Name == "" || reg.Metadata.Version == "" || reg.Metadata.Author == "" || reg.Metadata.GitHubRepository == "" {
 		t.Fatalf("metadata missing required CPA fields: %#v", reg.Metadata)
 	}
+	if len(reg.Metadata.ConfigFields) != 0 {
+		t.Fatalf("ConfigFields len = %d, want 0; fields=%#v", len(reg.Metadata.ConfigFields), reg.Metadata.ConfigFields)
+	}
 	if !reg.Capabilities.Scheduler || !reg.Capabilities.UsagePlugin || !reg.Capabilities.ManagementAPI {
 		t.Fatalf("capabilities = %#v, want scheduler, usage_plugin, management_api", reg.Capabilities)
-	}
-	names := map[string]bool{}
-	for _, field := range reg.Metadata.ConfigFields {
-		names[field.Name] = true
-	}
-	for _, name := range []string{"handle_enabled", "monthly_mode", "quota_refresh_interval", "stale_after", "enable_usage_feedback"} {
-		if !names[name] {
-			t.Fatalf("ConfigFields missing %s", name)
-		}
 	}
 }

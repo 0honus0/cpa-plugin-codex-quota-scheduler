@@ -29,7 +29,6 @@ type Config struct {
 	MonthlyMode           MonthlyMode
 	Fallback              FallbackMode
 	EnableUsageFeedback   bool
-	AnnotationStatePath   string
 	MaxRefreshConcurrency int
 	QuotaEndpoint         string
 }
@@ -53,7 +52,6 @@ type rawConfig struct {
 	MonthlyMode           string `yaml:"monthly_mode"`
 	Fallback              string `yaml:"fallback"`
 	EnableUsageFeedback   *bool  `yaml:"enable_usage_feedback"`
-	AnnotationStatePath   string `yaml:"annotation_state_path"`
 	MaxRefreshConcurrency *int   `yaml:"max_refresh_concurrency"`
 	QuotaEndpoint         string `yaml:"quota_endpoint"`
 }
@@ -119,9 +117,6 @@ func DecodeConfig(raw []byte) (Config, error) {
 	if decoded.EnableUsageFeedback != nil {
 		cfg.EnableUsageFeedback = *decoded.EnableUsageFeedback
 	}
-	if decoded.AnnotationStatePath != "" {
-		cfg.AnnotationStatePath = decoded.AnnotationStatePath
-	}
 	if decoded.MaxRefreshConcurrency != nil {
 		if *decoded.MaxRefreshConcurrency <= 0 {
 			return Config{}, fmt.Errorf("max_refresh_concurrency must be positive")
@@ -143,26 +138,11 @@ func PluginRegistration() registration {
 			Author:           "Jeffery",
 			GitHubRepository: "https://github.com/jeffery/codex-quota-scheduler",
 			Logo:             "https://raw.githubusercontent.com/router-for-me/CLIProxyAPI/main/docs/logo.png",
-			ConfigFields:     ConfigFields(),
 		},
 		Capabilities: registrationCapabilities{
 			Scheduler:     true,
 			UsagePlugin:   true,
 			ManagementAPI: true,
 		},
-	}
-}
-
-func ConfigFields() []pluginapi.ConfigField {
-	return []pluginapi.ConfigField{
-		{Name: "handle_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enables scheduler handling."},
-		{Name: "monthly_mode", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{string(MonthlyModeExpiryOrder), string(MonthlyModePriority)}, Description: "Selects monthly quota scheduling mode."},
-		{Name: "quota_refresh_interval", Type: pluginapi.ConfigFieldTypeString, Description: "Duration between quota refresh attempts."},
-		{Name: "stale_after", Type: pluginapi.ConfigFieldTypeString, Description: "Duration before cached quota data is stale."},
-		{Name: "fallback", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"", string(FallbackFillFirst)}, Description: "Fallback scheduling mode when quota data is unavailable."},
-		{Name: "enable_usage_feedback", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Updates quota state from completed usage records."},
-		{Name: "annotation_state_path", Type: pluginapi.ConfigFieldTypeString, Description: "Path to persisted quota annotations."},
-		{Name: "max_refresh_concurrency", Type: pluginapi.ConfigFieldTypeInteger, Description: "Maximum concurrent quota refresh requests."},
-		{Name: "quota_endpoint", Type: pluginapi.ConfigFieldTypeString, Description: "ChatGPT quota usage endpoint."},
 	}
 }

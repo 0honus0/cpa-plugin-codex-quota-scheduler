@@ -64,18 +64,15 @@ func configure(raw []byte) error {
 	if err != nil {
 		return err
 	}
-	var annotations AnnotationState
-	if cfg.AnnotationStatePath != "" {
-		annotations, err = LoadAnnotations(cfg.AnnotationStatePath)
-		if err != nil {
-			annotations = NormalizeAnnotationState(AnnotationState{})
-		}
+	disk, err := LoadPluginDiskState(defaultStatePath())
+	if err == nil {
+		cfg = disk.Config
+	} else {
+		disk = PluginDiskState{Config: cfg}
 	}
 	currentConfig.Store(cfg)
 	globalState.ReplaceConfig(cfg)
-	if cfg.AnnotationStatePath != "" {
-		globalState.SetAnnotations(annotations)
-	}
+	globalState.SetAnnotations(AnnotationState{Accounts: disk.Accounts, Groups: disk.Groups})
 	return nil
 }
 

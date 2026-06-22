@@ -62,8 +62,13 @@ func TestHandleMethodRegisterEnvelope(t *testing.T) {
 func TestHandleMethodRegisterLoadsPersistedAnnotations(t *testing.T) {
 	cleanupIntegrationGlobals(t)
 
-	path := filepath.Join(t.TempDir(), "annotations.json")
-	if err := SaveAnnotations(path, AnnotationState{
+	dir := t.TempDir()
+	previousDefaultStatePath := defaultStatePath
+	defaultStatePath = func() string { return filepath.Join(dir, "state.json") }
+	t.Cleanup(func() { defaultStatePath = previousDefaultStatePath })
+
+	if err := SavePluginDiskState(defaultStatePath(), PluginDiskState{
+		Config: DefaultConfig(),
 		Accounts: map[string]AccountAnnotation{
 			"auth:auth-1": {Alias: "Personal", GroupID: "team"},
 		},
@@ -71,12 +76,10 @@ func TestHandleMethodRegisterLoadsPersistedAnnotations(t *testing.T) {
 			"team": {Name: "Team"},
 		},
 	}); err != nil {
-		t.Fatalf("SaveAnnotations returned error: %v", err)
+		t.Fatalf("SavePluginDiskState returned error: %v", err)
 	}
 
-	rawReq, err := json.Marshal(lifecycleRequest{
-		ConfigYAML: []byte("annotation_state_path: " + path + "\n"),
-	})
+	rawReq, err := json.Marshal(lifecycleRequest{})
 	if err != nil {
 		t.Fatalf("json.Marshal returned error: %v", err)
 	}
@@ -96,13 +99,15 @@ func TestHandleMethodRegisterLoadsPersistedAnnotations(t *testing.T) {
 func TestHandleMethodRegisterIgnoresInvalidPersistedAnnotations(t *testing.T) {
 	cleanupIntegrationGlobals(t)
 
-	path := filepath.Join(t.TempDir(), "annotations.json")
-	if err := os.WriteFile(path, []byte("{not-json"), 0600); err != nil {
+	dir := t.TempDir()
+	previousDefaultStatePath := defaultStatePath
+	defaultStatePath = func() string { return filepath.Join(dir, "state.json") }
+	t.Cleanup(func() { defaultStatePath = previousDefaultStatePath })
+
+	if err := os.WriteFile(defaultStatePath(), []byte("{not-json"), 0600); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
-	rawReq, err := json.Marshal(lifecycleRequest{
-		ConfigYAML: []byte("annotation_state_path: " + path + "\n"),
-	})
+	rawReq, err := json.Marshal(lifecycleRequest{})
 	if err != nil {
 		t.Fatalf("json.Marshal returned error: %v", err)
 	}

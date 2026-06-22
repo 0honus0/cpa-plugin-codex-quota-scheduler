@@ -28,6 +28,8 @@ func TestManagementRegisterExposesStatusResourceAndRoutes(t *testing.T) {
 	}
 	for _, key := range []string{
 		"GET /plugins/codex-quota-scheduler/status",
+		"GET /plugins/codex-quota-scheduler/settings",
+		"PUT /plugins/codex-quota-scheduler/settings",
 		"POST /plugins/codex-quota-scheduler/refresh",
 		"GET /plugins/codex-quota-scheduler/annotations",
 		"PUT /plugins/codex-quota-scheduler/annotations",
@@ -254,6 +256,14 @@ func TestStatusHTMLRedactsSensitiveFieldsAndEscapesUserFields(t *testing.T) {
 	if !strings.Contains(html, "codex-quota-scheduler") {
 		t.Fatalf("html missing plugin id: %s", html)
 	}
+	for _, want := range []string{"Codex 额度调度器", "调度设置", "账号队列", "保存设置", "刷新额度", "账号卡片"} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("html missing Chinese UI text %q: %s", want, html)
+		}
+	}
+	if strings.Contains(html, "<table") {
+		t.Fatalf("html still renders table layout: %s", html)
+	}
 	for _, forbidden := range []string{"access_token", "bearer ", "authorization", "cookie"} {
 		if strings.Contains(lower, forbidden) {
 			t.Fatalf("html contains sensitive field %q: %s", forbidden, html)
@@ -264,12 +274,42 @@ func TestStatusHTMLRedactsSensitiveFieldsAndEscapesUserFields(t *testing.T) {
 	}
 }
 
+func TestSettingsEndpointUpdatesConfigAndPersistsDefaultState(t *testing.T) {
+	dir := t.TempDir()
+	previousDefaultStatePath := defaultStatePath
+	defaultStatePath = func() string { return filepath.Join(dir, "state.json") }
+	t.Cleanup(func() { defaultStatePath = previousDefaultStatePath })
+
+	store := NewPluginState(DefaultConfig())
+	resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
+		Method: http.MethodPut,
+		Path:   "/plugins/codex-quota-scheduler/settings",
+		Body:   []byte(`{"handle_enabled":false,"monthly_mode":"priority","quota_refresh_interval":"45s","stale_after":"15m","enable_usage_feedback":false,"max_refresh_concurrency":2}`),
+	}, time.Now())
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, resp.Body)
+	}
+
+	cfg := store.Config()
+	if cfg.HandleEnabled || cfg.MonthlyMode != MonthlyModePriority || cfg.QuotaRefreshInterval != 45*time.Second || cfg.StaleAfter != 15*time.Minute || cfg.EnableUsageFeedback || cfg.MaxRefreshConcurrency != 2 {
+		t.Fatalf("config = %#v", cfg)
+	}
+	disk, err := LoadPluginDiskState(defaultStatePath())
+	if err != nil {
+		t.Fatalf("LoadPluginDiskState returned error: %v", err)
+	}
+	if disk.Config.MonthlyMode != MonthlyModePriority || disk.Config.HandleEnabled {
+		t.Fatalf("persisted config = %#v", disk.Config)
+	}
+}
+
 func TestAnnotationsEndpointsNormalizePatchAndPersist(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "annotations.json")
-	cfg := DefaultConfig()
-	cfg.AnnotationStatePath = path
-	store := NewPluginState(cfg)
+	previousDefaultStatePath := defaultStatePath
+	defaultStatePath = func() string { return filepath.Join(dir, "state.json") }
+	t.Cleanup(func() { defaultStatePath = previousDefaultStatePath })
+
+	store := NewPluginState(DefaultConfig())
 	store.SetAnnotations(AnnotationState{
 		Accounts: map[string]AccountAnnotation{
 			"auth:keep": {Alias: "Keep", Tags: []string{"old"}},
@@ -296,7 +336,7 @@ func TestAnnotationsEndpointsNormalizePatchAndPersist(t *testing.T) {
 	if got.Alias != " New " || len(got.Tags) != 1 || got.Tags[0] != "alpha" || got.GroupID != "group-1" {
 		t.Fatalf("patched account annotation = %#v", got)
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(defaultStatePath())
 	if err != nil {
 		t.Fatalf("ReadFile returned error: %v", err)
 	}
@@ -363,9 +403,11 @@ func TestAnnotationsPersistenceFailureDoesNotMutateMemory(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := DefaultConfig()
-			cfg.AnnotationStatePath = filepath.Join(t.TempDir(), "annotations.json") + string(rune(0))
-			store := NewPluginState(cfg)
+			previousDefaultStatePath := defaultStatePath
+			defaultStatePath = func() string { return filepath.Join(t.TempDir(), "state.json") + string(rune(0)) }
+			t.Cleanup(func() { defaultStatePath = previousDefaultStatePath })
+
+			store := NewPluginState(DefaultConfig())
 			store.SetAnnotations(AnnotationState{
 				Accounts: map[string]AccountAnnotation{
 					"auth:keep": {Alias: "Keep"},
