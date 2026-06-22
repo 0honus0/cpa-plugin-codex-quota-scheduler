@@ -59,8 +59,8 @@ type rawConfig struct {
 func DefaultConfig() Config {
 	return Config{
 		HandleEnabled:         true,
-		QuotaRefreshInterval:  time.Minute,
-		StaleAfter:            10 * time.Minute,
+		QuotaRefreshInterval:  30 * time.Minute,
+		StaleAfter:            6 * time.Hour,
 		MonthlyMode:           MonthlyModeExpiryOrder,
 		Fallback:              FallbackFillFirst,
 		EnableUsageFeedback:   true,

@@ -88,11 +88,39 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 	if decision.AuthID != "" {
 		globalState.RecordSelection(decision.AuthID, decision.Reason)
 	}
+	logSchedulerDecision(globalState, req, decision, now)
 	return okEnvelope(pluginapi.SchedulerPickResponse{
 		AuthID:          decision.AuthID,
 		DelegateBuiltin: decision.DelegateBuiltin,
 		Handled:         decision.Handled,
 	})
+}
+
+func logSchedulerDecision(store *PluginState, req pluginapi.SchedulerPickRequest, decision PickDecision, now time.Time) {
+	if store == nil {
+		return
+	}
+	level := "info"
+	event := "scheduler.unhandled"
+	message := "请求未由插件接管"
+	fields := map[string]any{
+		"model":    req.Model,
+		"provider": req.Provider,
+		"reason":   decision.Reason,
+	}
+	if decision.AuthID != "" {
+		event = "scheduler.selected"
+		message = "请求已由插件接管"
+		fields["auth_id"] = decision.AuthID
+	} else if decision.DelegateBuiltin != "" {
+		event = "scheduler.fallback"
+		message = "插件触发内置调度 fallback"
+		fields["fallback"] = decision.DelegateBuiltin
+	} else if decision.Handled {
+		event = "scheduler.handled"
+		message = "插件已处理但未选择账号"
+	}
+	store.RecordLog(level, event, message, fields, now)
 }
 
 func handleUsageHandle(raw []byte) ([]byte, error) {
@@ -145,6 +173,7 @@ func refreshGlobalRefresherSoon() {
 	refresher := globalRefresher
 	refresherMu.Unlock()
 	if refresher != nil {
+		globalState.RecordLog("info", "quota.refresh_requested", "已请求后台刷新额度", nil, time.Now())
 		refresher.RefreshSoon()
 	}
 }

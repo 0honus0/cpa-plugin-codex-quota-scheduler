@@ -108,6 +108,9 @@ func BuildOrderedAccounts(req pluginapi.SchedulerPickRequest, snapshot StateSnap
 		if left.Priority != right.Priority {
 			return left.Priority > right.Priority
 		}
+		if left.Available != right.Available {
+			return left.Available
+		}
 		if snapshot.Config.MonthlyMode == MonthlyModePriority && left.Family != right.Family {
 			if left.Family == AccountFamilyMonthly {
 				return true

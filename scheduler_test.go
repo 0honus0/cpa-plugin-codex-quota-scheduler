@@ -154,6 +154,21 @@ func TestPickSkipsWeeklyWhenFiveHourExhausted(t *testing.T) {
 	}
 }
 
+func TestOrderedAccountsPutAvailableBeforeExhaustedWithinPriority(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	blocked := weeklyAccount("blocked", 5, now.Add(time.Hour), true)
+	blocked.Quota.FiveHour.ResetAt = now.Add(time.Hour)
+	snapshot := StateSnapshot{Config: DefaultConfig(), Now: now, Accounts: []AccountState{
+		blocked,
+		weeklyAccount("available", 5, now.Add(48*time.Hour), false),
+	}}
+
+	ordered := BuildOrderedAccounts(requestWithCandidates("blocked", "available"), snapshot, now)
+	if len(ordered) != 2 || ordered[0].AuthID != "available" || !ordered[0].Available {
+		t.Fatalf("ordered = %#v, want available account first", ordered)
+	}
+}
+
 func TestPickIgnoresNonCodexProvider(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	snapshot := StateSnapshot{Config: DefaultConfig(), Now: now, Accounts: []AccountState{

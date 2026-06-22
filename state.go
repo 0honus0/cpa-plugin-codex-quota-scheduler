@@ -11,6 +11,7 @@ type PluginState struct {
 	cfg          Config
 	accounts     map[string]AccountState
 	annotations  AnnotationState
+	logs         []LogEntry
 	lastSelected string
 	lastReason   string
 }
@@ -94,6 +95,25 @@ func (s *PluginState) RecordSelection(authID, reason string) {
 	s.lastReason = reason
 }
 
+func (s *PluginState) RecordLog(level, event, message string, fields map[string]any, now time.Time) {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry := LogEntry{
+		Time:    now,
+		Level:   level,
+		Event:   event,
+		Message: message,
+		Fields:  cloneMap(fields),
+	}
+	s.logs = append(s.logs, entry)
+	if len(s.logs) > 200 {
+		s.logs = append([]LogEntry(nil), s.logs[len(s.logs)-200:]...)
+	}
+}
+
 func (s *PluginState) Snapshot(now time.Time) StateSnapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -113,6 +133,7 @@ func (s *PluginState) Snapshot(now time.Time) StateSnapshot {
 		Config:       s.cfg,
 		Accounts:     accounts,
 		Annotations:  cloneAnnotationState(s.annotations),
+		Logs:         cloneLogs(s.logs),
 		LastSelected: s.lastSelected,
 		LastReason:   s.lastReason,
 		Now:          now,
@@ -205,5 +226,28 @@ func cloneStringSlice(values []string) []string {
 	}
 	cloned := make([]string, len(values))
 	copy(cloned, values)
+	return cloned
+}
+
+func cloneLogs(values []LogEntry) []LogEntry {
+	if len(values) == 0 {
+		return nil
+	}
+	cloned := make([]LogEntry, len(values))
+	for i, entry := range values {
+		cloned[i] = entry
+		cloned[i].Fields = cloneMap(entry.Fields)
+	}
+	return cloned
+}
+
+func cloneMap(values map[string]any) map[string]any {
+	if len(values) == 0 {
+		return nil
+	}
+	cloned := make(map[string]any, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
 	return cloned
 }

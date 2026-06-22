@@ -78,7 +78,16 @@ type StateSnapshot struct {
 	Config       Config
 	Accounts     []AccountState
 	Annotations  AnnotationState
+	Logs         []LogEntry
 	LastSelected string
 	LastReason   string
 	Now          time.Time
+}
+
+type LogEntry struct {
+	Time    time.Time      `json:"time"`
+	Level   string         `json:"level"`
+	Event   string         `json:"event"`
+	Message string         `json:"message"`
+	Fields  map[string]any `json:"fields,omitempty"`
 }

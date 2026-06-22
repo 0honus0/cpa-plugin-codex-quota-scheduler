@@ -21,11 +21,11 @@ func TestDecodeConfigDefaults(t *testing.T) {
 	if cfg.Fallback != FallbackFillFirst {
 		t.Fatalf("Fallback = %q, want %q", cfg.Fallback, FallbackFillFirst)
 	}
-	if cfg.QuotaRefreshInterval != time.Minute {
-		t.Fatalf("QuotaRefreshInterval = %s, want 1m", cfg.QuotaRefreshInterval)
+	if cfg.QuotaRefreshInterval != 30*time.Minute {
+		t.Fatalf("QuotaRefreshInterval = %s, want 30m", cfg.QuotaRefreshInterval)
 	}
-	if cfg.StaleAfter != 10*time.Minute {
-		t.Fatalf("StaleAfter = %s, want 10m", cfg.StaleAfter)
+	if cfg.StaleAfter != 6*time.Hour {
+		t.Fatalf("StaleAfter = %s, want 6h", cfg.StaleAfter)
 	}
 }
 

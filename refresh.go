@@ -231,6 +231,7 @@ func (r *QuotaRefresher) refreshAuth(auth pluginapi.HostAuthFileEntry) {
 	account.LastError = ""
 	account.LastSuccessAt = r.now()
 	r.state.UpsertQuota(account)
+	r.state.RecordLog("info", "quota.refresh_success", "账号额度刷新成功", map[string]any{"auth_id": account.AuthID}, r.now())
 }
 
 func (r *QuotaRefresher) upsertRefreshFailure(account AccountState, message string) {
@@ -238,6 +239,7 @@ func (r *QuotaRefresher) upsertRefreshFailure(account AccountState, message stri
 	merged.LastRefreshAt = account.LastRefreshAt
 	merged.LastError = message
 	r.state.UpsertQuota(merged)
+	r.state.RecordLog("warn", "quota.refresh_failed", "账号额度刷新失败", map[string]any{"auth_id": merged.AuthID, "error": message}, r.now())
 }
 
 func (r *QuotaRefresher) mergeExistingAccount(account AccountState) AccountState {
