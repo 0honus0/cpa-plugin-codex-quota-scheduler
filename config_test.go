@@ -107,6 +107,9 @@ func TestPluginRegistrationDeclaresCapabilitiesAndFields(t *testing.T) {
 	if reg.SchemaVersion != pluginabi.SchemaVersion {
 		t.Fatalf("SchemaVersion = %d, want %d", reg.SchemaVersion, pluginabi.SchemaVersion)
 	}
+	if reg.Metadata.Name == "" || reg.Metadata.Version == "" || reg.Metadata.Author == "" || reg.Metadata.GitHubRepository == "" {
+		t.Fatalf("metadata missing required CPA fields: %#v", reg.Metadata)
+	}
 	if !reg.Capabilities.Scheduler || !reg.Capabilities.UsagePlugin || !reg.Capabilities.ManagementAPI {
 		t.Fatalf("capabilities = %#v, want scheduler, usage_plugin, management_api", reg.Capabilities)
 	}

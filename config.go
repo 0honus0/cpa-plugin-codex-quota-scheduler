@@ -138,9 +138,12 @@ func PluginRegistration() registration {
 	return registration{
 		SchemaVersion: pluginabi.SchemaVersion,
 		Metadata: pluginapi.Metadata{
-			Name:         PluginID,
-			Version:      "0.1.0",
-			ConfigFields: ConfigFields(),
+			Name:             PluginID,
+			Version:          "0.1.0",
+			Author:           "Jeffery",
+			GitHubRepository: "https://github.com/jeffery/codex-quota-scheduler",
+			Logo:             "https://raw.githubusercontent.com/router-for-me/CLIProxyAPI/main/docs/logo.png",
+			ConfigFields:     ConfigFields(),
 		},
 		Capabilities: registrationCapabilities{
 			Scheduler:     true,

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -89,6 +90,33 @@ func TestHandleMethodRegisterLoadsPersistedAnnotations(t *testing.T) {
 	}
 	if state.Groups["team"].Name != "Team" {
 		t.Fatalf("group annotations = %#v, want persisted group", state.Groups)
+	}
+}
+
+func TestHandleMethodRegisterIgnoresInvalidPersistedAnnotations(t *testing.T) {
+	cleanupIntegrationGlobals(t)
+
+	path := filepath.Join(t.TempDir(), "annotations.json")
+	if err := os.WriteFile(path, []byte("{not-json"), 0600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	rawReq, err := json.Marshal(lifecycleRequest{
+		ConfigYAML: []byte("annotation_state_path: " + path + "\n"),
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal returned error: %v", err)
+	}
+	raw, err := handleMethod(pluginabi.MethodPluginRegister, rawReq)
+	if err != nil {
+		t.Fatalf("handle register: %v", err)
+	}
+
+	var env pluginabi.Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	if !env.OK {
+		t.Fatalf("expected ok envelope, got %+v", env)
 	}
 }
 

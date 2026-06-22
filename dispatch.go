@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -69,7 +68,7 @@ func configure(raw []byte) error {
 	if cfg.AnnotationStatePath != "" {
 		annotations, err = LoadAnnotations(cfg.AnnotationStatePath)
 		if err != nil {
-			return fmt.Errorf("load annotations: %w", err)
+			annotations = NormalizeAnnotationState(AnnotationState{})
 		}
 	}
 	currentConfig.Store(cfg)
