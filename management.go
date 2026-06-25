@@ -27,6 +27,7 @@ type StatusPayload struct {
 	LastReason    string          `json:"last_reason"`
 	Settings      SettingsPayload `json:"settings"`
 	Accounts      []StatusAccount `json:"accounts"`
+	Groups        []StatusGroup   `json:"groups,omitempty"`
 	Logs          []LogEntry      `json:"logs"`
 }
 
@@ -62,6 +63,14 @@ type StatusAccount struct {
 	LongWindow        StatusWindow  `json:"long_window"`
 }
 
+type StatusGroup struct {
+	ID    string   `json:"id"`
+	Name  string   `json:"name,omitempty"`
+	Notes string   `json:"notes,omitempty"`
+	Tags  []string `json:"tags,omitempty"`
+	Color string   `json:"color,omitempty"`
+}
+
 type StatusWindow struct {
 	Kind             WindowKind `json:"kind,omitempty"`
 	Label            string     `json:"label"`
@@ -87,6 +96,8 @@ func RegisterManagement() pluginapi.ManagementRegistrationResponse {
 			{Path: "/annotations/account", Description: "Resource account annotation endpoint."},
 			{Path: "/annotations/group", Description: "Resource group annotation endpoint."},
 			{Path: "/logs", Description: "Resource scheduler logs endpoint."},
+			{Path: "/export", Description: "Resource configuration export endpoint."},
+			{Path: "/import", Description: "Resource configuration import endpoint."},
 		},
 		Routes: []pluginapi.ManagementRoute{
 			{Method: http.MethodGet, Path: managementBasePath + "/status", Description: "Scheduler quota status."},
@@ -130,6 +141,10 @@ func HandleManagementRequest(store *PluginState, req pluginapi.ManagementRequest
 		return jsonManagementResponse(http.StatusAccepted, map[string]bool{"ok": true})
 	case method == http.MethodGet && path == "/logs":
 		return jsonManagementResponse(http.StatusOK, map[string]any{"logs": store.Snapshot(now).Logs})
+	case method == http.MethodGet && path == "/export":
+		return handleExportState(store, now)
+	case method == http.MethodGet && path == "/import":
+		return handleImportStateFromQuery(store, req.Query, now)
 	case method == http.MethodGet && path == "/annotations":
 		return jsonManagementResponse(http.StatusOK, store.Annotations())
 	case method == http.MethodGet && path == "/annotations/account":
@@ -287,6 +302,54 @@ func splitQueryTags(raw string) []string {
 	return tags
 }
 
+func queryTags(query url.Values, key string) []string {
+	if _, ok := query[key]; !ok {
+		return nil
+	}
+	tags := splitQueryTags(query.Get(key))
+	if tags == nil {
+		return []string{}
+	}
+	return tags
+}
+
+func queryNonBlankStringPtr(query url.Values, key string) *string {
+	if _, ok := query[key]; !ok {
+		return nil
+	}
+	value := strings.TrimSpace(query.Get(key))
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+
+func handleExportState(store *PluginState, now time.Time) pluginapi.ManagementResponse {
+	state := diskStateFromStore(store)
+	store.RecordLog("info", "ui.config_exported", "页面导出插件配置", nil, now)
+	return jsonManagementResponse(http.StatusOK, normalizePluginDiskState(state))
+}
+
+func handleImportStateFromQuery(store *PluginState, query url.Values, now time.Time) pluginapi.ManagementResponse {
+	raw := strings.TrimSpace(query.Get("data"))
+	if raw == "" {
+		return jsonManagementResponse(http.StatusBadRequest, map[string]string{"error": "data is required"})
+	}
+	var state PluginDiskState
+	if err := json.Unmarshal([]byte(raw), &state); err != nil {
+		return jsonManagementResponse(http.StatusBadRequest, map[string]string{"error": err.Error()})
+	}
+	state = normalizePluginDiskState(state)
+	if err := SavePluginDiskState(defaultStatePath(), state); err != nil {
+		return jsonManagementResponse(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	store.ReplaceConfig(state.Config)
+	currentConfig.Store(state.Config)
+	store.SetAnnotations(AnnotationState{Accounts: state.Accounts, Groups: state.Groups})
+	store.RecordLog("info", "ui.config_imported", "页面导入插件配置", nil, now)
+	return jsonManagementResponse(http.StatusOK, map[string]bool{"ok": true})
+}
+
 func BuildStatusPayload(snapshot StateSnapshot, ordered []ScheduledAccount) StatusPayload {
 	accountsByAuthID := make(map[string]AccountState, len(snapshot.Accounts))
 	for _, account := range snapshot.Accounts {
@@ -304,7 +367,17 @@ func BuildStatusPayload(snapshot StateSnapshot, ordered []ScheduledAccount) Stat
 		LastReason:    snapshot.LastReason,
 		Settings:      SettingsFromConfig(snapshot.Config),
 		Accounts:      make([]StatusAccount, 0, len(ordered)),
+		Groups:        make([]StatusGroup, 0, len(snapshot.Annotations.Groups)),
 		Logs:          cloneLogs(snapshot.Logs),
+	}
+	for id, group := range snapshot.Annotations.Groups {
+		payload.Groups = append(payload.Groups, StatusGroup{
+			ID:    id,
+			Name:  group.Name,
+			Notes: group.Notes,
+			Tags:  cloneStringSlice(group.Tags),
+			Color: group.Color,
+		})
 	}
 	for i, scheduled := range ordered {
 		if payload.NextAuthID == "" && scheduled.Available {
@@ -512,7 +585,7 @@ func handlePatchAccountAnnotationFromQuery(store *PluginState, query url.Values,
 		AuthID:  query.Get("auth_id"),
 		Alias:   queryStringPtr(query, "alias"),
 		Notes:   queryStringPtr(query, "notes"),
-		Tags:    splitQueryTags(query.Get("tags")),
+		Tags:    queryTags(query, "tags"),
 		GroupID: queryStringPtr(query, "group_id"),
 	}
 	resp := applyAccountAnnotationPatch(store, patch)
@@ -568,10 +641,10 @@ func handlePatchGroupAnnotationFromQuery(store *PluginState, query url.Values, n
 	patch := annotationPatch{
 		Key:   query.Get("key"),
 		ID:    query.Get("id"),
-		Name:  queryStringPtr(query, "name"),
-		Notes: queryStringPtr(query, "notes"),
-		Tags:  splitQueryTags(query.Get("tags")),
-		Color: queryStringPtr(query, "color"),
+		Name:  queryNonBlankStringPtr(query, "name"),
+		Notes: queryNonBlankStringPtr(query, "notes"),
+		Tags:  queryTags(query, "tags"),
+		Color: queryNonBlankStringPtr(query, "color"),
 	}
 	resp := applyGroupAnnotationPatch(store, patch)
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -716,7 +789,7 @@ var statusTemplateV2 = template.Must(template.New("status-v2").Funcs(template.Fu
 <label class="field"><span>额度刷新间隔</span><input id="refreshInterval" spellcheck="false"></label>
 <label class="field"><span>缓存过期判定</span><input id="staleAfter" spellcheck="false"></label>
 <label class="field"><span>最大并发刷新</span><input id="maxConcurrency" type="number" min="1" step="1"></label>
-<div class="actions"><button id="saveSettings" type="button">保存设置</button><button id="refreshQuota" type="button" class="secondary">刷新额度</button></div>
+<div class="actions"><button id="saveSettings" type="button">保存设置</button><button id="refreshQuota" type="button" class="secondary">刷新额度</button><button id="exportConfig" type="button" class="ghost">导出配置</button><button id="importConfig" type="button" class="ghost">导入配置</button><input id="importFile" type="file" accept="application/json,.json" hidden></div>
 <div id="notice" class="notice" hidden></div>
 </div>
 </aside>
@@ -740,6 +813,9 @@ const RESOURCE_BASE='/v0/resource/plugins/codex-quota-scheduler';
 const notice=document.getElementById('notice');
 const editDialog=document.getElementById('editDialog');
 const accountsByID=new Map((STATUS.accounts||[]).map((account)=>[account.auth_id,account]));
+const groupsByID=new Map();
+for(const group of STATUS.groups||[]){if(group.id){groupsByID.set(group.id,{name:group.name||'',notes:group.notes||''})}}
+for(const account of STATUS.accounts||[]){if(account.group_id){groupsByID.set(account.group_id,{name:account.group||'',notes:account.group_notes||''})}}
 let editingAuthID='';
 function showNotice(text,isError){notice.hidden=false;notice.textContent=text;notice.className='notice'+(isError?' error':'')}
 async function readJSON(resp){const text=await resp.text();if(!text)return{};try{return JSON.parse(text)}catch{return{error:text}}}
@@ -749,7 +825,10 @@ async function saveSettings(){try{await requestResource('/settings',{save:'1',ha
 async function refreshQuota(){try{await requestResource('/refresh');showNotice('已请求后台刷新额度。稍后刷新页面查看结果。',false);await refreshLogs()}catch(error){showNotice(error.message||String(error),true)}}
 function splitTags(text){return text.split(',').map((item)=>item.trim()).filter(Boolean)}
 function openEdit(authID){const account=accountsByID.get(authID)||{};editingAuthID=authID;document.getElementById('editAuthID').textContent=authID;document.getElementById('editAlias').value=account.alias||'';document.getElementById('editNotes').value=account.notes||'';document.getElementById('editGroupID').value=account.group_id||'';document.getElementById('editGroupName').value=account.group||'';document.getElementById('editGroupNotes').value=account.group_notes||'';document.getElementById('editTags').value=(account.tags||[]).join(', ');editDialog.showModal()}
-async function saveAccountModal(){if(!editingAuthID)return;const groupID=document.getElementById('editGroupID').value.trim();try{await requestResource('/annotations/account',{auth_id:editingAuthID,alias:document.getElementById('editAlias').value,notes:document.getElementById('editNotes').value,group_id:groupID,tags:splitTags(document.getElementById('editTags').value).join(',')});if(groupID){await requestResource('/annotations/group',{id:groupID,name:document.getElementById('editGroupName').value,notes:document.getElementById('editGroupNotes').value})}showNotice('账号卡片已保存。刷新页面后可看到最新显示。',false);editDialog.close();await refreshLogs()}catch(error){showNotice(error.message||String(error),true)}}
+function fillGroupFromID(){const groupID=document.getElementById('editGroupID').value.trim();const group=groupsByID.get(groupID);if(!group)return;if(!document.getElementById('editGroupName').value.trim())document.getElementById('editGroupName').value=group.name||'';if(!document.getElementById('editGroupNotes').value.trim())document.getElementById('editGroupNotes').value=group.notes||''}
+async function saveAccountModal(){if(!editingAuthID)return;const groupID=document.getElementById('editGroupID').value.trim();const groupName=document.getElementById('editGroupName').value.trim();const groupNotes=document.getElementById('editGroupNotes').value.trim();try{await requestResource('/annotations/account',{auth_id:editingAuthID,alias:document.getElementById('editAlias').value,notes:document.getElementById('editNotes').value,group_id:groupID,tags:splitTags(document.getElementById('editTags').value).join(',')});if(groupID&&(groupName||groupNotes)){await requestResource('/annotations/group',{id:groupID,name:groupName,notes:groupNotes});groupsByID.set(groupID,{name:groupName,notes:groupNotes})}showNotice('账号卡片已保存。刷新页面后可看到最新显示。',false);editDialog.close();await refreshLogs()}catch(error){showNotice(error.message||String(error),true)}}
+async function exportConfig(){try{const data=await requestResource('/export');const blob=new Blob([JSON.stringify(data,null,2)+'\n'],{type:'application/json'});const link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download='codex-quota-scheduler-config.json';link.click();URL.revokeObjectURL(link.href);showNotice('配置已导出。',false);await refreshLogs()}catch(error){showNotice(error.message||String(error),true)}}
+async function importConfigFile(file){if(!file)return;try{const text=await file.text();await requestResource('/import',{data:text});showNotice('配置已导入。刷新页面后可看到最新内容。',false);await refreshLogs()}catch(error){showNotice(error.message||String(error),true)}}
 function formatLogTime(value){if(!value)return'';const date=new Date(value);if(Number.isNaN(date.getTime()))return value;return date.toLocaleString('zh-CN',{hour12:false})}
 function formatLocalTimes(){for(const node of document.querySelectorAll('.localTime[data-time]')){const raw=node.dataset.time||'';const date=new Date(raw);if(!Number.isNaN(date.getTime()))node.textContent=date.toLocaleString('zh-CN',{hour12:false})}}
 function renderLogs(logs){const list=document.getElementById('logList');list.replaceChildren();const items=(logs||[]).slice().reverse().slice(0,80);if(items.length===0){const empty=document.createElement('div');empty.className='empty';empty.textContent='暂无日志。发起请求或手动刷新额度后，这里会显示记录。';list.appendChild(empty);return}for(const log of items){const row=document.createElement('div');row.className='logItem '+(log.level||'info');const meta=document.createElement('div');meta.className='logMeta';meta.textContent=[formatLogTime(log.time),log.event].filter(Boolean).join(' · ');const msg=document.createElement('div');msg.className='logMsg';const fields=log.fields?Object.entries(log.fields).map(([key,value])=>key+'='+value).join('，'):'';msg.textContent=fields?(log.message+'（'+fields+'）'):log.message;row.append(meta,msg);list.appendChild(row)}}
@@ -757,7 +836,12 @@ async function refreshLogs(){try{const data=await requestResource('/logs');rende
 document.getElementById('saveSettings').addEventListener('click',saveSettings);
 document.getElementById('refreshQuota').addEventListener('click',refreshQuota);
 document.getElementById('refreshLogs').addEventListener('click',refreshLogs);
+document.getElementById('exportConfig').addEventListener('click',exportConfig);
+document.getElementById('importConfig').addEventListener('click',()=>document.getElementById('importFile').click());
+document.getElementById('importFile').addEventListener('change',(event)=>importConfigFile(event.target.files&&event.target.files[0]));
 document.getElementById('saveAccount').addEventListener('click',saveAccountModal);
+document.getElementById('editGroupID').addEventListener('input',fillGroupFromID);
+document.getElementById('editGroupID').addEventListener('blur',fillGroupFromID);
 document.getElementById('closeDialog').addEventListener('click',()=>editDialog.close());
 document.getElementById('cancelEdit').addEventListener('click',()=>editDialog.close());
 for(const button of document.querySelectorAll('.openEdit')){button.addEventListener('click',()=>openEdit(button.dataset.authId||''))}

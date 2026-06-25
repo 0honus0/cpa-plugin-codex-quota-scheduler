@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -104,23 +106,57 @@ func logSchedulerDecision(store *PluginState, req pluginapi.SchedulerPickRequest
 	event := "scheduler.unhandled"
 	message := "请求未由插件接管"
 	fields := map[string]any{
-		"model":    req.Model,
-		"provider": req.Provider,
-		"reason":   decision.Reason,
+		"model":         req.Model,
+		"provider":      req.Provider,
+		"reason":        decision.Reason,
+		"ordered_count": len(decision.Ordered),
 	}
 	if decision.AuthID != "" {
 		event = "scheduler.selected"
 		message = "请求已由插件接管"
 		fields["auth_id"] = decision.AuthID
+		if selected, ok := findScheduledAccount(decision.Ordered, decision.AuthID); ok {
+			fields["selected_queue_status"] = string(selected.QueueStatus)
+			fields["selected_sort_time"] = selected.SortTime.Format(time.RFC3339)
+			fields["selected_cpa_priority"] = selected.Priority
+		}
 	} else if decision.DelegateBuiltin != "" {
 		event = "scheduler.fallback"
 		message = "插件触发内置调度 fallback"
 		fields["fallback"] = decision.DelegateBuiltin
+		fields["unavailable_summary"] = unavailableSummary(decision.Ordered)
 	} else if decision.Handled {
 		event = "scheduler.handled"
 		message = "插件已处理但未选择账号"
 	}
 	store.RecordLog(level, event, message, fields, now)
+}
+
+func findScheduledAccount(accounts []ScheduledAccount, authID string) (ScheduledAccount, bool) {
+	for _, account := range accounts {
+		if account.AuthID == authID {
+			return account, true
+		}
+	}
+	return ScheduledAccount{}, false
+}
+
+func unavailableSummary(accounts []ScheduledAccount) string {
+	if len(accounts) == 0 {
+		return "no ordered candidates"
+	}
+	parts := make([]string, 0, len(accounts))
+	for _, account := range accounts {
+		reason := account.UnavailableReason
+		if reason == "" && account.Available {
+			reason = "available"
+		}
+		if reason == "" {
+			reason = string(account.QueueStatus)
+		}
+		parts = append(parts, fmt.Sprintf("%s:%s:%s", account.AuthID, account.QueueStatus, reason))
+	}
+	return strings.Join(parts, "; ")
 }
 
 func handleUsageHandle(raw []byte) ([]byte, error) {

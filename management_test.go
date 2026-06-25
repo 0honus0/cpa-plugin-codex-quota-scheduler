@@ -19,7 +19,7 @@ func TestManagementRegisterExposesStatusResourceAndRoutes(t *testing.T) {
 	for _, resource := range resp.Resources {
 		resources[resource.Path] = resource
 	}
-	for _, path := range []string{"/status", "/settings", "/refresh", "/annotations/account", "/annotations/group", "/logs"} {
+	for _, path := range []string{"/status", "/settings", "/refresh", "/annotations/account", "/annotations/group", "/logs", "/export", "/import"} {
 		if _, ok := resources[path]; !ok {
 			t.Fatalf("missing resource %s in %#v", path, resp.Resources)
 		}
@@ -27,7 +27,7 @@ func TestManagementRegisterExposesStatusResourceAndRoutes(t *testing.T) {
 	if resources["/status"].Menu == "" {
 		t.Fatalf("status resource Menu is empty: %#v", resources["/status"])
 	}
-	for _, path := range []string{"/settings", "/refresh", "/annotations/account", "/annotations/group", "/logs"} {
+	for _, path := range []string{"/settings", "/refresh", "/annotations/account", "/annotations/group", "/logs", "/export", "/import"} {
 		if resources[path].Menu != "" {
 			t.Fatalf("resource %s Menu = %q, want empty", path, resources[path].Menu)
 		}
@@ -475,6 +475,111 @@ func TestResourceAccountEndpointDoesNotRequireManagementKey(t *testing.T) {
 	got := store.Annotations().Accounts["auth:auth-1"]
 	if got.Alias != "工作账号" || got.GroupID != "team-a" || len(got.Tags) != 2 || got.Notes != "常用" {
 		t.Fatalf("account annotation = %#v", got)
+	}
+}
+
+func TestResourceAccountEndpointClearsTags(t *testing.T) {
+	dir := t.TempDir()
+	previousDefaultStatePath := defaultStatePath
+	defaultStatePath = func() string { return filepath.Join(dir, "state.json") }
+	t.Cleanup(func() { defaultStatePath = previousDefaultStatePath })
+
+	store := NewPluginState(DefaultConfig())
+	store.SetAnnotations(AnnotationState{
+		Accounts: map[string]AccountAnnotation{
+			"auth:auth-1": {Alias: "A", Tags: []string{"wrong", "old"}},
+		},
+	})
+
+	resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/resource/plugins/codex-quota-scheduler/annotations/account",
+		Query: url.Values{
+			"auth_id": []string{"auth-1"},
+			"tags":    []string{""},
+		},
+	}, time.Now())
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, resp.Body)
+	}
+	if tags := store.Annotations().Accounts["auth:auth-1"].Tags; len(tags) != 0 {
+		t.Fatalf("tags = %#v, want cleared", tags)
+	}
+}
+
+func TestResourceGroupEndpointDoesNotOverwriteExistingNameWithBlankQuery(t *testing.T) {
+	dir := t.TempDir()
+	previousDefaultStatePath := defaultStatePath
+	defaultStatePath = func() string { return filepath.Join(dir, "state.json") }
+	t.Cleanup(func() { defaultStatePath = previousDefaultStatePath })
+
+	store := NewPluginState(DefaultConfig())
+	store.SetAnnotations(AnnotationState{
+		Groups: map[string]GroupAnnotation{
+			"1": {Name: "group1", Notes: "keep"},
+		},
+	})
+
+	resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/resource/plugins/codex-quota-scheduler/annotations/group",
+		Query: url.Values{
+			"id":   []string{"1"},
+			"name": []string{""},
+		},
+	}, time.Now())
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, resp.Body)
+	}
+	got := store.Annotations().Groups["1"]
+	if got.Name != "group1" || got.Notes != "keep" {
+		t.Fatalf("group = %#v, want existing name/notes preserved", got)
+	}
+}
+
+func TestResourceExportImportRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	previousDefaultStatePath := defaultStatePath
+	defaultStatePath = func() string { return filepath.Join(dir, "state.json") }
+	t.Cleanup(func() { defaultStatePath = previousDefaultStatePath })
+
+	cfg := DefaultConfig()
+	cfg.MonthlyMode = MonthlyModePriority
+	store := NewPluginState(cfg)
+	store.SetAnnotations(AnnotationState{
+		Accounts: map[string]AccountAnnotation{
+			"auth:auth-1": {Alias: "A", Tags: []string{"team"}, GroupID: "1"},
+		},
+		Groups: map[string]GroupAnnotation{
+			"1": {Name: "group1"},
+		},
+	})
+
+	exportResp := HandleManagementRequest(store, pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/resource/plugins/codex-quota-scheduler/export",
+	}, time.Now())
+	if exportResp.StatusCode != http.StatusOK {
+		t.Fatalf("export StatusCode = %d, want %d; body=%s", exportResp.StatusCode, http.StatusOK, exportResp.Body)
+	}
+
+	imported := NewPluginState(DefaultConfig())
+	importResp := HandleManagementRequest(imported, pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/resource/plugins/codex-quota-scheduler/import",
+		Query:  url.Values{"data": []string{string(exportResp.Body)}},
+	}, time.Now())
+	if importResp.StatusCode != http.StatusOK {
+		t.Fatalf("import StatusCode = %d, want %d; body=%s", importResp.StatusCode, http.StatusOK, importResp.Body)
+	}
+	if imported.Config().MonthlyMode != MonthlyModePriority {
+		t.Fatalf("imported config = %#v", imported.Config())
+	}
+	if got := imported.Annotations().Groups["1"].Name; got != "group1" {
+		t.Fatalf("imported group name = %q, want group1", got)
+	}
+	if got := imported.Annotations().Accounts["auth:auth-1"].Alias; got != "A" {
+		t.Fatalf("imported account alias = %q, want A", got)
 	}
 }
 
