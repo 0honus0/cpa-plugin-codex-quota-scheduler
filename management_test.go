@@ -309,7 +309,7 @@ func TestStatusHTMLUsesResourceActionsModalProgressAndLogs(t *testing.T) {
 	}
 	html := string(resp.Body)
 	lower := strings.ToLower(html)
-	for _, want := range []string{"quota-bar", "editDialog", "logList", "openEdit", "/v0/resource/plugins/codex-quota-scheduler/settings", "/v0/resource/plugins/codex-quota-scheduler/logs"} {
+	for _, want := range []string{"quota-bar", "editDialog", "logList", "openEdit", "exportLogs", "codex-quota-scheduler-logs.json", "/v0/resource/plugins/codex-quota-scheduler/settings", "/v0/resource/plugins/codex-quota-scheduler/logs"} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("html missing marker %q: %s", want, html)
 		}
