@@ -71,11 +71,11 @@ func DefaultConfig() Config {
 	return Config{
 		HandleEnabled:                   true,
 		QuotaRefreshInterval:            30 * time.Minute,
-		StaleAfter:                      6 * time.Hour,
+		StaleAfter:                      5 * time.Hour,
 		MonthlyMode:                     MonthlyModeExpiryOrder,
 		Fallback:                        FallbackFillFirst,
 		EnableUsageFeedback:             true,
-		MaxRefreshConcurrency:           4,
+		MaxRefreshConcurrency:           1,
 		QuotaEndpoint:                   "https://chatgpt.com/backend-api/wham/usage",
 		CircuitFailureThreshold:         3,
 		CircuitOpenDuration:             10 * time.Minute,

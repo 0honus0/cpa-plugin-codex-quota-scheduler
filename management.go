@@ -441,6 +441,7 @@ func statusWindow(window *QuotaWindow, label string) StatusWindow {
 		return StatusWindow{Label: label, DisplayText: "暂无数据", Missing: true}
 	}
 	used := 0.0
+	hasUsagePercent := window.UsedPercent != nil
 	if window.UsedPercent != nil {
 		used = *window.UsedPercent
 	}
@@ -454,11 +455,15 @@ func statusWindow(window *QuotaWindow, label string) StatusWindow {
 	if remaining < 0 {
 		remaining = 0
 	}
-	if window.Exhausted {
+	exhausted := window.Exhausted
+	if hasUsagePercent {
+		exhausted = used >= 100
+	}
+	if exhausted {
 		remaining = 0
 	}
 	displayText := fmt.Sprintf("剩余 %.0f%%", remaining)
-	if window.Exhausted {
+	if exhausted {
 		displayText = "已用完"
 	}
 	return StatusWindow{
@@ -467,7 +472,7 @@ func statusWindow(window *QuotaWindow, label string) StatusWindow {
 		UsedPercent:      used,
 		RemainingPercent: remaining,
 		DisplayText:      displayText,
-		Exhausted:        window.Exhausted,
+		Exhausted:        exhausted,
 		ResetAt:          window.ResetAt,
 		ResetText:        formatTime(window.ResetAt),
 	}
@@ -836,7 +841,7 @@ async function readJSON(resp){const text=await resp.text();if(!text)return{};try
 async function requestResource(path,params){const query=new URLSearchParams(params||{});const suffix=query.toString()?path+'?'+query.toString():path;const resp=await fetch(RESOURCE_BASE+suffix);const data=await readJSON(resp);if(!resp.ok)throw new Error(data.error||data.message||('请求失败：'+resp.status));return data}
 async function requestManagement(path,options){const resp=await fetch(MANAGEMENT_BASE+path,options||{});const data=await readJSON(resp);if(!resp.ok)throw new Error(data.error||data.message||('请求失败：'+resp.status));return data}
 function jsonRequest(method,payload){return{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}}
-function fillSettings(){const s=STATUS.settings||{};document.getElementById('handleEnabled').checked=s.handle_enabled!==false;document.getElementById('usageFeedback').checked=s.enable_usage_feedback!==false;document.getElementById('monthlyMode').value=s.monthly_mode||'expiry_order';document.getElementById('refreshInterval').value=s.quota_refresh_interval||'30m0s';document.getElementById('staleAfter').value=s.stale_after||'6h0m0s';document.getElementById('maxConcurrency').value=s.max_refresh_concurrency||4;document.getElementById('circuitFailureThreshold').value=s.circuit_failure_threshold||3;document.getElementById('circuitOpenDuration').value=s.circuit_open_duration||'10m0s';document.getElementById('circuitHalfOpenSuccessThreshold').value=s.circuit_half_open_success_threshold||1;document.getElementById('maxLogEntries').value=s.max_log_entries||2000;document.getElementById('logRetention').value=s.log_retention||'24h0m0s'}
+function fillSettings(){const s=STATUS.settings||{};document.getElementById('handleEnabled').checked=s.handle_enabled!==false;document.getElementById('usageFeedback').checked=s.enable_usage_feedback!==false;document.getElementById('monthlyMode').value=s.monthly_mode||'expiry_order';document.getElementById('refreshInterval').value=s.quota_refresh_interval||'30m0s';document.getElementById('staleAfter').value=s.stale_after||'5h0m0s';document.getElementById('maxConcurrency').value=s.max_refresh_concurrency||1;document.getElementById('circuitFailureThreshold').value=s.circuit_failure_threshold||3;document.getElementById('circuitOpenDuration').value=s.circuit_open_duration||'10m0s';document.getElementById('circuitHalfOpenSuccessThreshold').value=s.circuit_half_open_success_threshold||1;document.getElementById('maxLogEntries').value=s.max_log_entries||2000;document.getElementById('logRetention').value=s.log_retention||'24h0m0s'}
 async function saveSettings(){try{const payload={handle_enabled:document.getElementById('handleEnabled').checked,enable_usage_feedback:document.getElementById('usageFeedback').checked,monthly_mode:document.getElementById('monthlyMode').value,quota_refresh_interval:document.getElementById('refreshInterval').value.trim(),stale_after:document.getElementById('staleAfter').value.trim(),max_refresh_concurrency:Number.parseInt(document.getElementById('maxConcurrency').value,10)||1,circuit_failure_threshold:Number.parseInt(document.getElementById('circuitFailureThreshold').value,10)||3,circuit_open_duration:document.getElementById('circuitOpenDuration').value.trim(),circuit_half_open_success_threshold:Number.parseInt(document.getElementById('circuitHalfOpenSuccessThreshold').value,10)||1,max_log_entries:Number.parseInt(document.getElementById('maxLogEntries').value,10)||2000,log_retention:document.getElementById('logRetention').value.trim()};await requestManagement('/settings',jsonRequest('PUT',payload));showNotice('设置已保存，页面即将自动刷新。',false);await refreshLogs();schedulePageRefresh(700)}catch(error){showNotice(error.message||String(error),true)}}
 async function refreshQuota(){try{await requestManagement('/refresh',{method:'POST'});showNotice('已请求后台刷新额度，页面稍后自动刷新。',false);await refreshLogs();schedulePageRefresh(1800)}catch(error){showNotice(error.message||String(error),true)}}
 function splitTags(text){return text.split(',').map((item)=>item.trim()).filter(Boolean)}

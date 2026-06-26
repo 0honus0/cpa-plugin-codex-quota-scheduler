@@ -472,6 +472,21 @@ func TestStatusJSONIncludesQuotaWindowsForProgressBars(t *testing.T) {
 	}
 }
 
+func TestStatusWindowPrefersRealUsagePercentOverExhaustedFlag(t *testing.T) {
+	used := 40.0
+	status := statusWindow(&QuotaWindow{
+		Kind:        WindowWeekly,
+		UsedPercent: &used,
+		Exhausted:   true,
+	}, "周额度")
+	if status.Exhausted {
+		t.Fatalf("Exhausted = true, want false when used_percent shows quota remains: %#v", status)
+	}
+	if status.RemainingPercent != 60 || status.DisplayText != "剩余 60%" {
+		t.Fatalf("window = %#v, want remaining quota from real used_percent", status)
+	}
+}
+
 func TestStatusHTMLShowsRemainingQuotaLocalResetTimesAndCompactMetadata(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	store := NewPluginState(DefaultConfig())

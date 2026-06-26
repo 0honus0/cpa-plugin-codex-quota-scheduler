@@ -24,8 +24,11 @@ func TestDecodeConfigDefaults(t *testing.T) {
 	if cfg.QuotaRefreshInterval != 30*time.Minute {
 		t.Fatalf("QuotaRefreshInterval = %s, want 30m", cfg.QuotaRefreshInterval)
 	}
-	if cfg.StaleAfter != 6*time.Hour {
-		t.Fatalf("StaleAfter = %s, want 6h", cfg.StaleAfter)
+	if cfg.StaleAfter != 5*time.Hour {
+		t.Fatalf("StaleAfter = %s, want 5h", cfg.StaleAfter)
+	}
+	if cfg.MaxRefreshConcurrency != 1 {
+		t.Fatalf("MaxRefreshConcurrency = %d, want 1", cfg.MaxRefreshConcurrency)
 	}
 	if cfg.MaxLogEntries != 2000 {
 		t.Fatalf("MaxLogEntries = %d, want 2000", cfg.MaxLogEntries)
