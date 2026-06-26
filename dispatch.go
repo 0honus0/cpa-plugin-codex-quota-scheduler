@@ -66,8 +66,8 @@ func configure(raw []byte) error {
 	if err != nil {
 		return err
 	}
-	disk, err := LoadPluginDiskState(defaultStatePath())
-	if err == nil {
+	disk, loadedDisk, err := loadPluginDiskState(defaultStatePath())
+	if err == nil && loadedDisk {
 		cfg = disk.Config
 	} else {
 		disk = PluginDiskState{Config: cfg}
@@ -211,5 +211,15 @@ func refreshGlobalRefresherSoon() {
 	if refresher != nil {
 		globalState.RecordLog("info", "quota.refresh_requested", "已请求后台刷新额度", nil, time.Now())
 		refresher.RefreshSoon()
+	}
+}
+
+func refreshGlobalRefresherOneSoon(authID string) {
+	refresherMu.Lock()
+	refresher := globalRefresher
+	refresherMu.Unlock()
+	if refresher != nil {
+		globalState.RecordLog("info", "quota.refresh_one_requested", "已请求后台刷新单个账号额度", map[string]any{"auth_id": authID}, time.Now())
+		refresher.RefreshOneSoon(authID)
 	}
 }

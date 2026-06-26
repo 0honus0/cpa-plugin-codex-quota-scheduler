@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
@@ -23,14 +24,19 @@ type MonthlyMode string
 type FallbackMode string
 
 type Config struct {
-	HandleEnabled         bool
-	QuotaRefreshInterval  time.Duration
-	StaleAfter            time.Duration
-	MonthlyMode           MonthlyMode
-	Fallback              FallbackMode
-	EnableUsageFeedback   bool
-	MaxRefreshConcurrency int
-	QuotaEndpoint         string
+	HandleEnabled                   bool
+	QuotaRefreshInterval            time.Duration
+	StaleAfter                      time.Duration
+	MonthlyMode                     MonthlyMode
+	Fallback                        FallbackMode
+	EnableUsageFeedback             bool
+	MaxRefreshConcurrency           int
+	QuotaEndpoint                   string
+	CircuitFailureThreshold         int
+	CircuitOpenDuration             time.Duration
+	CircuitHalfOpenSuccessThreshold int
+	MaxLogEntries                   int
+	LogRetention                    time.Duration
 }
 
 type registration struct {
@@ -46,27 +52,75 @@ type registrationCapabilities struct {
 }
 
 type rawConfig struct {
-	HandleEnabled         *bool  `yaml:"handle_enabled"`
-	QuotaRefreshInterval  string `yaml:"quota_refresh_interval"`
-	StaleAfter            string `yaml:"stale_after"`
-	MonthlyMode           string `yaml:"monthly_mode"`
-	Fallback              string `yaml:"fallback"`
-	EnableUsageFeedback   *bool  `yaml:"enable_usage_feedback"`
-	MaxRefreshConcurrency *int   `yaml:"max_refresh_concurrency"`
-	QuotaEndpoint         string `yaml:"quota_endpoint"`
+	HandleEnabled                   *bool  `yaml:"handle_enabled"`
+	QuotaRefreshInterval            string `yaml:"quota_refresh_interval"`
+	StaleAfter                      string `yaml:"stale_after"`
+	MonthlyMode                     string `yaml:"monthly_mode"`
+	Fallback                        string `yaml:"fallback"`
+	EnableUsageFeedback             *bool  `yaml:"enable_usage_feedback"`
+	MaxRefreshConcurrency           *int   `yaml:"max_refresh_concurrency"`
+	QuotaEndpoint                   string `yaml:"quota_endpoint"`
+	CircuitFailureThreshold         *int   `yaml:"circuit_failure_threshold"`
+	CircuitOpenDuration             string `yaml:"circuit_open_duration"`
+	CircuitHalfOpenSuccessThreshold *int   `yaml:"circuit_half_open_success_threshold"`
+	MaxLogEntries                   *int   `yaml:"max_log_entries"`
+	LogRetention                    string `yaml:"log_retention"`
 }
 
 func DefaultConfig() Config {
 	return Config{
-		HandleEnabled:         true,
-		QuotaRefreshInterval:  30 * time.Minute,
-		StaleAfter:            6 * time.Hour,
-		MonthlyMode:           MonthlyModeExpiryOrder,
-		Fallback:              FallbackFillFirst,
-		EnableUsageFeedback:   true,
-		MaxRefreshConcurrency: 4,
-		QuotaEndpoint:         "https://chatgpt.com/backend-api/wham/usage",
+		HandleEnabled:                   true,
+		QuotaRefreshInterval:            30 * time.Minute,
+		StaleAfter:                      6 * time.Hour,
+		MonthlyMode:                     MonthlyModeExpiryOrder,
+		Fallback:                        FallbackFillFirst,
+		EnableUsageFeedback:             true,
+		MaxRefreshConcurrency:           4,
+		QuotaEndpoint:                   "https://chatgpt.com/backend-api/wham/usage",
+		CircuitFailureThreshold:         3,
+		CircuitOpenDuration:             10 * time.Minute,
+		CircuitHalfOpenSuccessThreshold: 1,
+		MaxLogEntries:                   2000,
+		LogRetention:                    24 * time.Hour,
 	}
+}
+
+func NormalizeConfig(cfg Config) Config {
+	defaults := DefaultConfig()
+	if cfg.QuotaRefreshInterval <= 0 {
+		cfg.QuotaRefreshInterval = defaults.QuotaRefreshInterval
+	}
+	if cfg.StaleAfter <= 0 {
+		cfg.StaleAfter = defaults.StaleAfter
+	}
+	if cfg.MonthlyMode == "" {
+		cfg.MonthlyMode = defaults.MonthlyMode
+	}
+	if cfg.Fallback == "" {
+		cfg.Fallback = defaults.Fallback
+	}
+	if cfg.MaxRefreshConcurrency <= 0 {
+		cfg.MaxRefreshConcurrency = defaults.MaxRefreshConcurrency
+	}
+	if strings.TrimSpace(cfg.QuotaEndpoint) == "" {
+		cfg.QuotaEndpoint = defaults.QuotaEndpoint
+	}
+	if cfg.CircuitFailureThreshold <= 0 {
+		cfg.CircuitFailureThreshold = defaults.CircuitFailureThreshold
+	}
+	if cfg.CircuitOpenDuration <= 0 {
+		cfg.CircuitOpenDuration = defaults.CircuitOpenDuration
+	}
+	if cfg.CircuitHalfOpenSuccessThreshold <= 0 {
+		cfg.CircuitHalfOpenSuccessThreshold = defaults.CircuitHalfOpenSuccessThreshold
+	}
+	if cfg.MaxLogEntries <= 0 {
+		cfg.MaxLogEntries = defaults.MaxLogEntries
+	}
+	if cfg.LogRetention <= 0 {
+		cfg.LogRetention = defaults.LogRetention
+	}
+	return cfg
 }
 
 func DecodeConfig(raw []byte) (Config, error) {
@@ -126,7 +180,45 @@ func DecodeConfig(raw []byte) (Config, error) {
 	if decoded.QuotaEndpoint != "" {
 		cfg.QuotaEndpoint = decoded.QuotaEndpoint
 	}
-	return cfg, nil
+	if decoded.CircuitFailureThreshold != nil {
+		if *decoded.CircuitFailureThreshold <= 0 {
+			return Config{}, fmt.Errorf("circuit_failure_threshold must be positive")
+		}
+		cfg.CircuitFailureThreshold = *decoded.CircuitFailureThreshold
+	}
+	if decoded.CircuitOpenDuration != "" {
+		d, err := time.ParseDuration(decoded.CircuitOpenDuration)
+		if err != nil {
+			return Config{}, fmt.Errorf("circuit_open_duration: %w", err)
+		}
+		if d <= 0 {
+			return Config{}, fmt.Errorf("circuit_open_duration must be positive")
+		}
+		cfg.CircuitOpenDuration = d
+	}
+	if decoded.CircuitHalfOpenSuccessThreshold != nil {
+		if *decoded.CircuitHalfOpenSuccessThreshold <= 0 {
+			return Config{}, fmt.Errorf("circuit_half_open_success_threshold must be positive")
+		}
+		cfg.CircuitHalfOpenSuccessThreshold = *decoded.CircuitHalfOpenSuccessThreshold
+	}
+	if decoded.MaxLogEntries != nil {
+		if *decoded.MaxLogEntries <= 0 {
+			return Config{}, fmt.Errorf("max_log_entries must be positive")
+		}
+		cfg.MaxLogEntries = *decoded.MaxLogEntries
+	}
+	if decoded.LogRetention != "" {
+		d, err := time.ParseDuration(decoded.LogRetention)
+		if err != nil {
+			return Config{}, fmt.Errorf("log_retention: %w", err)
+		}
+		if d <= 0 {
+			return Config{}, fmt.Errorf("log_retention must be positive")
+		}
+		cfg.LogRetention = d
+	}
+	return NormalizeConfig(cfg), nil
 }
 
 func PluginRegistration() registration {

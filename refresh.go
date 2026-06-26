@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -14,6 +16,9 @@ import (
 )
 
 const quotaUserAgent = "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal"
+const resetCreditsEndpoint = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
+const codexTokenEndpoint = "https://auth.openai.com/oauth/token"
+const codexClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
 const maxErrorBodySummaryLen = 220
 
@@ -31,6 +36,7 @@ var callHostCallback = func(method string, payload any) (json.RawMessage, error)
 type HostClient interface {
 	ListAuths() ([]pluginapi.HostAuthFileEntry, error)
 	GetAuth(authIndex string) (pluginapi.HostAuthGetResponse, error)
+	SaveAuth(name string, raw json.RawMessage) error
 	Do(req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error)
 	Log(level, message string, fields map[string]any)
 }
@@ -102,6 +108,48 @@ func (r *QuotaRefresher) RefreshOnce() error {
 	close(jobs)
 	wg.Wait()
 	return nil
+}
+
+func (r *QuotaRefresher) RefreshOneAuthID(authID string) error {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return fmt.Errorf("auth_id is required")
+	}
+	auths, err := r.host.ListAuths()
+	if err != nil {
+		return fmt.Errorf("list auths: %w", err)
+	}
+	for _, auth := range auths {
+		if auth.ID != authID {
+			continue
+		}
+		if !isRefreshEligible(auth) {
+			return fmt.Errorf("auth %s is not eligible for quota refresh", authID)
+		}
+		r.refreshAuth(auth)
+		return nil
+	}
+	return fmt.Errorf("auth %s not found", authID)
+}
+
+func (r *QuotaRefresher) RefreshOneSoon(authID string) {
+	r.mu.Lock()
+	if r.stopping {
+		r.mu.Unlock()
+		return
+	}
+	r.wg.Add(1)
+	r.mu.Unlock()
+
+	go func() {
+		defer r.wg.Done()
+		if err := r.RefreshOneAuthID(authID); err != nil {
+			r.host.Log("error", "quota refresh failed", map[string]any{"auth_id": authID, "error": redactSecrets(err.Error())})
+			if r.state != nil {
+				r.state.RecordLog("warn", "quota.refresh_one_failed", "账号额度刷新失败", map[string]any{"auth_id": authID, "error": redactSecrets(err.Error())}, r.now())
+			}
+		}
+	}()
 }
 
 func (r *QuotaRefresher) Start() {
@@ -197,6 +245,13 @@ func (r *QuotaRefresher) refreshAuth(auth pluginapi.HostAuthFileEntry) {
 		r.upsertRefreshFailure(account, redactWithCredentials(fmt.Sprintf("extract credentials: %v", err), credentials))
 		return
 	}
+	if accessTokenExpired(credentials, r.now()) {
+		credentials, err = r.refreshAndSaveCredentials(authResp, credentials)
+		if err != nil {
+			r.upsertRefreshFailure(account, redactWithCredentials(fmt.Sprintf("refresh access token: %v", err), credentials))
+			return
+		}
+	}
 	account.ChatGPTAccountID = credentials.ChatGPTAccountID
 
 	cfg := r.state.Config()
@@ -226,12 +281,166 @@ func (r *QuotaRefresher) refreshAuth(auth pluginapi.HostAuthFileEntry) {
 		r.upsertRefreshFailure(account, redactWithCredentials(fmt.Sprintf("parse quota: %v", err), credentials))
 		return
 	}
+	if resetCredits, err := r.refreshResetCredits(credentials); err != nil {
+		r.state.RecordLog("warn", "quota.reset_credits_failed", "主动重置次数刷新失败", map[string]any{"auth_id": account.AuthID, "error": redactWithCredentials(err.Error(), credentials)}, r.now())
+	} else {
+		mergeResetCredits(&quota, resetCredits)
+	}
 	account.Quota = quota
 	account.Family = quota.Family
 	account.LastError = ""
 	account.LastSuccessAt = r.now()
 	r.state.UpsertQuota(account)
 	r.state.RecordLog("info", "quota.refresh_success", "账号额度刷新成功", map[string]any{"auth_id": account.AuthID}, r.now())
+}
+
+func (r *QuotaRefresher) refreshAndSaveCredentials(authResp pluginapi.HostAuthGetResponse, current CodexCredentials) (CodexCredentials, error) {
+	if strings.TrimSpace(current.RefreshToken) == "" {
+		return CodexCredentials{}, errors.New("access_token expired and refresh_token is missing")
+	}
+	refreshed, err := r.refreshCodexAccessToken(current.RefreshToken)
+	if err != nil {
+		return CodexCredentials{}, err
+	}
+	if refreshed.RefreshToken == "" {
+		refreshed.RefreshToken = current.RefreshToken
+	}
+	if refreshed.ChatGPTAccountID == "" {
+		refreshed.ChatGPTAccountID = current.ChatGPTAccountID
+	}
+	if refreshed.IDToken == "" {
+		refreshed.IDToken = current.IDToken
+	}
+	if refreshed.AccessToken == "" {
+		return CodexCredentials{}, errors.New("refresh response did not include access_token")
+	}
+
+	updated, err := updateCodexAuthJSON(authResp.JSON, refreshed, r.now())
+	if err != nil {
+		return CodexCredentials{}, err
+	}
+	name := strings.TrimSpace(authResp.Name)
+	if name == "" {
+		return CodexCredentials{}, errors.New("auth file name is required to save refreshed token")
+	}
+	if err := r.host.SaveAuth(name, updated); err != nil {
+		return CodexCredentials{}, err
+	}
+	r.state.RecordLog("info", "quota.token_refreshed", "Codex access token refreshed and saved", map[string]any{"auth_file": name}, r.now())
+	return refreshed, nil
+}
+
+func (r *QuotaRefresher) refreshCodexAccessToken(refreshToken string) (CodexCredentials, error) {
+	form := url.Values{
+		"client_id":     {codexClientID},
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+		"scope":         {"openid profile email"},
+	}
+	req := pluginapi.HTTPRequest{
+		Method: http.MethodPost,
+		URL:    codexTokenEndpoint,
+		Headers: http.Header{
+			"Accept":       []string{"application/json"},
+			"Content-Type": []string{"application/x-www-form-urlencoded"},
+		},
+		Body: []byte(form.Encode()),
+	}
+	resp, err := r.host.Do(req)
+	if err != nil {
+		return CodexCredentials{}, fmt.Errorf("token refresh request: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return CodexCredentials{}, fmt.Errorf("token refresh returned status %d: response body: %s", resp.StatusCode, sanitizedBodySummary(resp.Body))
+	}
+	var tokenResp struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		IDToken      string `json:"id_token"`
+		ExpiresIn    int    `json:"expires_in"`
+		AccountID    string `json:"account_id"`
+	}
+	if err := json.Unmarshal(resp.Body, &tokenResp); err != nil {
+		return CodexCredentials{}, fmt.Errorf("parse token refresh response: %w", err)
+	}
+	credentials := CodexCredentials{
+		AccessToken:      strings.TrimSpace(tokenResp.AccessToken),
+		RefreshToken:     strings.TrimSpace(tokenResp.RefreshToken),
+		IDToken:          strings.TrimSpace(tokenResp.IDToken),
+		ChatGPTAccountID: strings.TrimSpace(tokenResp.AccountID),
+	}
+	if credentials.ChatGPTAccountID == "" && credentials.IDToken != "" {
+		if accountID, err := extractChatGPTAccountID(credentials.IDToken); err == nil {
+			credentials.ChatGPTAccountID = accountID
+		}
+	}
+	if tokenResp.ExpiresIn > 0 {
+		credentials.ExpiresAt = r.now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+	}
+	return credentials, nil
+}
+
+func updateCodexAuthJSON(raw json.RawMessage, credentials CodexCredentials, now time.Time) (json.RawMessage, error) {
+	var doc map[string]any
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			return nil, err
+		}
+	}
+	if doc == nil {
+		doc = make(map[string]any)
+	}
+	doc["access_token"] = credentials.AccessToken
+	doc["refresh_token"] = credentials.RefreshToken
+	doc["id_token"] = credentials.IDToken
+	doc["account_id"] = credentials.ChatGPTAccountID
+	doc["type"] = "codex"
+	if !credentials.ExpiresAt.IsZero() {
+		doc["expired"] = credentials.ExpiresAt.Format(time.RFC3339)
+	}
+	if !now.IsZero() {
+		doc["last_refresh"] = now.Format(time.RFC3339)
+	}
+	return json.Marshal(doc)
+}
+
+func (r *QuotaRefresher) refreshResetCredits(credentials CodexCredentials) (ParsedQuota, error) {
+	req := pluginapi.HTTPRequest{
+		Method: http.MethodGet,
+		URL:    resetCreditsEndpoint,
+		Headers: http.Header{
+			"Authorization":      []string{"Bearer " + credentials.AccessToken},
+			"Chatgpt-Account-Id": []string{credentials.ChatGPTAccountID},
+			"Content-Type":       []string{"application/json"},
+			"User-Agent":         []string{quotaUserAgent},
+		},
+	}
+	resp, err := r.host.Do(req)
+	if err != nil {
+		return ParsedQuota{}, fmt.Errorf("reset credits request: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ParsedQuota{}, fmt.Errorf("reset credits request returned status %d: response body: %s", resp.StatusCode, sanitizedBodySummary(resp.Body))
+	}
+	quota, err := ParseResetCreditsPayload(resp.Body, r.now())
+	if err != nil {
+		return ParsedQuota{}, fmt.Errorf("parse reset credits: %w", err)
+	}
+	return quota, nil
+}
+
+func mergeResetCredits(quota *ParsedQuota, resetCredits ParsedQuota) {
+	if resetCredits.ResetCreditsAvailableCount != nil {
+		count := *resetCredits.ResetCreditsAvailableCount
+		quota.ResetCreditsAvailableCount = &count
+	}
+	if resetCredits.ResetCreditsTotalEarnedCount != nil {
+		count := *resetCredits.ResetCreditsTotalEarnedCount
+		quota.ResetCreditsTotalEarnedCount = &count
+	}
+	if len(resetCredits.ResetCredits) > 0 {
+		quota.ResetCredits = append([]ResetCredit(nil), resetCredits.ResetCredits...)
+	}
 }
 
 func (r *QuotaRefresher) upsertRefreshFailure(account AccountState, message string) {
@@ -339,6 +548,11 @@ func (ABIHostClient) GetAuth(authIndex string) (pluginapi.HostAuthGetResponse, e
 		return pluginapi.HostAuthGetResponse{}, fmt.Errorf("decode host.auth.get result: %w", err)
 	}
 	return resp, nil
+}
+
+func (ABIHostClient) SaveAuth(name string, raw json.RawMessage) error {
+	_, err := callHostCallback(pluginabi.MethodHostAuthSave, pluginapi.HostAuthSaveRequest{Name: name, JSON: raw})
+	return err
 }
 
 func (ABIHostClient) Do(req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {

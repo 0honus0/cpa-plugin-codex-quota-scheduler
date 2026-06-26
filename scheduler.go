@@ -47,7 +47,11 @@ func PickCodexAccount(req pluginapi.SchedulerPickRequest, snapshot StateSnapshot
 	if len(ordered) == 0 {
 		return PickDecision{Reason: "no_codex_candidates", Ordered: ordered}
 	}
+	activePriority := ordered[0].Priority
 	for _, account := range ordered {
+		if account.Priority != activePriority {
+			break
+		}
 		if account.Available {
 			return PickDecision{
 				AuthID:  account.AuthID,
@@ -156,6 +160,13 @@ func accountQueueState(account AccountState, now time.Time) (QueueStatus, bool, 
 	if account.Stale {
 		return QueueStatusUnavailable, false, "stale_quota", time.Time{}
 	}
+	circuit := effectiveCircuitState(account.Circuit, now)
+	if circuit.EffectiveState == CircuitStateOpen {
+		return QueueStatusUnavailable, false, "circuit_open", circuit.NextProbeAt
+	}
+	if circuit.EffectiveState == CircuitStateClosed && circuit.FailureCount > 0 && !circuit.NextProbeAt.IsZero() && circuit.NextProbeAt.After(now) {
+		return QueueStatusUnavailable, false, "quota_probe_wait", circuit.NextProbeAt
+	}
 	if account.TemporaryExhausted && (account.TemporaryResetAt.IsZero() || account.TemporaryResetAt.After(now)) {
 		return QueueStatusFiveHourExhausted, false, "temporary_exhausted", account.TemporaryResetAt
 	}
@@ -189,6 +200,9 @@ func accountQueueState(account AccountState, now time.Time) (QueueStatus, bool, 
 		}
 		if windowExhausted(account.Quota.LongWindow, now) {
 			return QueueStatusLongWindowExhausted, false, "monthly_exhausted", account.Quota.LongWindow.ResetAt
+		}
+		if windowExhausted(account.Quota.FiveHour, now) {
+			return QueueStatusFiveHourExhausted, false, "five_hour_exhausted", account.Quota.FiveHour.ResetAt
 		}
 		return QueueStatusAvailable, true, "", account.Quota.LongWindow.ResetAt
 	default:

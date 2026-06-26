@@ -75,6 +75,7 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 	callHostCallback = callHostCallbackABI
 	globalRefresher = NewQuotaRefresher(ABIHostClient{}, globalState, time.Now)
 	managementRefreshSoon = refreshGlobalRefresherSoon
+	managementRefreshOneSoon = refreshGlobalRefresherOneSoon
 	refresherMu.Unlock()
 	plugin.abi_version = C.uint32_t(pluginabi.ABIVersion)
 	plugin.call = C.cliproxy_plugin_call_fn(C.cliproxyPluginCall)

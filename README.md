@@ -40,6 +40,10 @@ weekly accounts within the same CPA priority.
 - `GET /v0/management/plugins/codex-quota-scheduler/settings`
 - `PUT /v0/management/plugins/codex-quota-scheduler/settings`
 - `POST /v0/management/plugins/codex-quota-scheduler/refresh`
+- `POST /v0/management/plugins/codex-quota-scheduler/refresh/account`
+- `GET /v0/management/plugins/codex-quota-scheduler/logs`
+- `GET /v0/management/plugins/codex-quota-scheduler/export`
+- `POST /v0/management/plugins/codex-quota-scheduler/import`
 - `GET /v0/management/plugins/codex-quota-scheduler/annotations`
 - `PUT /v0/management/plugins/codex-quota-scheduler/annotations`
 - `PATCH /v0/management/plugins/codex-quota-scheduler/annotations/account`
@@ -52,8 +56,7 @@ weekly accounts within the same CPA priority.
 3. Start CPA and confirm `GET /v0/management/plugins` reports `registered: true` and `effective_enabled: true`.
 4. Open `/v0/resource/plugins/codex-quota-scheduler/status`.
 5. Confirm the account cards follow scheduler order: CPA priority descending,
-   then monthly mode ordering inside the priority tier. Unavailable accounts can
-   appear before available accounts when they sort earlier.
+   then availability buckets and monthly mode ordering inside the priority tier.
 6. Compare the `Next` value, or the top available account card, with the
    auth ID selected for the next Codex request.
 7. Simulate or observe a 429 `usage_limit_reached` response and confirm the next scheduler pick avoids that account.

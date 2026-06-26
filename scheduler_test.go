@@ -296,6 +296,31 @@ func TestPickDelegatesFillFirstWhenNoSelectableAccount(t *testing.T) {
 	}
 }
 
+func TestPickDoesNotScanBelowActivePriorityTier(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	cfg := DefaultConfig()
+	cfg.Fallback = FallbackFillFirst
+	highStale := weeklyAccount("high-stale", 10, now.Add(time.Hour), false)
+	highStale.Stale = true
+	lowAvailable := weeklyAccount("low-available", 1, now.Add(2*time.Hour), false)
+	snapshot := StateSnapshot{Config: cfg, Now: now, Accounts: []AccountState{
+		highStale,
+		lowAvailable,
+	}}
+	req := pluginapi.SchedulerPickRequest{
+		Provider: "codex",
+		Candidates: []pluginapi.SchedulerAuthCandidate{
+			{ID: "high-stale", Provider: "codex", Priority: 10, Status: "active"},
+			{ID: "low-available", Provider: "codex", Priority: 1, Status: "active"},
+		},
+	}
+
+	decision := PickCodexAccount(req, snapshot, now)
+	if decision.AuthID != "" || !decision.Handled || decision.DelegateBuiltin != pluginapi.SchedulerBuiltinFillFirst {
+		t.Fatalf("decision = %#v, want fill-first fallback without selecting lower CPA priority", decision)
+	}
+}
+
 func TestPickCandidatePriorityOverridesCachedPriority(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	cfg := DefaultConfig()
@@ -344,6 +369,34 @@ func TestPickSkipsMonthlyWhenLongWindowExhausted(t *testing.T) {
 	decision := PickCodexAccount(requestWithCandidates("blocked", "available"), snapshot, now)
 	if decision.AuthID != "available" {
 		t.Fatalf("AuthID = %q, want available", decision.AuthID)
+	}
+}
+
+func TestPickSkipsMonthlyWhenFiveHourExhausted(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	blocked := monthlyAccount("blocked", 5, now.Add(24*time.Hour))
+	used := 100.0
+	blocked.Quota.FiveHour = &QuotaWindow{
+		Kind:        WindowFiveHour,
+		UsedPercent: &used,
+		ResetAt:     now.Add(time.Hour),
+		Exhausted:   true,
+	}
+	available := monthlyAccount("available", 5, now.Add(48*time.Hour))
+	snapshot := StateSnapshot{Config: DefaultConfig(), Now: now, Accounts: []AccountState{
+		blocked,
+		available,
+	}}
+
+	ordered := BuildOrderedAccounts(requestWithCandidates("blocked", "available"), snapshot, now)
+	if len(ordered) != 2 {
+		t.Fatalf("ordered = %#v", ordered)
+	}
+	if ordered[0].AuthID != "available" || !ordered[0].Available {
+		t.Fatalf("first account = %#v, want available monthly account", ordered[0])
+	}
+	if ordered[1].AuthID != "blocked" || ordered[1].QueueStatus != QueueStatusFiveHourExhausted || ordered[1].UnavailableReason != "five_hour_exhausted" {
+		t.Fatalf("blocked account = %#v, want monthly five-hour exhausted", ordered[1])
 	}
 }
 
@@ -438,5 +491,37 @@ func TestPickSkipsStaleAccount(t *testing.T) {
 	decision := PickCodexAccount(requestWithCandidates("blocked", "available"), snapshot, now)
 	if decision.AuthID != "available" {
 		t.Fatalf("AuthID = %q, want available", decision.AuthID)
+	}
+}
+
+func TestPickSkipsOpenCircuitButAllowsHalfOpen(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	open := weeklyAccount("open", 5, now.Add(time.Hour), false)
+	open.Circuit = CircuitBreakerState{
+		State:        CircuitStateOpen,
+		FailureCount: 3,
+		OpenedAt:     now.Add(-time.Minute),
+		NextProbeAt:  now.Add(9 * time.Minute),
+		Reason:       usageLimitReachedReason,
+	}
+	halfOpen := weeklyAccount("half-open", 5, now.Add(2*time.Hour), false)
+	halfOpen.Circuit = CircuitBreakerState{
+		State:        CircuitStateOpen,
+		FailureCount: 3,
+		OpenedAt:     now.Add(-15 * time.Minute),
+		NextProbeAt:  now.Add(-time.Minute),
+		Reason:       usageLimitReachedReason,
+	}
+	snapshot := StateSnapshot{Config: DefaultConfig(), Now: now, Accounts: []AccountState{open, halfOpen}}
+
+	ordered := BuildOrderedAccounts(requestWithCandidates("open", "half-open"), snapshot, now)
+	if len(ordered) != 2 {
+		t.Fatalf("ordered = %#v", ordered)
+	}
+	if ordered[0].AuthID != "half-open" || !ordered[0].Available || ordered[0].QueueStatus != QueueStatusAvailable {
+		t.Fatalf("first ordered account = %#v, want half-open available", ordered[0])
+	}
+	if ordered[1].AuthID != "open" || ordered[1].Available || ordered[1].UnavailableReason != "circuit_open" {
+		t.Fatalf("second ordered account = %#v, want open circuit unavailable", ordered[1])
 	}
 }

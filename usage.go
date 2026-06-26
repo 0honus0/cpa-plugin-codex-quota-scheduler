@@ -67,16 +67,51 @@ func HandleUsageFeedback(state *PluginState, record pluginapi.UsageRecord, now t
 	if state == nil || !state.Config().EnableUsageFeedback {
 		return
 	}
+	if record.Provider == "codex" && !record.Failed {
+		if !shouldRecordCircuitSuccess(state, record, now) {
+			return
+		}
+		if account, ok := state.RecordAccountSuccess(record.AuthID, record.AuthIndex, now); ok {
+			state.RecordLog("info", "circuit.success", "账号请求成功，熔断状态已更新", map[string]any{
+				"auth_id":       account.AuthID,
+				"auth_index":    account.AuthIndex,
+				"circuit_state": account.Circuit.EffectiveState,
+				"success_count": account.Circuit.SuccessCount,
+				"failure_count": account.Circuit.FailureCount,
+			}, now)
+		}
+		return
+	}
 	event, ok := DetectQuotaFailure(record, now)
 	if !ok {
 		return
 	}
-	if event.AuthID != "" {
-		state.MarkAccountTemporaryExhausted(event.AuthID, event.ResetAt, event.Reason)
+	account, recorded := state.RecordAccountFailure(event.AuthID, event.AuthIndex, event.Reason, event.ResetAt, now)
+	if !recorded {
+		return
 	}
-	if event.AuthIndex != "" {
-		state.MarkAccountTemporaryExhaustedByAuthIndex(event.AuthIndex, event.ResetAt, event.Reason)
+	state.RecordLog("warn", "circuit.failure", "账号请求失败，熔断计数已更新", map[string]any{
+		"auth_id":       account.AuthID,
+		"auth_index":    account.AuthIndex,
+		"reason":        event.Reason,
+		"failure_count": account.Circuit.FailureCount,
+		"circuit_state": account.Circuit.EffectiveState,
+		"next_probe_at": formatTime(account.Circuit.NextProbeAt),
+	}, now)
+}
+
+func shouldRecordCircuitSuccess(state *PluginState, record pluginapi.UsageRecord, now time.Time) bool {
+	for _, account := range state.Snapshot(now).Accounts {
+		if record.AuthID != "" && account.AuthID != record.AuthID {
+			continue
+		}
+		if record.AuthID == "" && record.AuthIndex != "" && account.AuthIndex != record.AuthIndex {
+			continue
+		}
+		circuit := effectiveCircuitState(account.Circuit, now)
+		return circuit.EffectiveState != CircuitStateClosed || circuit.FailureCount > 0 || circuit.SuccessCount > 0
 	}
+	return false
 }
 
 func isUsageLimitReached(body quotaFailureBody) bool {

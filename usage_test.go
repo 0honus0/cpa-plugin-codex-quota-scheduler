@@ -238,8 +238,10 @@ func TestDetectQuotaFailureIgnoresSuccessfulRecord(t *testing.T) {
 	}
 }
 
-func TestUsageHandleMarksTemporaryExhaustedByAuthIndex(t *testing.T) {
+func TestUsageHandleOpensCircuitAfterThresholdByAuthIndex(t *testing.T) {
 	cfg := DefaultConfig()
+	cfg.CircuitFailureThreshold = 2
+	cfg.CircuitOpenDuration = 10 * time.Minute
 	store := NewPluginState(cfg)
 	store.UpsertQuota(AccountState{AuthID: "auth-1", AuthIndex: "idx-1", Provider: "codex"})
 
@@ -252,15 +254,69 @@ func TestUsageHandleMarksTemporaryExhaustedByAuthIndex(t *testing.T) {
 			Body:       `{"error":{"type":"usage_limit_reached","resets_at":"2026-06-21T12:00:00Z"}}`,
 		},
 	}
-	HandleUsageFeedback(store, record, time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC))
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	HandleUsageFeedback(store, record, now)
+	snapshot := store.Snapshot(now)
+	if snapshot.Accounts[0].TemporaryExhausted || snapshot.Accounts[0].Circuit.State != CircuitStateClosed || snapshot.Accounts[0].Circuit.FailureCount != 1 {
+		t.Fatalf("account after first failure = %#v", snapshot.Accounts[0])
+	}
+	status, available, reason, sortTime := accountQueueState(snapshot.Accounts[0], now)
+	if status != QueueStatusUnavailable || available || reason != "quota_probe_wait" || !sortTime.Equal(time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)) {
+		t.Fatalf("queue after first failure = status=%s available=%t reason=%q sort=%s account=%#v", status, available, reason, sortTime, snapshot.Accounts[0])
+	}
 
-	snapshot := store.Snapshot(time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC))
+	HandleUsageFeedback(store, record, now.Add(time.Second))
+
+	snapshot = store.Snapshot(now.Add(time.Second))
 	if len(snapshot.Accounts) != 1 {
 		t.Fatalf("accounts = %#v", snapshot.Accounts)
 	}
 	account := snapshot.Accounts[0]
-	if !account.TemporaryExhausted || !account.TemporaryResetAt.Equal(time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)) {
+	if account.TemporaryExhausted {
+		t.Fatalf("temporary exhausted should no longer be set by usage feedback: %#v", account)
+	}
+	if account.Circuit.State != CircuitStateOpen || account.Circuit.FailureCount != 2 || !account.Circuit.NextProbeAt.Equal(time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)) {
 		t.Fatalf("account = %#v", account)
+	}
+}
+
+func TestUsageCircuitHalfOpenSuccessClosesCircuit(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.CircuitFailureThreshold = 1
+	cfg.CircuitOpenDuration = 5 * time.Minute
+	cfg.CircuitHalfOpenSuccessThreshold = 2
+	store := NewPluginState(cfg)
+	account := weeklyAccount("auth-1", 5, time.Date(2026, 6, 22, 9, 0, 0, 0, time.UTC), false)
+	store.UpsertQuota(account)
+
+	fail := pluginapi.UsageRecord{
+		Provider: "codex",
+		AuthID:   "auth-1",
+		Failed:   true,
+		Failure: pluginapi.UsageFailure{
+			StatusCode: 429,
+			Body:       `{"error":{"type":"usage_limit_reached","resets_in_seconds":120}}`,
+		},
+	}
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	HandleUsageFeedback(store, fail, now)
+
+	snapshot := store.Snapshot(now.Add(6 * time.Minute))
+	if snapshot.Accounts[0].Circuit.EffectiveState != CircuitStateHalfOpen {
+		t.Fatalf("circuit after probe time = %#v", snapshot.Accounts[0].Circuit)
+	}
+
+	success := pluginapi.UsageRecord{Provider: "codex", AuthID: "auth-1", Failed: false}
+	HandleUsageFeedback(store, success, now.Add(6*time.Minute))
+	snapshot = store.Snapshot(now.Add(6 * time.Minute))
+	if snapshot.Accounts[0].Circuit.EffectiveState != CircuitStateHalfOpen || snapshot.Accounts[0].Circuit.SuccessCount != 1 {
+		t.Fatalf("circuit after first success = %#v", snapshot.Accounts[0].Circuit)
+	}
+
+	HandleUsageFeedback(store, success, now.Add(6*time.Minute+time.Second))
+	snapshot = store.Snapshot(now.Add(6*time.Minute + time.Second))
+	if snapshot.Accounts[0].Circuit.EffectiveState != CircuitStateClosed || snapshot.Accounts[0].Circuit.FailureCount != 0 || snapshot.Accounts[0].Circuit.SuccessCount != 0 {
+		t.Fatalf("circuit after second success = %#v", snapshot.Accounts[0].Circuit)
 	}
 }
 

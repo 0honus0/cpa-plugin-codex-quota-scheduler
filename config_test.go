@@ -27,6 +27,12 @@ func TestDecodeConfigDefaults(t *testing.T) {
 	if cfg.StaleAfter != 6*time.Hour {
 		t.Fatalf("StaleAfter = %s, want 6h", cfg.StaleAfter)
 	}
+	if cfg.MaxLogEntries != 2000 {
+		t.Fatalf("MaxLogEntries = %d, want 2000", cfg.MaxLogEntries)
+	}
+	if cfg.LogRetention != 24*time.Hour {
+		t.Fatalf("LogRetention = %s, want 24h", cfg.LogRetention)
+	}
 }
 
 func TestDecodeConfigOverrides(t *testing.T) {
@@ -39,6 +45,8 @@ fallback: fill-first
 enable_usage_feedback: false
 max_refresh_concurrency: 8
 quota_endpoint: https://example.test/usage
+max_log_entries: 50
+log_retention: 2h
 `)
 	cfg, err := DecodeConfig(raw)
 	if err != nil {
@@ -68,6 +76,12 @@ quota_endpoint: https://example.test/usage
 	if cfg.QuotaEndpoint != "https://example.test/usage" {
 		t.Fatalf("QuotaEndpoint = %q, want %q", cfg.QuotaEndpoint, "https://example.test/usage")
 	}
+	if cfg.MaxLogEntries != 50 {
+		t.Fatalf("MaxLogEntries = %d, want 50", cfg.MaxLogEntries)
+	}
+	if cfg.LogRetention != 2*time.Hour {
+		t.Fatalf("LogRetention = %s, want 2h", cfg.LogRetention)
+	}
 }
 
 func TestDecodeConfigRejectsInvalidMonthlyMode(t *testing.T) {
@@ -95,6 +109,15 @@ func TestDecodeConfigRejectsNonPositiveMaxRefreshConcurrency(t *testing.T) {
 	_, err := DecodeConfig([]byte("max_refresh_concurrency: 0\n"))
 	if err == nil {
 		t.Fatalf("DecodeConfig accepted non-positive max refresh concurrency")
+	}
+}
+
+func TestDecodeConfigRejectsInvalidLogRetention(t *testing.T) {
+	if _, err := DecodeConfig([]byte("log_retention: 0s\n")); err == nil {
+		t.Fatalf("DecodeConfig accepted non-positive log retention")
+	}
+	if _, err := DecodeConfig([]byte("max_log_entries: 0\n")); err == nil {
+		t.Fatalf("DecodeConfig accepted non-positive max log entries")
 	}
 }
 

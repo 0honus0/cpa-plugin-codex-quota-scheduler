@@ -19,18 +19,13 @@ func TestManagementRegisterExposesStatusResourceAndRoutes(t *testing.T) {
 	for _, resource := range resp.Resources {
 		resources[resource.Path] = resource
 	}
-	for _, path := range []string{"/status", "/settings", "/refresh", "/annotations/account", "/annotations/group", "/logs", "/export", "/import"} {
+	for _, path := range []string{"/status"} {
 		if _, ok := resources[path]; !ok {
 			t.Fatalf("missing resource %s in %#v", path, resp.Resources)
 		}
 	}
 	if resources["/status"].Menu == "" {
 		t.Fatalf("status resource Menu is empty: %#v", resources["/status"])
-	}
-	for _, path := range []string{"/settings", "/refresh", "/annotations/account", "/annotations/group", "/logs", "/export", "/import"} {
-		if resources[path].Menu != "" {
-			t.Fatalf("resource %s Menu = %q, want empty", path, resources[path].Menu)
-		}
 	}
 	if len(resources) != len(resp.Resources) {
 		t.Fatalf("resources = %#v", resp.Resources)
@@ -48,6 +43,10 @@ func TestManagementRegisterExposesStatusResourceAndRoutes(t *testing.T) {
 		"GET /plugins/codex-quota-scheduler/settings",
 		"PUT /plugins/codex-quota-scheduler/settings",
 		"POST /plugins/codex-quota-scheduler/refresh",
+		"POST /plugins/codex-quota-scheduler/refresh/account",
+		"GET /plugins/codex-quota-scheduler/logs",
+		"GET /plugins/codex-quota-scheduler/export",
+		"POST /plugins/codex-quota-scheduler/import",
 		"GET /plugins/codex-quota-scheduler/annotations",
 		"PUT /plugins/codex-quota-scheduler/annotations",
 		"PATCH /plugins/codex-quota-scheduler/annotations/account",
@@ -65,15 +64,22 @@ func TestManagementRoutesDispatchFullCPAPaths(t *testing.T) {
 	store.UpsertQuota(weeklyAccount("auth-1", 5, now.Add(24*time.Hour), false))
 
 	refreshes := 0
+	refreshOne := ""
 	previousRefreshSoon := managementRefreshSoon
+	previousRefreshOneSoon := managementRefreshOneSoon
 	managementRefreshSoon = func() { refreshes++ }
-	t.Cleanup(func() { managementRefreshSoon = previousRefreshSoon })
+	managementRefreshOneSoon = func(authID string) { refreshOne = authID }
+	t.Cleanup(func() {
+		managementRefreshSoon = previousRefreshSoon
+		managementRefreshOneSoon = previousRefreshOneSoon
+	})
 
 	tests := []struct {
 		name   string
 		method string
 		path   string
 		query  url.Values
+		body   []byte
 		want   int
 	}{
 		{
@@ -87,19 +93,6 @@ func TestManagementRoutesDispatchFullCPAPaths(t *testing.T) {
 			name:   "resource status",
 			method: http.MethodGet,
 			path:   "/v0/resource/plugins/codex-quota-scheduler/status",
-			query:  url.Values{"format": []string{"json"}},
-			want:   http.StatusOK,
-		},
-		{
-			name:   "management annotations",
-			method: http.MethodGet,
-			path:   "/v0/management/plugins/codex-quota-scheduler/annotations",
-			want:   http.StatusOK,
-		},
-		{
-			name:   "resource annotations",
-			method: http.MethodGet,
-			path:   "/v0/resource/plugins/codex-quota-scheduler/annotations",
 			want:   http.StatusOK,
 		},
 		{
@@ -109,10 +102,17 @@ func TestManagementRoutesDispatchFullCPAPaths(t *testing.T) {
 			want:   http.StatusAccepted,
 		},
 		{
-			name:   "resource refresh",
+			name:   "management refresh one",
+			method: http.MethodPost,
+			path:   "/v0/management/plugins/codex-quota-scheduler/refresh/account",
+			body:   []byte(`{"auth_id":"auth-1"}`),
+			want:   http.StatusAccepted,
+		},
+		{
+			name:   "resource mutation hidden",
 			method: http.MethodGet,
 			path:   "/v0/resource/plugins/codex-quota-scheduler/refresh",
-			want:   http.StatusAccepted,
+			want:   http.StatusNotFound,
 		},
 	}
 
@@ -122,14 +122,18 @@ func TestManagementRoutesDispatchFullCPAPaths(t *testing.T) {
 				Method: tt.method,
 				Path:   tt.path,
 				Query:  tt.query,
+				Body:   tt.body,
 			}, now)
 			if resp.StatusCode != tt.want {
 				t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, tt.want, resp.Body)
 			}
 		})
 	}
-	if refreshes != 2 {
-		t.Fatalf("refreshes = %d, want 2", refreshes)
+	if refreshes != 1 {
+		t.Fatalf("refreshes = %d, want 1", refreshes)
+	}
+	if refreshOne != "auth-1" {
+		t.Fatalf("refreshOne = %q, want auth-1", refreshOne)
 	}
 }
 
@@ -151,6 +155,9 @@ func TestStatusJSONOrdersAccountsBySchedulerOrder(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, resp.Body)
+	}
+	if strings.Contains(string(resp.Body), "action_token") {
+		t.Fatalf("status JSON exposed action token: %s", resp.Body)
 	}
 	var body struct {
 		Accounts []struct {
@@ -224,6 +231,33 @@ func TestStatusJSONIncludesSchedulerSummary(t *testing.T) {
 	}
 	if body.NextAuthID != "auth-1" || body.MonthlyMode != MonthlyModePriority || body.HandleEnabled || body.LastSelected != "auth-1" || body.LastReason != "selected" {
 		t.Fatalf("payload summary = %#v", body)
+	}
+}
+
+func TestStatusNextAuthIDDoesNotScanBelowActivePriority(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	highBlocked := weeklyAccount("high-blocked", 10, now.Add(24*time.Hour), false)
+	highBlocked.Stale = true
+	lowAvailable := weeklyAccount("low-available", 1, now.Add(time.Hour), false)
+	lowAvailable.LastSuccessAt = now
+	store.UpsertQuota(highBlocked)
+	store.UpsertQuota(lowAvailable)
+
+	resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
+		Method: "GET",
+		Path:   "/plugins/codex-quota-scheduler/status",
+		Query:  url.Values{"format": []string{"json"}},
+	}, now)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, resp.Body)
+	}
+	var body StatusPayload
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		t.Fatalf("json.Unmarshal returned error: %v; body=%s", err, resp.Body)
+	}
+	if body.NextAuthID != "" {
+		t.Fatalf("NextAuthID = %q, want empty because highest CPA priority tier has no available account", body.NextAuthID)
 	}
 }
 
@@ -309,12 +343,12 @@ func TestStatusHTMLUsesResourceActionsModalProgressAndLogs(t *testing.T) {
 	}
 	html := string(resp.Body)
 	lower := strings.ToLower(html)
-	for _, want := range []string{"quota-bar", "editDialog", "logList", "openEdit", "exportLogs", "codex-quota-scheduler-logs.json", "/v0/resource/plugins/codex-quota-scheduler/settings", "/v0/resource/plugins/codex-quota-scheduler/logs"} {
+	for _, want := range []string{"quota-bar", "editDialog", "logList", "openEdit", "exportLogs", "codex-quota-scheduler-logs.json", "maxLogEntries", "logRetention", "refreshOneQuota", "schedulePageRefresh", "MANAGEMENT_BASE", "/v0/management/plugins/codex-quota-scheduler"} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("html missing marker %q: %s", want, html)
 		}
 	}
-	for _, forbidden := range []string{"managementKey", "missing management key", "details class=\"editor\"", "/v0/management/plugins/codex-quota-scheduler/settings"} {
+	for _, forbidden := range []string{"managementKey", "missing management key", "details class=\"editor\"", "action_token"} {
 		if strings.Contains(html, forbidden) {
 			t.Fatalf("html still contains removed marker %q: %s", forbidden, html)
 		}
@@ -323,6 +357,54 @@ func TestStatusHTMLUsesResourceActionsModalProgressAndLogs(t *testing.T) {
 		if strings.Contains(lower, forbidden) {
 			t.Fatalf("html contains sensitive field %q: %s", forbidden, html)
 		}
+	}
+}
+
+func TestStatusJSONIncludesCircuitStateAndResetCredits(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	account := weeklyAccount("auth-1", 5, now.Add(24*time.Hour), false)
+	account.LastSuccessAt = now
+	count := 2
+	account.Quota.ResetCreditsAvailableCount = &count
+	total := 3
+	account.Quota.ResetCreditsTotalEarnedCount = &total
+	account.Quota.ResetCredits = []ResetCredit{
+		{ExpiresAt: now.Add(30 * 24 * time.Hour)},
+	}
+	account.Circuit = CircuitBreakerState{
+		State:        CircuitStateOpen,
+		FailureCount: 3,
+		OpenedAt:     now.Add(-time.Minute),
+		NextProbeAt:  now.Add(9 * time.Minute),
+		Reason:       usageLimitReachedReason,
+	}
+	store.UpsertQuota(account)
+
+	resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
+		Method: "GET",
+		Path:   "/plugins/codex-quota-scheduler/status",
+		Query:  url.Values{"format": []string{"json"}},
+	}, now)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, resp.Body)
+	}
+	var body StatusPayload
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		t.Fatalf("json.Unmarshal returned error: %v; body=%s", err, resp.Body)
+	}
+	if len(body.Accounts) != 1 {
+		t.Fatalf("accounts len = %d, want 1", len(body.Accounts))
+	}
+	accountBody := body.Accounts[0]
+	if accountBody.Circuit.State != CircuitStateOpen || accountBody.Circuit.Label != "熔断" || accountBody.Circuit.FailureCount != 3 || accountBody.UnavailableReason != "circuit_open" {
+		t.Fatalf("circuit = %#v unavailable=%q", accountBody.Circuit, accountBody.UnavailableReason)
+	}
+	if accountBody.ResetCreditsAvailableCount == nil || *accountBody.ResetCreditsAvailableCount != 2 || len(accountBody.ResetCredits) != 1 {
+		t.Fatalf("reset credits = count %#v list %#v", accountBody.ResetCreditsAvailableCount, accountBody.ResetCredits)
+	}
+	if accountBody.ResetCreditsTotalEarnedCount == nil || *accountBody.ResetCreditsTotalEarnedCount != 3 {
+		t.Fatalf("total earned reset credits = %#v", accountBody.ResetCreditsTotalEarnedCount)
 	}
 }
 
@@ -336,14 +418,14 @@ func TestSettingsEndpointUpdatesConfigAndPersistsDefaultState(t *testing.T) {
 	resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
 		Method: http.MethodPut,
 		Path:   "/plugins/codex-quota-scheduler/settings",
-		Body:   []byte(`{"handle_enabled":false,"monthly_mode":"priority","quota_refresh_interval":"45s","stale_after":"15m","enable_usage_feedback":false,"max_refresh_concurrency":2}`),
+		Body:   []byte(`{"handle_enabled":false,"monthly_mode":"priority","quota_refresh_interval":"45s","stale_after":"15m","enable_usage_feedback":false,"max_refresh_concurrency":2,"max_log_entries":25,"log_retention":"3h"}`),
 	}, time.Now())
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, resp.Body)
 	}
 
 	cfg := store.Config()
-	if cfg.HandleEnabled || cfg.MonthlyMode != MonthlyModePriority || cfg.QuotaRefreshInterval != 45*time.Second || cfg.StaleAfter != 15*time.Minute || cfg.EnableUsageFeedback || cfg.MaxRefreshConcurrency != 2 {
+	if cfg.HandleEnabled || cfg.MonthlyMode != MonthlyModePriority || cfg.QuotaRefreshInterval != 45*time.Second || cfg.StaleAfter != 15*time.Minute || cfg.EnableUsageFeedback || cfg.MaxRefreshConcurrency != 2 || cfg.MaxLogEntries != 25 || cfg.LogRetention != 3*time.Hour {
 		t.Fatalf("config = %#v", cfg)
 	}
 	disk, err := LoadPluginDiskState(defaultStatePath())
@@ -422,7 +504,7 @@ func TestStatusHTMLShowsRemainingQuotaLocalResetTimesAndCompactMetadata(t *testi
 	}
 }
 
-func TestResourceSettingsEndpointDoesNotRequireManagementKey(t *testing.T) {
+func TestManagementSettingsEndpointDoesNotRequireManagementKey(t *testing.T) {
 	dir := t.TempDir()
 	previousDefaultStatePath := defaultStatePath
 	defaultStatePath = func() string { return filepath.Join(dir, "state.json") }
@@ -430,28 +512,79 @@ func TestResourceSettingsEndpointDoesNotRequireManagementKey(t *testing.T) {
 
 	store := NewPluginState(DefaultConfig())
 	resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
-		Method: http.MethodGet,
-		Path:   "/v0/resource/plugins/codex-quota-scheduler/settings",
-		Query: url.Values{
-			"save":                    []string{"1"},
-			"handle_enabled":          []string{"false"},
-			"monthly_mode":            []string{"priority"},
-			"quota_refresh_interval":  []string{"45m"},
-			"stale_after":             []string{"6h"},
-			"enable_usage_feedback":   []string{"false"},
-			"max_refresh_concurrency": []string{"2"},
-		},
+		Method: http.MethodPut,
+		Path:   "/v0/management/plugins/codex-quota-scheduler/settings",
+		Body:   []byte(`{"handle_enabled":false,"monthly_mode":"priority","quota_refresh_interval":"45m","stale_after":"6h","enable_usage_feedback":false,"max_refresh_concurrency":2,"max_log_entries":30,"log_retention":"4h"}`),
 	}, time.Now())
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, resp.Body)
 	}
 	cfg := store.Config()
-	if cfg.HandleEnabled || cfg.MonthlyMode != MonthlyModePriority || cfg.QuotaRefreshInterval != 45*time.Minute || cfg.StaleAfter != 6*time.Hour || cfg.EnableUsageFeedback || cfg.MaxRefreshConcurrency != 2 {
+	if cfg.HandleEnabled || cfg.MonthlyMode != MonthlyModePriority || cfg.QuotaRefreshInterval != 45*time.Minute || cfg.StaleAfter != 6*time.Hour || cfg.EnableUsageFeedback || cfg.MaxRefreshConcurrency != 2 || cfg.MaxLogEntries != 30 || cfg.LogRetention != 4*time.Hour {
 		t.Fatalf("config = %#v", cfg)
 	}
 }
 
-func TestResourceAccountEndpointDoesNotRequireManagementKey(t *testing.T) {
+func TestResourceMutationRoutesAreReadOnly(t *testing.T) {
+	store := NewPluginState(DefaultConfig())
+	resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/resource/plugins/codex-quota-scheduler/settings",
+		Query: url.Values{
+			"save":           []string{"1"},
+			"handle_enabled": []string{"false"},
+		},
+	}, time.Now())
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusNotFound, resp.Body)
+	}
+	if !store.Config().HandleEnabled {
+		t.Fatalf("resource mutation changed config: %#v", store.Config())
+	}
+	for _, path := range []string{
+		"/v0/resource/plugins/codex-quota-scheduler/logs",
+		"/v0/resource/plugins/codex-quota-scheduler/export",
+	} {
+		resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
+			Method: http.MethodGet,
+			Path:   path,
+		}, time.Now())
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("%s StatusCode = %d, want %d; body=%s", path, resp.StatusCode, http.StatusNotFound, resp.Body)
+		}
+	}
+}
+
+func TestResourceStatusDoesNotExposeSensitiveSchedulerData(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	store.SetAnnotations(AnnotationState{
+		Accounts: map[string]AccountAnnotation{
+			"auth:auth-1": {Alias: "secret alias", Notes: "private note"},
+		},
+	})
+	store.UpsertQuota(weeklyAccount("auth-1", 5, now.Add(24*time.Hour), false))
+	store.RecordLog("info", "scheduler.selected", "private log", map[string]any{"auth_id": "auth-1"}, now)
+
+	resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/resource/plugins/codex-quota-scheduler/status",
+	}, now)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, resp.Body)
+	}
+	body := string(resp.Body)
+	for _, forbidden := range []string{"auth-1", "secret alias", "private note", "private log", "scheduler.selected"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("resource status leaked %q: %s", forbidden, body)
+		}
+	}
+	if !strings.Contains(body, "/v0/management/plugins/codex-quota-scheduler/status") {
+		t.Fatalf("resource status did not point to authenticated management page: %s", body)
+	}
+}
+
+func TestManagementAccountEndpointDoesNotRequireManagementKey(t *testing.T) {
 	dir := t.TempDir()
 	previousDefaultStatePath := defaultStatePath
 	defaultStatePath = func() string { return filepath.Join(dir, "state.json") }
@@ -459,15 +592,9 @@ func TestResourceAccountEndpointDoesNotRequireManagementKey(t *testing.T) {
 
 	store := NewPluginState(DefaultConfig())
 	resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
-		Method: http.MethodGet,
-		Path:   "/v0/resource/plugins/codex-quota-scheduler/annotations/account",
-		Query: url.Values{
-			"auth_id":  []string{"auth-1"},
-			"alias":    []string{"工作账号"},
-			"group_id": []string{"team-a"},
-			"tags":     []string{"team,paid"},
-			"notes":    []string{"常用"},
-		},
+		Method: http.MethodPatch,
+		Path:   "/v0/management/plugins/codex-quota-scheduler/annotations/account",
+		Body:   []byte(`{"auth_id":"auth-1","alias":"工作账号","group_id":"team-a","tags":["team","paid"],"notes":"常用"}`),
 	}, time.Now())
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, resp.Body)
@@ -478,7 +605,7 @@ func TestResourceAccountEndpointDoesNotRequireManagementKey(t *testing.T) {
 	}
 }
 
-func TestResourceAccountEndpointClearsTags(t *testing.T) {
+func TestManagementAccountEndpointClearsTags(t *testing.T) {
 	dir := t.TempDir()
 	previousDefaultStatePath := defaultStatePath
 	defaultStatePath = func() string { return filepath.Join(dir, "state.json") }
@@ -492,12 +619,9 @@ func TestResourceAccountEndpointClearsTags(t *testing.T) {
 	})
 
 	resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
-		Method: http.MethodGet,
-		Path:   "/v0/resource/plugins/codex-quota-scheduler/annotations/account",
-		Query: url.Values{
-			"auth_id": []string{"auth-1"},
-			"tags":    []string{""},
-		},
+		Method: http.MethodPatch,
+		Path:   "/v0/management/plugins/codex-quota-scheduler/annotations/account",
+		Body:   []byte(`{"auth_id":"auth-1","tags":[]}`),
 	}, time.Now())
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, resp.Body)
@@ -507,7 +631,7 @@ func TestResourceAccountEndpointClearsTags(t *testing.T) {
 	}
 }
 
-func TestResourceGroupEndpointDoesNotOverwriteExistingNameWithBlankQuery(t *testing.T) {
+func TestManagementGroupEndpointAllowsClearingFields(t *testing.T) {
 	dir := t.TempDir()
 	previousDefaultStatePath := defaultStatePath
 	defaultStatePath = func() string { return filepath.Join(dir, "state.json") }
@@ -516,24 +640,21 @@ func TestResourceGroupEndpointDoesNotOverwriteExistingNameWithBlankQuery(t *test
 	store := NewPluginState(DefaultConfig())
 	store.SetAnnotations(AnnotationState{
 		Groups: map[string]GroupAnnotation{
-			"1": {Name: "group1", Notes: "keep"},
+			"1": {Name: "group1", Notes: "keep", Color: "#00f"},
 		},
 	})
 
 	resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
-		Method: http.MethodGet,
-		Path:   "/v0/resource/plugins/codex-quota-scheduler/annotations/group",
-		Query: url.Values{
-			"id":   []string{"1"},
-			"name": []string{""},
-		},
+		Method: http.MethodPatch,
+		Path:   "/v0/management/plugins/codex-quota-scheduler/annotations/group",
+		Body:   []byte(`{"id":"1","name":"","notes":"","color":""}`),
 	}, time.Now())
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, resp.Body)
 	}
 	got := store.Annotations().Groups["1"]
-	if got.Name != "group1" || got.Notes != "keep" {
-		t.Fatalf("group = %#v, want existing name/notes preserved", got)
+	if got.Name != "" || got.Notes != "" || got.Color != "" {
+		t.Fatalf("group = %#v, want clearable fields emptied", got)
 	}
 }
 
@@ -557,7 +678,7 @@ func TestResourceExportImportRoundTrip(t *testing.T) {
 
 	exportResp := HandleManagementRequest(store, pluginapi.ManagementRequest{
 		Method: http.MethodGet,
-		Path:   "/v0/resource/plugins/codex-quota-scheduler/export",
+		Path:   "/v0/management/plugins/codex-quota-scheduler/export",
 	}, time.Now())
 	if exportResp.StatusCode != http.StatusOK {
 		t.Fatalf("export StatusCode = %d, want %d; body=%s", exportResp.StatusCode, http.StatusOK, exportResp.Body)
@@ -565,9 +686,9 @@ func TestResourceExportImportRoundTrip(t *testing.T) {
 
 	imported := NewPluginState(DefaultConfig())
 	importResp := HandleManagementRequest(imported, pluginapi.ManagementRequest{
-		Method: http.MethodGet,
-		Path:   "/v0/resource/plugins/codex-quota-scheduler/import",
-		Query:  url.Values{"data": []string{string(exportResp.Body)}},
+		Method: http.MethodPost,
+		Path:   "/v0/management/plugins/codex-quota-scheduler/import",
+		Body:   exportResp.Body,
 	}, time.Now())
 	if importResp.StatusCode != http.StatusOK {
 		t.Fatalf("import StatusCode = %d, want %d; body=%s", importResp.StatusCode, http.StatusOK, importResp.Body)
@@ -590,7 +711,7 @@ func TestLogsEndpointReturnsSchedulerDecision(t *testing.T) {
 
 	resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
 		Method: http.MethodGet,
-		Path:   "/v0/resource/plugins/codex-quota-scheduler/logs",
+		Path:   "/v0/management/plugins/codex-quota-scheduler/logs",
 	}, now)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, resp.Body)

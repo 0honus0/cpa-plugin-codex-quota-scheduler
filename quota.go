@@ -6,10 +6,11 @@ import (
 )
 
 const (
-	fiveHourSeconds = 18000
-	weekSeconds     = 604800
-	minMonthSeconds = 2419200
-	maxMonthSeconds = 2678400
+	fiveHourSeconds     = 18000
+	weekSeconds         = 604800
+	minMonthSeconds     = 2419200
+	maxMonthSeconds     = 2678400
+	resetCreditValidity = 30 * 24 * time.Hour
 )
 
 func ParseCodexUsagePayload(raw []byte, now time.Time) (ParsedQuota, error) {
@@ -26,6 +27,7 @@ func ParseCodexUsagePayload(raw []byte, now time.Time) (ParsedQuota, error) {
 		if count, ok := getInt(credits, "available_count", "availableCount"); ok {
 			parsed.ResetCreditsAvailableCount = &count
 		}
+		parsed.ResetCredits = parseResetCredits(credits)
 	}
 
 	if codeReviewRateLimit, ok := getMap(doc, "code_review_rate_limit", "codeReviewRateLimit"); ok {
@@ -69,6 +71,69 @@ func ParseCodexUsagePayload(raw []byte, now time.Time) (ParsedQuota, error) {
 	return parsed, nil
 }
 
+func ParseResetCreditsPayload(raw []byte, now time.Time) (ParsedQuota, error) {
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return ParsedQuota{}, err
+	}
+	parsed := ParsedQuota{Family: AccountFamilyUnknown}
+	if count, ok := getInt(doc, "available_count", "availableCount"); ok {
+		parsed.ResetCreditsAvailableCount = &count
+	}
+	if count, ok := getInt(doc, "total_earned_count", "totalEarnedCount"); ok {
+		parsed.ResetCreditsTotalEarnedCount = &count
+	}
+	parsed.ResetCredits = parseResetCredits(doc)
+	return parsed, nil
+}
+
+func parseResetCredits(raw map[string]any) []ResetCredit {
+	for _, key := range []string{"credits", "items", "list", "reset_credits", "resetCredits"} {
+		value, ok := raw[key]
+		if !ok {
+			continue
+		}
+		items, ok := value.([]any)
+		if !ok {
+			continue
+		}
+		credits := make([]ResetCredit, 0, len(items))
+		for _, item := range items {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if credit, ok := parseResetCredit(m); ok {
+				credits = append(credits, credit)
+			}
+		}
+		return credits
+	}
+	if credit, ok := parseResetCredit(raw); ok {
+		return []ResetCredit{credit}
+	}
+	return nil
+}
+
+func parseResetCredit(raw map[string]any) (ResetCredit, bool) {
+	credit := ResetCredit{
+		ID:     getString(raw, "id"),
+		Status: getString(raw, "status"),
+	}
+	if grantedAt, ok := getTime(raw, "granted_at", "grantedAt", "created_at", "createdAt"); ok {
+		credit.GrantedAt = grantedAt
+	}
+	if expiresAt, ok := getTime(raw, "expires_at", "expiresAt", "expire_at", "expireAt", "expiration", "expires"); ok {
+		credit.ExpiresAt = expiresAt
+	} else if !credit.GrantedAt.IsZero() {
+		credit.ExpiresAt = credit.GrantedAt.Add(resetCreditValidity)
+	}
+	if usedAt, ok := getTime(raw, "used_at", "usedAt"); ok {
+		credit.UsedAt = usedAt
+	}
+	return credit, !credit.ExpiresAt.IsZero() || credit.ID != "" || credit.Status != ""
+}
+
 func parseRateLimitWindows(rateLimit map[string]any, now time.Time) []QuotaWindow {
 	allowed, allowedOK := getBool(rateLimit, "allowed")
 	limitReached, _ := getBool(rateLimit, "limit_reached", "limitReached")
@@ -88,12 +153,29 @@ func parseRateLimitWindows(rateLimit map[string]any, now time.Time) []QuotaWindo
 }
 
 func parseQuotaWindow(raw map[string]any, now time.Time, fallbackKind WindowKind, exhaustedByEnvelope bool) QuotaWindow {
-	window := QuotaWindow{Kind: fallbackKind, Exhausted: exhaustedByEnvelope}
+	window := QuotaWindow{Kind: fallbackKind}
+	hasWindowExhaustionSignal := false
 	if usedPercent, ok := getFloat64(raw, "used_percent", "usedPercent"); ok {
+		hasWindowExhaustionSignal = true
 		window.UsedPercent = &usedPercent
 		if usedPercent >= 100 {
 			window.Exhausted = true
 		}
+	}
+	if allowed, ok := getBool(raw, "allowed"); ok {
+		hasWindowExhaustionSignal = true
+		if !allowed {
+			window.Exhausted = true
+		}
+	}
+	if limitReached, ok := getBool(raw, "limit_reached", "limitReached"); ok {
+		hasWindowExhaustionSignal = true
+		if limitReached {
+			window.Exhausted = true
+		}
+	}
+	if !hasWindowExhaustionSignal && exhaustedByEnvelope {
+		window.Exhausted = true
 	}
 	if seconds, ok := getInt64(raw, "limit_window_seconds", "limitWindowSeconds"); ok {
 		window.LimitWindowSeconds = &seconds
@@ -134,6 +216,26 @@ func getResetAt(m map[string]any, now time.Time) (time.Time, bool) {
 	}
 	if seconds, ok := getFloat64(m, "reset_after_seconds", "resetAfterSeconds"); ok {
 		return now.Add(time.Duration(seconds * float64(time.Second))), true
+	}
+	return time.Time{}, false
+}
+
+func getTime(m map[string]any, keys ...string) (time.Time, bool) {
+	raw, ok := getAny(m, keys...)
+	if !ok {
+		return time.Time{}, false
+	}
+	switch v := raw.(type) {
+	case string:
+		if parsed, err := time.Parse(time.RFC3339, v); err == nil {
+			return parsed, true
+		}
+	case float64:
+		return time.Unix(int64(v), 0).UTC(), true
+	case int64:
+		return time.Unix(v, 0).UTC(), true
+	case int:
+		return time.Unix(int64(v), 0).UTC(), true
 	}
 	return time.Time{}, false
 }

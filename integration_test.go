@@ -59,6 +59,28 @@ func TestHandleMethodRegisterEnvelope(t *testing.T) {
 	}
 }
 
+func TestHandleMethodRegisterPreservesConfigWhenStateFileMissing(t *testing.T) {
+	cleanupIntegrationGlobals(t)
+
+	dir := t.TempDir()
+	previousDefaultStatePath := defaultStatePath
+	defaultStatePath = func() string { return filepath.Join(dir, "missing-state.json") }
+	t.Cleanup(func() { defaultStatePath = previousDefaultStatePath })
+
+	rawReq, err := json.Marshal(lifecycleRequest{ConfigYAML: []byte("handle_enabled: false\nmonthly_mode: priority\nquota_refresh_interval: 45s\nmax_refresh_concurrency: 2\n")})
+	if err != nil {
+		t.Fatalf("json.Marshal returned error: %v", err)
+	}
+	if _, err := handleMethod(pluginabi.MethodPluginRegister, rawReq); err != nil {
+		t.Fatalf("handle register: %v", err)
+	}
+
+	cfg := globalState.Config()
+	if cfg.HandleEnabled || cfg.MonthlyMode != MonthlyModePriority || cfg.QuotaRefreshInterval.String() != "45s" || cfg.MaxRefreshConcurrency != 2 {
+		t.Fatalf("config = %#v, want lifecycle config preserved", cfg)
+	}
+}
+
 func TestHandleMethodRegisterLoadsPersistedAnnotations(t *testing.T) {
 	cleanupIntegrationGlobals(t)
 

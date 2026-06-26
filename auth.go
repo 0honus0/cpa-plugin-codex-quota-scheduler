@@ -6,12 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 type CodexCredentials struct {
 	AccessToken      string
+	RefreshToken     string
 	IDToken          string
 	ChatGPTAccountID string
+	ExpiresAt        time.Time
 }
 
 func ExtractCodexCredentials(raw json.RawMessage) (CodexCredentials, error) {
@@ -24,17 +27,28 @@ func ExtractCodexCredentials(raw json.RawMessage) (CodexCredentials, error) {
 	if !ok || accessToken == "" {
 		return CodexCredentials{}, errors.New("missing access_token")
 	}
+	refreshToken, _ := lookupStringDeep(doc, "refresh_token")
 	idToken, _ := lookupStringDeep(doc, "id_token")
+	expiresAt, _ := lookupTimeDeep(doc, "expired", "expire", "expires_at", "expiresAt")
 
-	accountID, err := extractChatGPTAccountID(idToken)
-	if err != nil {
-		return CodexCredentials{}, err
+	accountID, _ := lookupStringDeep(doc, "account_id")
+	if accountID == "" {
+		accountID, _ = lookupStringDeep(doc, "chatgpt_account_id")
+	}
+	if accountID == "" {
+		extracted, err := extractChatGPTAccountID(idToken)
+		if err != nil {
+			return CodexCredentials{}, err
+		}
+		accountID = extracted
 	}
 
 	return CodexCredentials{
 		AccessToken:      accessToken,
+		RefreshToken:     refreshToken,
 		IDToken:          idToken,
 		ChatGPTAccountID: accountID,
+		ExpiresAt:        expiresAt,
 	}, nil
 }
 
@@ -104,4 +118,38 @@ func stringFromMap(m map[string]any, key string) (string, bool) {
 	}
 	s, ok := v.(string)
 	return s, ok
+}
+
+func lookupTimeDeep(v any, keys ...string) (time.Time, bool) {
+	for _, key := range keys {
+		if raw, ok := lookupStringDeep(v, key); ok {
+			if parsed, ok := parseAuthTime(raw); ok {
+				return parsed, true
+			}
+		}
+	}
+	return time.Time{}, false
+}
+
+func parseAuthTime(raw string) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if parsed, err := time.Parse(layout, raw); err == nil {
+			return parsed, true
+		}
+	}
+	return time.Time{}, false
+}
+
+func accessTokenExpired(credentials CodexCredentials, now time.Time) bool {
+	if credentials.ExpiresAt.IsZero() {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	return !now.Add(2 * time.Minute).Before(credentials.ExpiresAt)
 }

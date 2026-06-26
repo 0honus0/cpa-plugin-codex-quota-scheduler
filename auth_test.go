@@ -48,6 +48,17 @@ func TestExtractCodexCredentialsNestedMetadata(t *testing.T) {
 	}
 }
 
+func TestExtractCodexCredentialsUsesStoredAccountIDWhenIDTokenMissing(t *testing.T) {
+	raw := json.RawMessage(`{"access_token":"access-3","refresh_token":"refresh-3","account_id":"acct_stored","expired":"2026-06-21T10:00:00Z"}`)
+	creds, err := ExtractCodexCredentials(raw)
+	if err != nil {
+		t.Fatalf("ExtractCodexCredentials returned error: %v", err)
+	}
+	if creds.AccessToken != "access-3" || creds.RefreshToken != "refresh-3" || creds.ChatGPTAccountID != "acct_stored" || creds.ExpiresAt.IsZero() {
+		t.Fatalf("creds = %#v", creds)
+	}
+}
+
 func TestExtractCodexCredentialsRejectsMissingAccessToken(t *testing.T) {
 	_, err := ExtractCodexCredentials(json.RawMessage(`{"id_token":"x.y.z"}`))
 	if err == nil {

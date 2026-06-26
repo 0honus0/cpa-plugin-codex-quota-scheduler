@@ -34,6 +34,63 @@ func TestParseCodexUsageWeeklyWindows(t *testing.T) {
 	}
 }
 
+func TestParseCodexUsageResetCreditsExpiryList(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	raw := []byte(`{
+	  "rate_limit_reset_credits": {
+	    "available_count": 2,
+	    "credits": [
+	      {"expires_at": "2026-07-01T00:00:00Z"},
+	      {"expiresAt": "2026-07-02T00:00:00Z"}
+	    ]
+	  }
+	}`)
+	parsed, err := ParseCodexUsagePayload(raw, now)
+	if err != nil {
+		t.Fatalf("ParseCodexUsagePayload returned error: %v", err)
+	}
+	if parsed.ResetCreditsAvailableCount == nil || *parsed.ResetCreditsAvailableCount != 2 {
+		t.Fatalf("reset credits count = %#v", parsed.ResetCreditsAvailableCount)
+	}
+	if len(parsed.ResetCredits) != 2 {
+		t.Fatalf("reset credits = %#v, want 2", parsed.ResetCredits)
+	}
+	if !parsed.ResetCredits[0].ExpiresAt.Equal(time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("first expiry = %s", parsed.ResetCredits[0].ExpiresAt)
+	}
+}
+
+func TestParseResetCreditsPayloadUsesEndpointShapeAndInfersThirtyDayExpiry(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	raw := []byte(`{
+	  "available_count": 2,
+	  "total_earned_count": 3,
+	  "credits": [
+	    {"id": "credit-1", "status": "available", "granted_at": "2026-06-01T00:00:00Z", "expires_at": "2026-07-01T00:00:00Z"},
+	    {"id": "credit-2", "status": "available", "granted_at": "2026-06-05T00:00:00Z"}
+	  ]
+	}`)
+	parsed, err := ParseResetCreditsPayload(raw, now)
+	if err != nil {
+		t.Fatalf("ParseResetCreditsPayload returned error: %v", err)
+	}
+	if parsed.ResetCreditsAvailableCount == nil || *parsed.ResetCreditsAvailableCount != 2 {
+		t.Fatalf("available count = %#v", parsed.ResetCreditsAvailableCount)
+	}
+	if parsed.ResetCreditsTotalEarnedCount == nil || *parsed.ResetCreditsTotalEarnedCount != 3 {
+		t.Fatalf("total earned count = %#v", parsed.ResetCreditsTotalEarnedCount)
+	}
+	if len(parsed.ResetCredits) != 2 {
+		t.Fatalf("reset credits = %#v", parsed.ResetCredits)
+	}
+	if parsed.ResetCredits[0].ID != "credit-1" || parsed.ResetCredits[0].Status != "available" {
+		t.Fatalf("first credit = %#v", parsed.ResetCredits[0])
+	}
+	if !parsed.ResetCredits[1].ExpiresAt.Equal(time.Date(2026, 7, 5, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("inferred expiry = %s", parsed.ResetCredits[1].ExpiresAt)
+	}
+}
+
 func TestParseCodexUsageMonthlyWindow(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	raw := []byte(`{
@@ -70,6 +127,9 @@ func TestParseCodexUsageExhaustedFromAllowedFalse(t *testing.T) {
 	}
 	if parsed.FiveHour == nil || !parsed.FiveHour.Exhausted {
 		t.Fatalf("five hour window not exhausted: %#v", parsed.FiveHour)
+	}
+	if parsed.LongWindow == nil || parsed.LongWindow.Exhausted {
+		t.Fatalf("long window = %#v, want not exhausted when weekly usage remains", parsed.LongWindow)
 	}
 }
 

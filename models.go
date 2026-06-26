@@ -26,14 +26,44 @@ type QuotaWindow struct {
 	Exhausted          bool       `json:"exhausted"`
 }
 
+type ResetCredit struct {
+	ID        string    `json:"id,omitempty"`
+	Status    string    `json:"status,omitempty"`
+	GrantedAt time.Time `json:"granted_at,omitempty"`
+	ExpiresAt time.Time `json:"expires_at"`
+	UsedAt    time.Time `json:"used_at,omitempty"`
+}
+
 type ParsedQuota struct {
-	PlanType                   string        `json:"plan_type,omitempty"`
-	Family                     AccountFamily `json:"family"`
-	FiveHour                   *QuotaWindow  `json:"five_hour,omitempty"`
-	LongWindow                 *QuotaWindow  `json:"long_window,omitempty"`
-	CodeReviewWindows          []QuotaWindow `json:"code_review_windows,omitempty"`
-	AdditionalWindows          []QuotaWindow `json:"additional_windows,omitempty"`
-	ResetCreditsAvailableCount *int          `json:"reset_credits_available_count,omitempty"`
+	PlanType                     string        `json:"plan_type,omitempty"`
+	Family                       AccountFamily `json:"family"`
+	FiveHour                     *QuotaWindow  `json:"five_hour,omitempty"`
+	LongWindow                   *QuotaWindow  `json:"long_window,omitempty"`
+	CodeReviewWindows            []QuotaWindow `json:"code_review_windows,omitempty"`
+	AdditionalWindows            []QuotaWindow `json:"additional_windows,omitempty"`
+	ResetCreditsAvailableCount   *int          `json:"reset_credits_available_count,omitempty"`
+	ResetCreditsTotalEarnedCount *int          `json:"reset_credits_total_earned_count,omitempty"`
+	ResetCredits                 []ResetCredit `json:"reset_credits,omitempty"`
+}
+
+type CircuitState string
+
+const (
+	CircuitStateClosed   CircuitState = "closed"
+	CircuitStateOpen     CircuitState = "open"
+	CircuitStateHalfOpen CircuitState = "half_open"
+)
+
+type CircuitBreakerState struct {
+	State          CircuitState `json:"state,omitempty"`
+	EffectiveState CircuitState `json:"effective_state,omitempty"`
+	FailureCount   int          `json:"failure_count,omitempty"`
+	SuccessCount   int          `json:"success_count,omitempty"`
+	OpenedAt       time.Time    `json:"opened_at,omitempty"`
+	NextProbeAt    time.Time    `json:"next_probe_at,omitempty"`
+	Reason         string       `json:"reason,omitempty"`
+	LastFailureAt  time.Time    `json:"last_failure_at,omitempty"`
+	LastSuccessAt  time.Time    `json:"last_success_at,omitempty"`
 }
 
 type AccountAnnotation struct {
@@ -71,6 +101,7 @@ type AccountState struct {
 	Stale              bool
 	TemporaryExhausted bool
 	TemporaryResetAt   time.Time
+	Circuit            CircuitBreakerState
 	Annotation         AccountAnnotation
 }
 

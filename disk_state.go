@@ -24,24 +24,29 @@ func resolveDefaultStatePath() string {
 }
 
 func LoadPluginDiskState(path string) (PluginDiskState, error) {
+	state, _, err := loadPluginDiskState(path)
+	return state, err
+}
+
+func loadPluginDiskState(path string) (PluginDiskState, bool, error) {
 	state := PluginDiskState{Config: DefaultConfig()}
 	if path == "" {
-		return normalizePluginDiskState(state), nil
+		return normalizePluginDiskState(state), false, nil
 	}
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return normalizePluginDiskState(state), nil
+		return normalizePluginDiskState(state), false, nil
 	}
 	if err != nil {
-		return PluginDiskState{}, err
+		return PluginDiskState{}, false, err
 	}
 	if len(raw) == 0 {
-		return normalizePluginDiskState(state), nil
+		return normalizePluginDiskState(state), false, nil
 	}
 	if err := json.Unmarshal(raw, &state); err != nil {
-		return PluginDiskState{}, err
+		return PluginDiskState{}, false, err
 	}
-	return normalizePluginDiskState(state), nil
+	return normalizePluginDiskState(state), true, nil
 }
 
 func SavePluginDiskState(path string, state PluginDiskState) error {
@@ -67,6 +72,7 @@ func normalizePluginDiskState(state PluginDiskState) PluginDiskState {
 	if cfg.QuotaRefreshInterval <= 0 && cfg.StaleAfter <= 0 && cfg.MonthlyMode == "" {
 		cfg = DefaultConfig()
 	}
+	cfg = NormalizeConfig(cfg)
 	annotations := NormalizeAnnotationState(AnnotationState{
 		Accounts: state.Accounts,
 		Groups:   state.Groups,

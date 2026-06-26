@@ -18,7 +18,7 @@ type PluginState struct {
 
 func NewPluginState(cfg Config) *PluginState {
 	return &PluginState{
-		cfg:         cfg,
+		cfg:         NormalizeConfig(cfg),
 		accounts:    make(map[string]AccountState),
 		annotations: NormalizeAnnotationState(AnnotationState{}),
 	}
@@ -27,7 +27,7 @@ func NewPluginState(cfg Config) *PluginState {
 func (s *PluginState) ReplaceConfig(cfg Config) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.cfg = cfg
+	s.cfg = NormalizeConfig(cfg)
 }
 
 func (s *PluginState) Config() Config {
@@ -88,6 +88,56 @@ func (s *PluginState) MarkAccountTemporaryExhaustedByAuthIndex(authIndex string,
 	}
 }
 
+func (s *PluginState) RecordAccountFailure(authID, authIndex, reason string, resetAt, now time.Time) (AccountState, bool) {
+	if authID == "" && authIndex == "" {
+		return AccountState{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key, account, ok := s.findAccountLocked(authID, authIndex)
+	if !ok {
+		if authID == "" {
+			return AccountState{}, false
+		}
+		key = "auth:" + authID
+		account = AccountState{AuthID: authID, AuthIndex: authIndex, Provider: "codex"}
+	}
+	applyCircuitFailure(&account, NormalizeConfig(s.cfg), reason, resetAt, now)
+	s.accounts[key] = account
+	return cloneAccountState(account), true
+}
+
+func (s *PluginState) RecordAccountSuccess(authID, authIndex string, now time.Time) (AccountState, bool) {
+	if authID == "" && authIndex == "" {
+		return AccountState{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key, account, ok := s.findAccountLocked(authID, authIndex)
+	if !ok {
+		return AccountState{}, false
+	}
+	applyCircuitSuccess(&account, NormalizeConfig(s.cfg), now)
+	s.accounts[key] = account
+	return cloneAccountState(account), true
+}
+
+func (s *PluginState) findAccountLocked(authID, authIndex string) (string, AccountState, bool) {
+	if authID != "" {
+		if account, ok := s.accounts["auth:"+authID]; ok {
+			return "auth:" + authID, account, true
+		}
+	}
+	if authIndex != "" {
+		for key, account := range s.accounts {
+			if account.AuthIndex == authIndex {
+				return key, account, true
+			}
+		}
+	}
+	return "", AccountState{}, false
+}
+
 func (s *PluginState) RecordSelection(authID, reason string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -109,9 +159,7 @@ func (s *PluginState) RecordLog(level, event, message string, fields map[string]
 		Fields:  cloneMap(fields),
 	}
 	s.logs = append(s.logs, entry)
-	if len(s.logs) > 200 {
-		s.logs = append([]LogEntry(nil), s.logs[len(s.logs)-200:]...)
-	}
+	s.logs = retainedLogs(s.logs, NormalizeConfig(s.cfg), now)
 }
 
 func (s *PluginState) Snapshot(now time.Time) StateSnapshot {
@@ -122,6 +170,7 @@ func (s *PluginState) Snapshot(now time.Time) StateSnapshot {
 	for _, account := range s.accounts {
 		cloned := cloneAccountState(account)
 		cloned.Stale = !cloned.LastSuccessAt.IsZero() && now.Sub(cloned.LastSuccessAt) > s.cfg.StaleAfter
+		cloned.Circuit = effectiveCircuitState(cloned.Circuit, now)
 		accounts = append(accounts, cloned)
 	}
 	sort.Slice(accounts, func(i, j int) bool {
@@ -133,11 +182,29 @@ func (s *PluginState) Snapshot(now time.Time) StateSnapshot {
 		Config:       s.cfg,
 		Accounts:     accounts,
 		Annotations:  cloneAnnotationState(s.annotations),
-		Logs:         cloneLogs(s.logs),
+		Logs:         cloneLogs(retainedLogs(s.logs, NormalizeConfig(s.cfg), now)),
 		LastSelected: s.lastSelected,
 		LastReason:   s.lastReason,
 		Now:          now,
 	}
+}
+
+func retainedLogs(logs []LogEntry, cfg Config, now time.Time) []LogEntry {
+	if len(logs) == 0 {
+		return nil
+	}
+	cfg = NormalizeConfig(cfg)
+	cutoff := now.Add(-cfg.LogRetention)
+	retained := make([]LogEntry, 0, len(logs))
+	for _, log := range logs {
+		if log.Time.IsZero() || !log.Time.Before(cutoff) {
+			retained = append(retained, log)
+		}
+	}
+	if len(retained) > cfg.MaxLogEntries {
+		retained = retained[len(retained)-cfg.MaxLogEntries:]
+	}
+	return retained
 }
 
 func accountStateKey(account AccountState) string {
@@ -151,6 +218,71 @@ func markTemporaryExhausted(account *AccountState, resetAt time.Time, reason str
 	account.TemporaryExhausted = true
 	account.TemporaryResetAt = resetAt
 	account.LastError = reason
+}
+
+func applyCircuitFailure(account *AccountState, cfg Config, reason string, resetAt, now time.Time) {
+	circuit := effectiveCircuitState(account.Circuit, now)
+	circuit.FailureCount++
+	circuit.SuccessCount = 0
+	circuit.Reason = reason
+	circuit.LastFailureAt = now
+	nextProbeAt := now.Add(cfg.CircuitOpenDuration)
+	if !resetAt.IsZero() && resetAt.After(nextProbeAt) {
+		nextProbeAt = resetAt
+	}
+	if !resetAt.IsZero() && resetAt.After(now) && circuit.NextProbeAt.Before(nextProbeAt) {
+		circuit.NextProbeAt = nextProbeAt
+	}
+	threshold := cfg.CircuitFailureThreshold
+	if threshold <= 0 {
+		threshold = 1
+	}
+	if circuit.State == CircuitStateHalfOpen || circuit.EffectiveState == CircuitStateHalfOpen || circuit.FailureCount >= threshold {
+		circuit.State = CircuitStateOpen
+		circuit.EffectiveState = CircuitStateOpen
+		circuit.OpenedAt = now
+		circuit.NextProbeAt = nextProbeAt
+	}
+	account.Circuit = circuit
+	account.LastError = reason
+}
+
+func applyCircuitSuccess(account *AccountState, cfg Config, now time.Time) {
+	circuit := effectiveCircuitState(account.Circuit, now)
+	if circuit.EffectiveState == CircuitStateHalfOpen {
+		circuit.SuccessCount++
+		circuit.LastSuccessAt = now
+		threshold := cfg.CircuitHalfOpenSuccessThreshold
+		if threshold <= 0 {
+			threshold = 1
+		}
+		if circuit.SuccessCount >= threshold {
+			account.Circuit = CircuitBreakerState{State: CircuitStateClosed, EffectiveState: CircuitStateClosed}
+			account.LastError = ""
+			return
+		}
+		account.Circuit = circuit
+		account.LastError = ""
+		return
+	}
+	if circuit.EffectiveState == CircuitStateOpen {
+		circuit.LastSuccessAt = now
+		account.Circuit = circuit
+		return
+	}
+	account.Circuit = CircuitBreakerState{State: CircuitStateClosed, EffectiveState: CircuitStateClosed, LastSuccessAt: now}
+	account.LastError = ""
+}
+
+func effectiveCircuitState(circuit CircuitBreakerState, now time.Time) CircuitBreakerState {
+	if circuit.State == "" {
+		circuit.State = CircuitStateClosed
+	}
+	circuit.EffectiveState = circuit.State
+	if circuit.State == CircuitStateOpen && !circuit.NextProbeAt.IsZero() && !circuit.NextProbeAt.After(now) {
+		circuit.EffectiveState = CircuitStateHalfOpen
+	}
+	return circuit
 }
 
 func cloneAnnotationState(state AnnotationState) AnnotationState {
@@ -197,6 +329,13 @@ func cloneParsedQuota(quota ParsedQuota) ParsedQuota {
 	if quota.ResetCreditsAvailableCount != nil {
 		count := *quota.ResetCreditsAvailableCount
 		quota.ResetCreditsAvailableCount = &count
+	}
+	if quota.ResetCreditsTotalEarnedCount != nil {
+		count := *quota.ResetCreditsTotalEarnedCount
+		quota.ResetCreditsTotalEarnedCount = &count
+	}
+	if len(quota.ResetCredits) > 0 {
+		quota.ResetCredits = append([]ResetCredit(nil), quota.ResetCredits...)
 	}
 	return quota
 }

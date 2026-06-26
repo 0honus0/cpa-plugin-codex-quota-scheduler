@@ -16,9 +16,11 @@ type fakeHostClient struct {
 	authList []pluginapi.HostAuthFileEntry
 	authJSON map[string]json.RawMessage
 	httpBody []byte
+	saved    map[string]json.RawMessage
 
 	expectedAuthByAccount map[string]string
 	responseByAccount     map[string]pluginapi.HTTPResponse
+	responseByURL         map[string]pluginapi.HTTPResponse
 	httpStatus            int
 	doStarted             chan struct{}
 	releaseDo             chan struct{}
@@ -28,6 +30,7 @@ type fakeHostClient struct {
 	activeHTTP   int
 	maxActive    int
 	headerErrors []string
+	urls         []string
 }
 
 func (f *fakeHostClient) ListAuths() ([]pluginapi.HostAuthFileEntry, error) {
@@ -35,24 +38,43 @@ func (f *fakeHostClient) ListAuths() ([]pluginapi.HostAuthFileEntry, error) {
 }
 
 func (f *fakeHostClient) GetAuth(authIndex string) (pluginapi.HostAuthGetResponse, error) {
-	return pluginapi.HostAuthGetResponse{AuthIndex: authIndex, JSON: f.authJSON[authIndex]}, nil
+	name := authIndex + ".json"
+	for _, auth := range f.authList {
+		if auth.AuthIndex == authIndex && auth.Name != "" {
+			name = auth.Name
+			break
+		}
+	}
+	return pluginapi.HostAuthGetResponse{AuthIndex: authIndex, Name: name, JSON: f.authJSON[authIndex]}, nil
+}
+
+func (f *fakeHostClient) SaveAuth(name string, raw json.RawMessage) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.saved == nil {
+		f.saved = make(map[string]json.RawMessage)
+	}
+	f.saved[name] = append(json.RawMessage(nil), raw...)
+	return nil
 }
 
 func (f *fakeHostClient) Do(req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
 	f.mu.Lock()
 	f.httpCalls++
 	f.activeHTTP++
+	f.urls = append(f.urls, req.URL)
 	if f.activeHTTP > f.maxActive {
 		f.maxActive = f.activeHTTP
 	}
 	f.mu.Unlock()
-	if f.doStarted != nil {
+	blocks := f.releaseDo != nil && req.URL != resetCreditsEndpoint && req.URL != codexTokenEndpoint
+	if f.doStarted != nil && blocks {
 		select {
 		case f.doStarted <- struct{}{}:
 		default:
 		}
 	}
-	if f.releaseDo != nil {
+	if blocks {
 		<-f.releaseDo
 	}
 	defer func() {
@@ -60,6 +82,22 @@ func (f *fakeHostClient) Do(req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, 
 		f.activeHTTP--
 		f.mu.Unlock()
 	}()
+
+	if req.URL == codexTokenEndpoint {
+		if req.Method != http.MethodPost {
+			f.recordHeaderError("token refresh method = " + req.Method)
+		}
+		if req.Headers.Get("Content-Type") != "application/x-www-form-urlencoded" {
+			f.recordHeaderError("token refresh Content-Type = " + req.Headers.Get("Content-Type"))
+		}
+		if !strings.Contains(string(req.Body), "grant_type=refresh_token") {
+			f.recordHeaderError("token refresh body missing grant_type")
+		}
+		if resp, ok := f.responseByURL[req.URL]; ok {
+			return resp, nil
+		}
+		return pluginapi.HTTPResponse{StatusCode: http.StatusOK, Headers: http.Header{}, Body: []byte(`{"access_token":"fresh-access","refresh_token":"fresh-refresh","expires_in":3600}`)}, nil
+	}
 
 	accountID := req.Headers.Get("Chatgpt-Account-Id")
 	if accountID == "" {
@@ -78,6 +116,9 @@ func (f *fakeHostClient) Do(req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, 
 	}
 
 	if resp, ok := f.responseByAccount[accountID]; ok {
+		return resp, nil
+	}
+	if resp, ok := f.responseByURL[req.URL]; ok {
 		return resp, nil
 	}
 	status := f.httpStatus
@@ -114,6 +155,12 @@ func (f *fakeHostClient) httpCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.httpCalls
+}
+
+func (f *fakeHostClient) requestedURLs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.urls...)
 }
 
 func (f *fakeHostClient) activeHTTPCount() int {
@@ -166,6 +213,138 @@ func TestRefreshOnceLoadsCodexAuthAndQuota(t *testing.T) {
 	}
 	if snapshot.Accounts[0].Quota.FiveHour == nil {
 		t.Fatalf("FiveHour quota is nil, want parsed quota")
+	}
+}
+
+func TestRefreshOnceRefreshesExpiredAccessTokenAndSavesAuth(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	oldIDToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	newIDToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	quotaURL := "https://chatgpt.com/backend-api/wham/usage"
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{
+			ID: "auth-1", AuthIndex: "idx-1", Name: "codex-auth-1.json", Provider: "codex",
+		}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"old-access","refresh_token":"old-refresh","id_token":"` + oldIDToken + `","account_id":"acct-1","expired":"` + now.Add(-time.Hour).Format(time.RFC3339) + `"}`),
+		},
+		expectedAuthByAccount: map[string]string{
+			"acct-1": "Bearer new-access",
+		},
+		responseByURL: map[string]pluginapi.HTTPResponse{
+			codexTokenEndpoint: {
+				StatusCode: http.StatusOK,
+				Body:       []byte(`{"access_token":"new-access","refresh_token":"new-refresh","id_token":"` + newIDToken + `","expires_in":3600}`),
+			},
+			quotaURL: {
+				StatusCode: http.StatusOK,
+				Body:       []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+			},
+			resetCreditsEndpoint: {
+				StatusCode: http.StatusOK,
+				Body:       []byte(`{"available_count":0,"credits":[]}`),
+			},
+		},
+	}
+	store := NewPluginState(DefaultConfig())
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+
+	if err := refresher.RefreshOnce(); err != nil {
+		t.Fatalf("RefreshOnce returned error: %v", err)
+	}
+
+	host.assertNoHeaderErrors(t)
+	saved := host.saved["codex-auth-1.json"]
+	if len(saved) == 0 {
+		t.Fatalf("saved auth is empty, want refreshed credential saved")
+	}
+	if !strings.Contains(string(saved), "new-access") || !strings.Contains(string(saved), "new-refresh") || strings.Contains(string(saved), "old-access") {
+		t.Fatalf("saved auth JSON = %s, want new tokens without old access token", saved)
+	}
+	account := accountByAuthID(t, store.Snapshot(now), "auth-1")
+	if account.LastError != "" || account.LastSuccessAt.IsZero() {
+		t.Fatalf("account refresh state = %#v, want success", account)
+	}
+}
+
+func TestRefreshOnceLoadsResetCreditsFromDedicatedEndpoint(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	quotaURL := "https://chatgpt.com/backend-api/wham/usage"
+	resetURL := "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{
+			ID: "auth-1", AuthIndex: "idx-1", Provider: "codex",
+		}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"access-1","id_token":"` + idToken + `"}`),
+		},
+		responseByURL: map[string]pluginapi.HTTPResponse{
+			quotaURL: {
+				StatusCode: http.StatusOK,
+				Body:       []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+			},
+			resetURL: {
+				StatusCode: http.StatusOK,
+				Body:       []byte(`{"available_count":2,"total_earned_count":3,"credits":[{"id":"credit-1","status":"available","granted_at":"2026-06-01T00:00:00Z","expires_at":"2026-07-01T00:00:00Z"}]}`),
+			},
+		},
+	}
+	store := NewPluginState(DefaultConfig())
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+
+	if err := refresher.RefreshOnce(); err != nil {
+		t.Fatalf("RefreshOnce returned error: %v", err)
+	}
+
+	urls := strings.Join(host.requestedURLs(), ",")
+	if !strings.Contains(urls, quotaURL) || !strings.Contains(urls, resetURL) {
+		t.Fatalf("requested URLs = %s", urls)
+	}
+	account := accountByAuthID(t, store.Snapshot(now), "auth-1")
+	if account.Quota.ResetCreditsAvailableCount == nil || *account.Quota.ResetCreditsAvailableCount != 2 {
+		t.Fatalf("available reset credits = %#v", account.Quota.ResetCreditsAvailableCount)
+	}
+	if account.Quota.ResetCreditsTotalEarnedCount == nil || *account.Quota.ResetCreditsTotalEarnedCount != 3 {
+		t.Fatalf("total reset credits = %#v", account.Quota.ResetCreditsTotalEarnedCount)
+	}
+	if len(account.Quota.ResetCredits) != 1 || account.Quota.ResetCredits[0].ID != "credit-1" {
+		t.Fatalf("reset credits = %#v", account.Quota.ResetCredits)
+	}
+}
+
+func TestRefreshOneAuthIDOnlyRefreshesRequestedAccount(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	idToken1 := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	idToken2 := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-2"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{
+			{ID: "auth-1", AuthIndex: "idx-1", Provider: "codex"},
+			{ID: "auth-2", AuthIndex: "idx-2", Provider: "codex"},
+		},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"access-1","id_token":"` + idToken1 + `"}`),
+			"idx-2": json.RawMessage(`{"access_token":"access-2","id_token":"` + idToken2 + `"}`),
+		},
+		expectedAuthByAccount: map[string]string{
+			"acct-2": "Bearer access-2",
+		},
+		httpBody: []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+	}
+	store := NewPluginState(DefaultConfig())
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+
+	if err := refresher.RefreshOneAuthID("auth-2"); err != nil {
+		t.Fatalf("RefreshOneAuthID returned error: %v", err)
+	}
+
+	host.assertNoHeaderErrors(t)
+	if calls := host.httpCallCount(); calls != 2 {
+		t.Fatalf("http calls = %d, want 2", calls)
+	}
+	snapshot := store.Snapshot(now)
+	if len(snapshot.Accounts) != 1 || snapshot.Accounts[0].AuthID != "auth-2" {
+		t.Fatalf("accounts = %#v, want only auth-2", snapshot.Accounts)
 	}
 }
 
@@ -552,8 +731,8 @@ func TestRefreshOnceHonorsMaxRefreshConcurrency(t *testing.T) {
 	if got := host.maxActiveHTTP(); got != cfg.MaxRefreshConcurrency {
 		t.Fatalf("max active HTTP = %d, want %d", got, cfg.MaxRefreshConcurrency)
 	}
-	if got := host.httpCallCount(); got != len(auths) {
-		t.Fatalf("http calls = %d, want %d", got, len(auths))
+	if got := host.httpCallCount(); got != len(auths)*2 {
+		t.Fatalf("http calls = %d, want %d", got, len(auths)*2)
 	}
 	host.assertNoHeaderErrors(t)
 }
