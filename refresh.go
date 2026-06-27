@@ -220,7 +220,7 @@ func (r *QuotaRefresher) Start() {
 			timer := time.NewTimer(interval)
 			select {
 			case <-timer.C:
-				r.RefreshSoon()
+				r.RefreshDueSoon()
 			case <-stop:
 				if !timer.Stop() {
 					<-timer.C
