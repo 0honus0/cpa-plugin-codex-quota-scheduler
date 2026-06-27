@@ -828,7 +828,12 @@ func TestResourceStatusRendersUsablePluginPage(t *testing.T) {
 			t.Fatalf("resource status still depends on management redirect marker %q: %s", forbidden, body)
 		}
 	}
-	for _, want := range []string{"secret alias", "private note", "private log", "logList", "managementKey", "MANAGEMENT_BASE", "/v0/management/plugins/codex-quota-scheduler", "authHeaders()"} {
+	for _, forbidden := range []string{"secret alias", "private note", "private log", "auth-1"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("resource status leaked privileged status marker %q: %s", forbidden, body)
+		}
+	}
+	for _, want := range []string{"logList", "managementKey", "MANAGEMENT_BASE", "/v0/management/plugins/codex-quota-scheduler", "authHeaders()", "let STATUS=", "refreshStatus"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("resource status missing usable plugin page marker %q: %s", want, body)
 		}

@@ -580,11 +580,29 @@ func RenderStatusHTML(payload StatusPayload) []byte {
 	return buf.Bytes()
 }
 
+func BuildStatusShellPayload(now time.Time) StatusPayload {
+	cfg := DefaultConfig()
+	return StatusPayload{
+		PluginID:      PluginID,
+		GeneratedAt:   now,
+		MonthlyMode:   cfg.MonthlyMode,
+		HandleEnabled: cfg.HandleEnabled,
+		Settings:      SettingsFromConfig(cfg),
+	}
+}
+
 func handleStatusRequest(store *PluginState, req pluginapi.ManagementRequest, now time.Time) pluginapi.ManagementResponse {
+	if isResourcePath(req.Path) {
+		return pluginapi.ManagementResponse{
+			StatusCode: http.StatusOK,
+			Headers:    http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+			Body:       RenderStatusHTML(BuildStatusShellPayload(now)),
+		}
+	}
 	snapshot := store.Snapshot(now)
 	ordered := BuildOrderedAccounts(syntheticStatusRequest(snapshot), snapshot, now)
 	payload := BuildStatusPayload(snapshot, ordered)
-	if req.Query.Get("format") == "json" && !isResourcePath(req.Path) {
+	if req.Query.Get("format") == "json" {
 		return jsonManagementResponse(http.StatusOK, payload)
 	}
 	return pluginapi.ManagementResponse{
