@@ -36,6 +36,10 @@ type Config struct {
 	EnableUsageFeedback             bool
 	MaxRefreshConcurrency           int
 	QuotaEndpoint                   string
+	RefreshActiveWindow             time.Duration
+	RefreshAfterResetDelay          time.Duration
+	RefreshRetryDelays              []time.Duration
+	RefreshOnStartup                bool
 	CircuitFailureThreshold         int
 	CircuitOpenDuration             time.Duration
 	CircuitHalfOpenSuccessThreshold int
@@ -64,6 +68,10 @@ type rawConfig struct {
 	EnableUsageFeedback             *bool  `yaml:"enable_usage_feedback"`
 	MaxRefreshConcurrency           *int   `yaml:"max_refresh_concurrency"`
 	QuotaEndpoint                   string `yaml:"quota_endpoint"`
+	RefreshActiveWindow             string `yaml:"refresh_active_window"`
+	RefreshAfterResetDelay          string `yaml:"refresh_after_reset_delay"`
+	RefreshRetryDelays              string `yaml:"refresh_retry_delays"`
+	RefreshOnStartup                *bool  `yaml:"refresh_on_startup"`
 	CircuitFailureThreshold         *int   `yaml:"circuit_failure_threshold"`
 	CircuitOpenDuration             string `yaml:"circuit_open_duration"`
 	CircuitHalfOpenSuccessThreshold *int   `yaml:"circuit_half_open_success_threshold"`
@@ -81,10 +89,14 @@ func DefaultConfig() Config {
 		EnableUsageFeedback:             true,
 		MaxRefreshConcurrency:           1,
 		QuotaEndpoint:                   chatGPTQuotaEndpoint,
-		CircuitFailureThreshold:         3,
-		CircuitOpenDuration:             10 * time.Minute,
-		CircuitHalfOpenSuccessThreshold: 1,
-		MaxLogEntries:                   2000,
+		RefreshActiveWindow:             time.Hour,
+		RefreshAfterResetDelay:          time.Minute,
+		RefreshRetryDelays:              []time.Duration{time.Minute, 5 * time.Minute, 15 * time.Minute},
+		RefreshOnStartup:                false,
+		CircuitFailureThreshold:         5,
+		CircuitOpenDuration:             30 * time.Minute,
+		CircuitHalfOpenSuccessThreshold: 2,
+		MaxLogEntries:                   200,
 		LogRetention:                    24 * time.Hour,
 	}
 }
@@ -109,6 +121,13 @@ func NormalizeConfig(cfg Config) Config {
 	if strings.TrimSpace(cfg.QuotaEndpoint) == "" {
 		cfg.QuotaEndpoint = defaults.QuotaEndpoint
 	}
+	if cfg.RefreshActiveWindow <= 0 {
+		cfg.RefreshActiveWindow = defaults.RefreshActiveWindow
+	}
+	if cfg.RefreshAfterResetDelay <= 0 {
+		cfg.RefreshAfterResetDelay = defaults.RefreshAfterResetDelay
+	}
+	cfg.RefreshRetryDelays = normalizeRetryDelays(cfg.RefreshRetryDelays, defaults.RefreshRetryDelays)
 	if cfg.CircuitFailureThreshold <= 0 {
 		cfg.CircuitFailureThreshold = defaults.CircuitFailureThreshold
 	}
@@ -188,6 +207,36 @@ func DecodeConfig(raw []byte) (Config, error) {
 		}
 		cfg.QuotaEndpoint = endpoint
 	}
+	if decoded.RefreshActiveWindow != "" {
+		d, err := time.ParseDuration(decoded.RefreshActiveWindow)
+		if err != nil {
+			return Config{}, fmt.Errorf("refresh_active_window: %w", err)
+		}
+		if d <= 0 {
+			return Config{}, fmt.Errorf("refresh_active_window must be positive")
+		}
+		cfg.RefreshActiveWindow = d
+	}
+	if decoded.RefreshAfterResetDelay != "" {
+		d, err := time.ParseDuration(decoded.RefreshAfterResetDelay)
+		if err != nil {
+			return Config{}, fmt.Errorf("refresh_after_reset_delay: %w", err)
+		}
+		if d <= 0 {
+			return Config{}, fmt.Errorf("refresh_after_reset_delay must be positive")
+		}
+		cfg.RefreshAfterResetDelay = d
+	}
+	if decoded.RefreshRetryDelays != "" {
+		delays, err := parseDurationList(decoded.RefreshRetryDelays)
+		if err != nil {
+			return Config{}, fmt.Errorf("refresh_retry_delays: %w", err)
+		}
+		cfg.RefreshRetryDelays = delays
+	}
+	if decoded.RefreshOnStartup != nil {
+		cfg.RefreshOnStartup = *decoded.RefreshOnStartup
+	}
 	if decoded.CircuitFailureThreshold != nil {
 		if *decoded.CircuitFailureThreshold <= 0 {
 			return Config{}, fmt.Errorf("circuit_failure_threshold must be positive")
@@ -227,6 +276,42 @@ func DecodeConfig(raw []byte) (Config, error) {
 		cfg.LogRetention = d
 	}
 	return NormalizeConfig(cfg), nil
+}
+
+func normalizeRetryDelays(values, fallback []time.Duration) []time.Duration {
+	normalized := make([]time.Duration, 0, len(values))
+	for _, value := range values {
+		if value > 0 {
+			normalized = append(normalized, value)
+		}
+	}
+	if len(normalized) == 0 {
+		return append([]time.Duration(nil), fallback...)
+	}
+	return normalized
+}
+
+func parseDurationList(raw string) ([]time.Duration, error) {
+	parts := strings.Split(raw, ",")
+	delays := make([]time.Duration, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		d, err := time.ParseDuration(part)
+		if err != nil {
+			return nil, err
+		}
+		if d <= 0 {
+			return nil, fmt.Errorf("duration must be positive")
+		}
+		delays = append(delays, d)
+	}
+	if len(delays) == 0 {
+		return nil, fmt.Errorf("at least one duration is required")
+	}
+	return delays, nil
 }
 
 func validateQuotaEndpoint(raw string) (string, error) {

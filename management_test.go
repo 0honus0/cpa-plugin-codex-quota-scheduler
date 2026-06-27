@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -437,6 +438,58 @@ func TestSettingsEndpointUpdatesConfigAndPersistsDefaultState(t *testing.T) {
 	}
 }
 
+func TestSettingsPayloadIncludesAdaptiveRefresh(t *testing.T) {
+	cfg := DefaultConfig()
+	payload := SettingsFromConfig(cfg)
+	if payload.RefreshActiveWindow != "1h0m0s" {
+		t.Fatalf("RefreshActiveWindow = %q, want 1h0m0s", payload.RefreshActiveWindow)
+	}
+	if payload.RefreshAfterResetDelay != "1m0s" {
+		t.Fatalf("RefreshAfterResetDelay = %q, want 1m0s", payload.RefreshAfterResetDelay)
+	}
+	if payload.RefreshRetryDelays != "1m0s,5m0s,15m0s" {
+		t.Fatalf("RefreshRetryDelays = %q, want 1m0s,5m0s,15m0s", payload.RefreshRetryDelays)
+	}
+	if payload.RefreshOnStartup {
+		t.Fatal("RefreshOnStartup = true, want false")
+	}
+}
+
+func TestConfigFromSettingsParsesAdaptiveRefresh(t *testing.T) {
+	cfg, err := ConfigFromSettings(DefaultConfig(), SettingsPayload{
+		HandleEnabled:                   true,
+		MonthlyMode:                     MonthlyModeExpiryOrder,
+		QuotaRefreshInterval:            "30m",
+		StaleAfter:                      "5h",
+		EnableUsageFeedback:             true,
+		MaxRefreshConcurrency:           1,
+		CircuitFailureThreshold:         5,
+		CircuitOpenDuration:             "30m",
+		CircuitHalfOpenSuccessThreshold: 2,
+		MaxLogEntries:                   200,
+		LogRetention:                    "24h",
+		RefreshActiveWindow:             "90m",
+		RefreshAfterResetDelay:          "2m",
+		RefreshRetryDelays:              "2m,6m,18m",
+		RefreshOnStartup:                true,
+	})
+	if err != nil {
+		t.Fatalf("ConfigFromSettings returned error: %v", err)
+	}
+	if cfg.RefreshActiveWindow != 90*time.Minute || cfg.RefreshAfterResetDelay != 2*time.Minute || cfg.RefreshOnStartup != true {
+		t.Fatalf("adaptive refresh config = %#v", cfg)
+	}
+	want := []time.Duration{2 * time.Minute, 6 * time.Minute, 18 * time.Minute}
+	if len(cfg.RefreshRetryDelays) != len(want) {
+		t.Fatalf("RefreshRetryDelays = %#v, want %#v", cfg.RefreshRetryDelays, want)
+	}
+	for i := range want {
+		if cfg.RefreshRetryDelays[i] != want[i] {
+			t.Fatalf("RefreshRetryDelays = %#v, want %#v", cfg.RefreshRetryDelays, want)
+		}
+	}
+}
+
 func TestStatusJSONIncludesQuotaWindowsForProgressBars(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	store := NewPluginState(DefaultConfig())
@@ -587,7 +640,7 @@ func TestResourceStatusQueryActionsDoNotMutateState(t *testing.T) {
 			t.Fatalf("%s StatusCode = %d, want %d; body=%s", action, resp.StatusCode, http.StatusOK, resp.Body)
 		}
 	}
-	if store.Config() != originalConfig {
+	if !reflect.DeepEqual(store.Config(), originalConfig) {
 		t.Fatalf("resource action changed config: %#v", store.Config())
 	}
 	if got := store.Annotations().Accounts["auth:auth-1"].Alias; got != "original" {

@@ -109,6 +109,7 @@ func TestPluginStateHalfOpenSuccessClosesCircuit(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.CircuitFailureThreshold = 1
 	cfg.CircuitOpenDuration = 10 * time.Minute
+	cfg.CircuitHalfOpenSuccessThreshold = 1
 	store := NewPluginState(cfg)
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	store.UpsertQuota(AccountState{AuthID: "auth-1", AuthIndex: "idx-1", Provider: "codex"})
@@ -176,5 +177,92 @@ func TestPluginStateLogRetentionDropsOldEntriesEvenWhenOutOfOrder(t *testing.T) 
 	}
 	if logs[0].Message != "new-before" || logs[1].Message != "new-after" {
 		t.Fatalf("logs = %#v, want only non-expired entries in original order", logs)
+	}
+}
+
+func TestRecordCodexActivityControlsActiveWindow(t *testing.T) {
+	now := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	if store.RefreshActive(now) {
+		t.Fatal("RefreshActive before activity = true, want false")
+	}
+	store.RecordCodexActivity(now)
+	if !store.RefreshActive(now.Add(59 * time.Minute)) {
+		t.Fatal("RefreshActive inside 1h window = false, want true")
+	}
+	if store.RefreshActive(now.Add(time.Hour + time.Second)) {
+		t.Fatal("RefreshActive after 1h window = true, want false")
+	}
+}
+
+func TestRecordRefreshFailureSchedulesRetry(t *testing.T) {
+	now := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	store.UpsertQuota(AccountState{AuthID: "auth-1", AuthIndex: "idx-1", Provider: "codex"})
+	updated, ok := store.RecordRefreshFailure("auth-1", "idx-1", RefreshFailureTransient, "request failed", now)
+	if !ok {
+		t.Fatal("RecordRefreshFailure returned ok=false")
+	}
+	if updated.Refresh.RetryAttempt != 1 {
+		t.Fatalf("RetryAttempt = %d, want 1", updated.Refresh.RetryAttempt)
+	}
+	if !updated.Refresh.NextRetryAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("NextRetryAt = %s, want %s", updated.Refresh.NextRetryAt, now.Add(time.Minute))
+	}
+	if updated.Refresh.AuthFailure {
+		t.Fatal("AuthFailure = true, want false")
+	}
+}
+
+func TestRecordRefreshAuthFailureStopsRetry(t *testing.T) {
+	now := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	store.UpsertQuota(AccountState{AuthID: "auth-1", AuthIndex: "idx-1", Provider: "codex"})
+	updated, ok := store.RecordRefreshFailure("auth-1", "idx-1", RefreshFailureAuth, "please re-login", now)
+	if !ok {
+		t.Fatal("RecordRefreshFailure returned ok=false")
+	}
+	if !updated.Refresh.AuthFailure {
+		t.Fatal("AuthFailure = false, want true")
+	}
+	if !updated.Refresh.NextRetryAt.IsZero() {
+		t.Fatalf("NextRetryAt = %s, want zero", updated.Refresh.NextRetryAt)
+	}
+}
+
+func TestAccountRefreshDueReasons(t *testing.T) {
+	now := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
+	cfg := DefaultConfig()
+	if due, reason := accountRefreshDue(AccountState{AuthID: "a"}, cfg, now); !due || reason != "never_refreshed" {
+		t.Fatalf("never refreshed due=%v reason=%q, want true never_refreshed", due, reason)
+	}
+	stale := AccountState{AuthID: "a", LastSuccessAt: now.Add(-6 * time.Hour)}
+	if due, reason := accountRefreshDue(stale, cfg, now); !due || reason != "stale" {
+		t.Fatalf("stale due=%v reason=%q, want true stale", due, reason)
+	}
+	retry := AccountState{AuthID: "a", LastSuccessAt: now.Add(-time.Hour)}
+	retry.Refresh.NextRetryAt = now.Add(-time.Second)
+	if due, reason := accountRefreshDue(retry, cfg, now); !due || reason != "retry_due" {
+		t.Fatalf("retry due=%v reason=%q, want true retry_due", due, reason)
+	}
+	authFailed := AccountState{AuthID: "a", LastSuccessAt: now.Add(-6 * time.Hour)}
+	authFailed.Refresh.AuthFailure = true
+	if due, reason := accountRefreshDue(authFailed, cfg, now); due || reason != "auth_failure" {
+		t.Fatalf("auth failure due=%v reason=%q, want false auth_failure", due, reason)
+	}
+}
+
+func TestPluginStateDueAccountsAnnotatesReason(t *testing.T) {
+	now := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	store.UpsertQuota(AccountState{AuthID: "fresh", LastSuccessAt: now})
+	store.UpsertQuota(AccountState{AuthID: "stale", LastSuccessAt: now.Add(-6 * time.Hour)})
+
+	due := store.DueAccounts(now)
+	if len(due) != 1 {
+		t.Fatalf("due accounts len = %d, want 1: %#v", len(due), due)
+	}
+	if due[0].AuthID != "stale" || due[0].Refresh.DueReason != "stale" {
+		t.Fatalf("due account = %#v, want stale with reason", due[0])
 	}
 }

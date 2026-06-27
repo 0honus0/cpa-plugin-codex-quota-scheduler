@@ -1,6 +1,7 @@
 package main
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -30,11 +31,79 @@ func TestDecodeConfigDefaults(t *testing.T) {
 	if cfg.MaxRefreshConcurrency != 1 {
 		t.Fatalf("MaxRefreshConcurrency = %d, want 1", cfg.MaxRefreshConcurrency)
 	}
-	if cfg.MaxLogEntries != 2000 {
-		t.Fatalf("MaxLogEntries = %d, want 2000", cfg.MaxLogEntries)
+	if cfg.MaxLogEntries != 200 {
+		t.Fatalf("MaxLogEntries = %d, want 200", cfg.MaxLogEntries)
 	}
 	if cfg.LogRetention != 24*time.Hour {
 		t.Fatalf("LogRetention = %s, want 24h", cfg.LogRetention)
+	}
+}
+
+func TestDefaultConfigAdaptiveRefreshDefaults(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.RefreshActiveWindow != time.Hour {
+		t.Fatalf("RefreshActiveWindow = %s, want 1h", cfg.RefreshActiveWindow)
+	}
+	if cfg.RefreshAfterResetDelay != time.Minute {
+		t.Fatalf("RefreshAfterResetDelay = %s, want 1m", cfg.RefreshAfterResetDelay)
+	}
+	if got := cfg.RefreshRetryDelays; !reflect.DeepEqual(got, []time.Duration{time.Minute, 5 * time.Minute, 15 * time.Minute}) {
+		t.Fatalf("RefreshRetryDelays = %#v, want 1m,5m,15m", got)
+	}
+	if cfg.RefreshOnStartup {
+		t.Fatal("RefreshOnStartup = true, want false")
+	}
+	if cfg.CircuitFailureThreshold != 5 {
+		t.Fatalf("CircuitFailureThreshold = %d, want 5", cfg.CircuitFailureThreshold)
+	}
+	if cfg.CircuitOpenDuration != 30*time.Minute {
+		t.Fatalf("CircuitOpenDuration = %s, want 30m", cfg.CircuitOpenDuration)
+	}
+	if cfg.CircuitHalfOpenSuccessThreshold != 2 {
+		t.Fatalf("CircuitHalfOpenSuccessThreshold = %d, want 2", cfg.CircuitHalfOpenSuccessThreshold)
+	}
+	if cfg.MaxLogEntries != 200 {
+		t.Fatalf("MaxLogEntries = %d, want 200", cfg.MaxLogEntries)
+	}
+}
+
+func TestDecodeConfigAdaptiveRefreshOverrides(t *testing.T) {
+	cfg, err := DecodeConfig([]byte(`
+refresh_active_window: 2h
+refresh_after_reset_delay: 30s
+refresh_retry_delays: 30s, 2m, 10m
+refresh_on_startup: true
+`))
+	if err != nil {
+		t.Fatalf("DecodeConfig returned error: %v", err)
+	}
+	if cfg.RefreshActiveWindow != 2*time.Hour {
+		t.Fatalf("RefreshActiveWindow = %s, want 2h", cfg.RefreshActiveWindow)
+	}
+	if cfg.RefreshAfterResetDelay != 30*time.Second {
+		t.Fatalf("RefreshAfterResetDelay = %s, want 30s", cfg.RefreshAfterResetDelay)
+	}
+	if got := cfg.RefreshRetryDelays; !reflect.DeepEqual(got, []time.Duration{30 * time.Second, 2 * time.Minute, 10 * time.Minute}) {
+		t.Fatalf("RefreshRetryDelays = %#v", got)
+	}
+	if !cfg.RefreshOnStartup {
+		t.Fatal("RefreshOnStartup = false, want true")
+	}
+}
+
+func TestDecodeConfigRejectsInvalidAdaptiveRefresh(t *testing.T) {
+	tests := []string{
+		"refresh_active_window: 0s\n",
+		"refresh_after_reset_delay: -1s\n",
+		"refresh_retry_delays: 1m,0s\n",
+		"refresh_retry_delays: ', ,'\n",
+	}
+	for _, raw := range tests {
+		t.Run(raw, func(t *testing.T) {
+			if _, err := DecodeConfig([]byte(raw)); err == nil {
+				t.Fatalf("DecodeConfig accepted invalid adaptive refresh config %q", raw)
+			}
+		})
 	}
 }
 

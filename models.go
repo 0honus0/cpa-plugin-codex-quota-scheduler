@@ -66,6 +66,24 @@ type CircuitBreakerState struct {
 	LastSuccessAt  time.Time    `json:"last_success_at,omitempty"`
 }
 
+type RefreshFailureKind string
+
+const (
+	RefreshFailureNone      RefreshFailureKind = ""
+	RefreshFailureTransient RefreshFailureKind = "transient"
+	RefreshFailureAuth      RefreshFailureKind = "auth"
+	RefreshFailureLocal     RefreshFailureKind = "local"
+)
+
+type AccountRefreshState struct {
+	LastFailureKind RefreshFailureKind
+	RetryAttempt    int
+	NextRetryAt     time.Time
+	AuthFailure     bool
+	DueReason       string
+	LastFailureAt   time.Time
+}
+
 type AccountAnnotation struct {
 	Alias   string   `json:"alias,omitempty" yaml:"alias,omitempty"`
 	Notes   string   `json:"notes,omitempty" yaml:"notes,omitempty"`
@@ -102,17 +120,19 @@ type AccountState struct {
 	TemporaryExhausted bool
 	TemporaryResetAt   time.Time
 	Circuit            CircuitBreakerState
+	Refresh            AccountRefreshState
 	Annotation         AccountAnnotation
 }
 
 type StateSnapshot struct {
-	Config       Config
-	Accounts     []AccountState
-	Annotations  AnnotationState
-	Logs         []LogEntry
-	LastSelected string
-	LastReason   string
-	Now          time.Time
+	Config              Config
+	Accounts            []AccountState
+	Annotations         AnnotationState
+	Logs                []LogEntry
+	LastSelected        string
+	LastReason          string
+	LastCodexActivityAt time.Time
+	Now                 time.Time
 }
 
 type LogEntry struct {

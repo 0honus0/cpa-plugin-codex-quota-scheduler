@@ -7,13 +7,14 @@ import (
 )
 
 type PluginState struct {
-	mu           sync.RWMutex
-	cfg          Config
-	accounts     map[string]AccountState
-	annotations  AnnotationState
-	logs         []LogEntry
-	lastSelected string
-	lastReason   string
+	mu                  sync.RWMutex
+	cfg                 Config
+	accounts            map[string]AccountState
+	annotations         AnnotationState
+	logs                []LogEntry
+	lastSelected        string
+	lastReason          string
+	lastCodexActivityAt time.Time
 }
 
 func NewPluginState(cfg Config) *PluginState {
@@ -54,6 +55,9 @@ func (s *PluginState) UpsertQuota(account AccountState) {
 	key := accountStateKey(account)
 	if key == "" {
 		return
+	}
+	if !account.LastSuccessAt.IsZero() && account.LastError == "" {
+		account.Refresh = AccountRefreshState{}
 	}
 	s.accounts[key] = cloneAccountState(account)
 }
@@ -145,6 +149,59 @@ func (s *PluginState) RecordSelection(authID, reason string) {
 	s.lastReason = reason
 }
 
+func (s *PluginState) RecordCodexActivity(now time.Time) {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lastCodexActivityAt.IsZero() || now.After(s.lastCodexActivityAt) {
+		s.lastCodexActivityAt = now
+	}
+}
+
+func (s *PluginState) RefreshActive(now time.Time) bool {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	cfg := NormalizeConfig(s.cfg)
+	return !s.lastCodexActivityAt.IsZero() && !now.After(s.lastCodexActivityAt.Add(cfg.RefreshActiveWindow))
+}
+
+func (s *PluginState) RecordRefreshFailure(authID, authIndex string, kind RefreshFailureKind, message string, now time.Time) (AccountState, bool) {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if authID == "" && authIndex == "" {
+		return AccountState{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key, account, ok := s.findAccountLocked(authID, authIndex)
+	if !ok {
+		if authID == "" {
+			return AccountState{}, false
+		}
+		key = "auth:" + authID
+		account = AccountState{AuthID: authID, AuthIndex: authIndex, Provider: "codex"}
+	}
+	account.LastError = message
+	account.Refresh.LastFailureKind = kind
+	account.Refresh.LastFailureAt = now
+	if kind == RefreshFailureAuth || kind == RefreshFailureLocal {
+		account.Refresh.AuthFailure = kind == RefreshFailureAuth
+		account.Refresh.NextRetryAt = time.Time{}
+	} else {
+		account.Refresh.AuthFailure = false
+		account.Refresh.RetryAttempt++
+		account.Refresh.NextRetryAt = now.Add(retryDelayForAttempt(NormalizeConfig(s.cfg), account.Refresh.RetryAttempt))
+	}
+	s.accounts[key] = account
+	return cloneAccountState(account), true
+}
+
 func (s *PluginState) RecordLog(level, event, message string, fields map[string]any, now time.Time) {
 	if now.IsZero() {
 		now = time.Now()
@@ -179,14 +236,39 @@ func (s *PluginState) Snapshot(now time.Time) StateSnapshot {
 	accounts = ApplyAnnotations(accounts, s.annotations)
 
 	return StateSnapshot{
-		Config:       s.cfg,
-		Accounts:     accounts,
-		Annotations:  cloneAnnotationState(s.annotations),
-		Logs:         cloneLogs(retainedLogs(s.logs, NormalizeConfig(s.cfg), now)),
-		LastSelected: s.lastSelected,
-		LastReason:   s.lastReason,
-		Now:          now,
+		Config:              s.cfg,
+		Accounts:            accounts,
+		Annotations:         cloneAnnotationState(s.annotations),
+		Logs:                cloneLogs(retainedLogs(s.logs, NormalizeConfig(s.cfg), now)),
+		LastSelected:        s.lastSelected,
+		LastReason:          s.lastReason,
+		LastCodexActivityAt: s.lastCodexActivityAt,
+		Now:                 now,
 	}
+}
+
+func (s *PluginState) DueAccounts(now time.Time) []AccountState {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	cfg := NormalizeConfig(s.cfg)
+	accounts := make([]AccountState, 0)
+	for _, account := range s.accounts {
+		cloned := cloneAccountState(account)
+		if due, reason := accountRefreshDue(cloned, cfg, now); due {
+			cloned.Refresh.DueReason = reason
+			accounts = append(accounts, cloned)
+		}
+	}
+	sort.Slice(accounts, func(i, j int) bool {
+		if accounts[i].Priority != accounts[j].Priority {
+			return accounts[i].Priority > accounts[j].Priority
+		}
+		return accountStateKey(accounts[i]) < accountStateKey(accounts[j])
+	})
+	return accounts
 }
 
 func retainedLogs(logs []LogEntry, cfg Config, now time.Time) []LogEntry {
@@ -205,6 +287,51 @@ func retainedLogs(logs []LogEntry, cfg Config, now time.Time) []LogEntry {
 		retained = retained[len(retained)-cfg.MaxLogEntries:]
 	}
 	return retained
+}
+
+func accountRefreshDue(account AccountState, cfg Config, now time.Time) (bool, string) {
+	cfg = NormalizeConfig(cfg)
+	if account.Refresh.AuthFailure {
+		return false, "auth_failure"
+	}
+	if !account.Refresh.NextRetryAt.IsZero() && !account.Refresh.NextRetryAt.After(now) {
+		return true, "retry_due"
+	}
+	if account.LastSuccessAt.IsZero() {
+		return true, "never_refreshed"
+	}
+	if now.Sub(account.LastSuccessAt) > cfg.StaleAfter {
+		return true, "stale"
+	}
+	if resetDue(account.Quota.FiveHour, cfg.RefreshAfterResetDelay, now) {
+		return true, "five_hour_reset_due"
+	}
+	if resetDue(account.Quota.LongWindow, cfg.RefreshAfterResetDelay, now) {
+		return true, "long_window_reset_due"
+	}
+	if account.TemporaryExhausted && !account.TemporaryResetAt.IsZero() && !account.TemporaryResetAt.Add(cfg.RefreshAfterResetDelay).After(now) {
+		return true, "temporary_reset_due"
+	}
+	return false, ""
+}
+
+func resetDue(window *QuotaWindow, delay time.Duration, now time.Time) bool {
+	return window != nil && !window.ResetAt.IsZero() && !window.ResetAt.Add(delay).After(now)
+}
+
+func retryDelayForAttempt(cfg Config, attempt int) time.Duration {
+	delays := NormalizeConfig(cfg).RefreshRetryDelays
+	if len(delays) == 0 {
+		return time.Minute
+	}
+	index := attempt - 1
+	if index < 0 {
+		index = 0
+	}
+	if index >= len(delays) {
+		index = len(delays) - 1
+	}
+	return delays[index]
 }
 
 func accountStateKey(account AccountState) string {

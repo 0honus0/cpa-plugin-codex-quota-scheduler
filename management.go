@@ -39,6 +39,10 @@ type SettingsPayload struct {
 	EnableUsageFeedback             bool        `json:"enable_usage_feedback"`
 	MaxRefreshConcurrency           int         `json:"max_refresh_concurrency"`
 	QuotaEndpoint                   string      `json:"quota_endpoint"`
+	RefreshActiveWindow             string      `json:"refresh_active_window"`
+	RefreshAfterResetDelay          string      `json:"refresh_after_reset_delay"`
+	RefreshRetryDelays              string      `json:"refresh_retry_delays"`
+	RefreshOnStartup                bool        `json:"refresh_on_startup"`
 	CircuitFailureThreshold         int         `json:"circuit_failure_threshold"`
 	CircuitOpenDuration             string      `json:"circuit_open_duration"`
 	CircuitHalfOpenSuccessThreshold int         `json:"circuit_half_open_success_threshold"`
@@ -198,6 +202,10 @@ func SettingsFromConfig(cfg Config) SettingsPayload {
 		EnableUsageFeedback:             cfg.EnableUsageFeedback,
 		MaxRefreshConcurrency:           cfg.MaxRefreshConcurrency,
 		QuotaEndpoint:                   cfg.QuotaEndpoint,
+		RefreshActiveWindow:             cfg.RefreshActiveWindow.String(),
+		RefreshAfterResetDelay:          cfg.RefreshAfterResetDelay.String(),
+		RefreshRetryDelays:              formatDurationList(cfg.RefreshRetryDelays),
+		RefreshOnStartup:                cfg.RefreshOnStartup,
 		CircuitFailureThreshold:         cfg.CircuitFailureThreshold,
 		CircuitOpenDuration:             cfg.CircuitOpenDuration.String(),
 		CircuitHalfOpenSuccessThreshold: cfg.CircuitHalfOpenSuccessThreshold,
@@ -241,6 +249,28 @@ func ConfigFromSettings(base Config, payload SettingsPayload) (Config, error) {
 		}
 		cfg.QuotaEndpoint = endpoint
 	}
+	if payload.RefreshActiveWindow != "" {
+		d, err := time.ParseDuration(payload.RefreshActiveWindow)
+		if err != nil || d <= 0 {
+			return Config{}, jsonError("refresh_active_window must be a positive duration")
+		}
+		cfg.RefreshActiveWindow = d
+	}
+	if payload.RefreshAfterResetDelay != "" {
+		d, err := time.ParseDuration(payload.RefreshAfterResetDelay)
+		if err != nil || d <= 0 {
+			return Config{}, jsonError("refresh_after_reset_delay must be a positive duration")
+		}
+		cfg.RefreshAfterResetDelay = d
+	}
+	if payload.RefreshRetryDelays != "" {
+		delays, err := parseDurationList(payload.RefreshRetryDelays)
+		if err != nil {
+			return Config{}, jsonError("refresh_retry_delays must be positive comma-separated durations")
+		}
+		cfg.RefreshRetryDelays = delays
+	}
+	cfg.RefreshOnStartup = payload.RefreshOnStartup
 	if payload.CircuitFailureThreshold > 0 {
 		cfg.CircuitFailureThreshold = payload.CircuitFailureThreshold
 	}
@@ -265,6 +295,16 @@ func ConfigFromSettings(base Config, payload SettingsPayload) (Config, error) {
 		cfg.LogRetention = d
 	}
 	return NormalizeConfig(cfg), nil
+}
+
+func formatDurationList(values []time.Duration) string {
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		if value > 0 {
+			parts = append(parts, value.String())
+		}
+	}
+	return strings.Join(parts, ",")
 }
 
 type jsonError string
