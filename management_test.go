@@ -344,7 +344,7 @@ func TestStatusHTMLUsesManagementAPIActionsModalProgressAndLogs(t *testing.T) {
 	}
 	html := string(resp.Body)
 	lower := strings.ToLower(html)
-	for _, want := range []string{"quota-bar", "editDialog", "logList", "openEdit", "exportLogs", "codex-quota-scheduler-logs.json", "maxLogEntries", "logRetention", "refreshOneQuota", "schedulePageRefresh", "managementKey", "MANAGEMENT_BASE", "/v0/management/plugins/codex-quota-scheduler", "authHeaders()", "localeSelect", "TRANSLATIONS", "codex-quota-scheduler-locale-v1", "Scheduler Settings", "Account Queue", "INLINE_TRANSLATIONS", "Reset credits", "Refresh Quota"} {
+	for _, want := range []string{"quota-bar", "editDialog", "logList", "openEdit", "exportLogs", "codex-quota-scheduler-logs.json", "maxLogEntries", "logRetention", "refreshOneQuota", "refreshStatus", "renderAccounts", "managementKey", "MANAGEMENT_BASE", "/v0/management/plugins/codex-quota-scheduler", "authHeaders()", "localeSelect", "TRANSLATIONS", "codex-quota-scheduler-locale-v1", "Scheduler Settings", "Account Queue", "INLINE_TRANSLATIONS", "Reset credits", "Refresh Quota"} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("html missing marker %q: %s", want, html)
 		}
@@ -359,6 +359,47 @@ func TestStatusHTMLUsesManagementAPIActionsModalProgressAndLogs(t *testing.T) {
 			t.Fatalf("html contains sensitive field %q: %s", forbidden, html)
 		}
 	}
+}
+
+func TestStatusPageUsesCollapsedSettingsAndNoHardReload(t *testing.T) {
+	store := NewPluginState(DefaultConfig())
+	page := renderStatusPageForTest(t, store)
+	if !strings.Contains(page, `<details class="section collapsible" id="settingsPanel">`) &&
+		!strings.Contains(page, `<details class="panel collapsible" id="settingsPanel">`) {
+		t.Fatalf("page does not render settings as collapsed details")
+	}
+	if strings.Contains(page, `id="settingsPanel" open`) {
+		t.Fatalf("settings panel is open by default")
+	}
+	if strings.Contains(page, "window.location.reload") {
+		t.Fatalf("page still contains hard reload")
+	}
+	if strings.Contains(page, "schedulePageRefresh") {
+		t.Fatalf("page still contains scheduled hard reload helper")
+	}
+	if !strings.Contains(page, `requestManagement('/status'`) {
+		t.Fatalf("page does not fetch status for dynamic refresh")
+	}
+	settingsStart := strings.Index(page, `id="settingsPanel"`)
+	refreshStart := strings.Index(page, `id="refreshQuota"`)
+	if settingsStart < 0 || refreshStart < 0 {
+		t.Fatalf("page missing settings panel or refresh button")
+	}
+	if refreshStart > settingsStart {
+		t.Fatalf("refresh quota button is still inside or after the settings panel")
+	}
+}
+
+func renderStatusPageForTest(t *testing.T, store *PluginState) string {
+	t.Helper()
+	resp := handleStatusRequest(store, pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/status",
+	}, time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", resp.StatusCode, resp.Body)
+	}
+	return string(resp.Body)
 }
 
 func TestStatusJSONIncludesCircuitStateAndResetCredits(t *testing.T) {

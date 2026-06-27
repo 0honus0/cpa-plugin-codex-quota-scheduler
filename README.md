@@ -93,15 +93,19 @@ The default scheduler settings are:
 handle_enabled: true
 quota_refresh_interval: 30m
 stale_after: 5h
+refresh_active_window: 1h
+refresh_after_reset_delay: 1m
+refresh_retry_delays: 1m,5m,15m
+refresh_on_startup: false
 monthly_mode: expiry_order
 fallback: fill-first
 enable_usage_feedback: true
 max_refresh_concurrency: 1
 quota_endpoint: https://chatgpt.com/backend-api/wham/usage
-circuit_failure_threshold: 3
-circuit_open_duration: 10m
-circuit_half_open_success_threshold: 1
-max_log_entries: 2000
+circuit_failure_threshold: 5
+circuit_open_duration: 30m
+circuit_half_open_success_threshold: 2
+max_log_entries: 200
 log_retention: 24h
 ```
 
@@ -129,6 +133,12 @@ actions such as saving settings, importing state, editing annotations, viewing
 logs through the API, or requesting quota refresh. This follows CPA's security
 boundary: `/v0/resource/plugins/...` serves the browser resource page, while
 `/v0/management/...` handles authenticated management operations.
+
+The resource page under `/v0/resource/plugins/codex-quota-scheduler/status`
+serves UI content only. Settings, import/export, annotations, logs, and refresh
+actions use `/v0/management/plugins/codex-quota-scheduler/...` and require the
+CPA Management key. The quota endpoint is restricted to
+`https://chatgpt.com/backend-api/wham/usage`.
 
 The page provides:
 
