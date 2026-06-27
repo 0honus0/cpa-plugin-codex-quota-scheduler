@@ -300,19 +300,19 @@ func (r *QuotaRefresher) refreshAuth(auth pluginapi.HostAuthFileEntry) {
 
 	authResp, err := r.host.GetAuth(auth.AuthIndex)
 	if err != nil {
-		r.upsertRefreshFailure(account, redactSecrets(fmt.Sprintf("get auth: %v", err)))
+		r.upsertRefreshFailure(account, redactSecrets(fmt.Sprintf("get auth: %v", err)), RefreshFailureTransient)
 		return
 	}
 
 	credentials, err := ExtractCodexCredentials(authResp.JSON)
 	if err != nil {
-		r.upsertRefreshFailure(account, redactWithCredentials(fmt.Sprintf("extract credentials: %v", err), credentials))
+		r.upsertRefreshFailure(account, redactWithCredentials(fmt.Sprintf("extract credentials: %v", err), credentials), RefreshFailureLocal)
 		return
 	}
 	if accessTokenExpired(credentials, r.now()) {
 		credentials, err = r.refreshAndSaveCredentials(authResp, credentials)
 		if err != nil {
-			r.upsertRefreshFailure(account, redactWithCredentials(fmt.Sprintf("refresh access token: %v", err), credentials))
+			r.upsertRefreshFailure(account, redactWithCredentials(fmt.Sprintf("refresh access token: %v", err), credentials), RefreshFailureLocal)
 			return
 		}
 	}
@@ -331,18 +331,18 @@ func (r *QuotaRefresher) refreshAuth(auth pluginapi.HostAuthFileEntry) {
 	}
 	resp, err := r.host.Do(req)
 	if err != nil {
-		r.upsertRefreshFailure(account, redactWithCredentials(fmt.Sprintf("quota request: %v", err), credentials))
+		r.upsertRefreshFailure(account, redactWithCredentials(fmt.Sprintf("quota request: %v", err), credentials), RefreshFailureTransient)
 		return
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		message := fmt.Sprintf("quota request returned status %d: response body: %s", resp.StatusCode, sanitizedBodySummary(resp.Body))
-		r.upsertRefreshFailure(account, redactWithCredentials(message, credentials))
+		r.upsertRefreshFailure(account, redactWithCredentials(message, credentials), refreshFailureKind(resp.StatusCode))
 		return
 	}
 
 	quota, err := ParseCodexUsagePayload(resp.Body, r.now())
 	if err != nil {
-		r.upsertRefreshFailure(account, redactWithCredentials(fmt.Sprintf("parse quota: %v", err), credentials))
+		r.upsertRefreshFailure(account, redactWithCredentials(fmt.Sprintf("parse quota: %v", err), credentials), RefreshFailureTransient)
 		return
 	}
 	if resetCredits, err := r.refreshResetCredits(credentials); err != nil {
@@ -507,11 +507,19 @@ func mergeResetCredits(quota *ParsedQuota, resetCredits ParsedQuota) {
 	}
 }
 
-func (r *QuotaRefresher) upsertRefreshFailure(account AccountState, message string) {
+func refreshFailureKind(status int) RefreshFailureKind {
+	if status == http.StatusUnauthorized {
+		return RefreshFailureAuth
+	}
+	return RefreshFailureTransient
+}
+
+func (r *QuotaRefresher) upsertRefreshFailure(account AccountState, message string, kind RefreshFailureKind) {
 	merged := r.mergeExistingAccount(account)
 	merged.LastRefreshAt = account.LastRefreshAt
 	merged.LastError = message
 	r.state.UpsertQuota(merged)
+	r.state.RecordRefreshFailure(merged.AuthID, merged.AuthIndex, kind, message, r.now())
 	r.state.RecordLog("warn", "quota.refresh_failed", "账号额度刷新失败", map[string]any{"auth_id": merged.AuthID, "error": message}, r.now())
 }
 

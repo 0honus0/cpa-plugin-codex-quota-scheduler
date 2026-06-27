@@ -604,6 +604,68 @@ func TestRefreshOnceHTTPNon2xxRecordsRedactedErrorWithoutQuotaSuccess(t *testing
 	}
 }
 
+func TestRefreshFailure401MarksAuthFailureWithoutRetry(t *testing.T) {
+	now := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{
+			ID: "auth-1", AuthIndex: "idx-1", Provider: "codex",
+		}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"access-1","id_token":"` + idToken + `"}`),
+		},
+		httpStatus: http.StatusUnauthorized,
+		httpBody:   []byte(`{"error":"expired"}`),
+	}
+	store := NewPluginState(DefaultConfig())
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	if err := refresher.RefreshOnce(); err != nil {
+		t.Fatalf("RefreshOnce returned error: %v", err)
+	}
+
+	account := accountByAuthID(t, store.Snapshot(now), "auth-1")
+	if account.Refresh.LastFailureKind != RefreshFailureAuth {
+		t.Fatalf("LastFailureKind = %q, want auth", account.Refresh.LastFailureKind)
+	}
+	if !account.Refresh.AuthFailure {
+		t.Fatal("AuthFailure = false, want true")
+	}
+	if !account.Refresh.NextRetryAt.IsZero() {
+		t.Fatalf("NextRetryAt = %s, want zero", account.Refresh.NextRetryAt)
+	}
+}
+
+func TestRefreshFailure403SchedulesTransientRetry(t *testing.T) {
+	now := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{
+			ID: "auth-1", AuthIndex: "idx-1", Provider: "codex",
+		}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"access-1","id_token":"` + idToken + `"}`),
+		},
+		httpStatus: http.StatusForbidden,
+		httpBody:   []byte(`{"error":"forbidden"}`),
+	}
+	store := NewPluginState(DefaultConfig())
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	if err := refresher.RefreshOnce(); err != nil {
+		t.Fatalf("RefreshOnce returned error: %v", err)
+	}
+
+	account := accountByAuthID(t, store.Snapshot(now), "auth-1")
+	if account.Refresh.LastFailureKind != RefreshFailureTransient {
+		t.Fatalf("LastFailureKind = %q, want transient", account.Refresh.LastFailureKind)
+	}
+	if account.Refresh.AuthFailure {
+		t.Fatal("AuthFailure = true, want false")
+	}
+	if !account.Refresh.NextRetryAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("NextRetryAt = %s, want %s", account.Refresh.NextRetryAt, now.Add(time.Minute))
+	}
+}
+
 func TestRefreshOnceFailurePreservesPriorSuccessfulQuota(t *testing.T) {
 	firstNow := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	secondNow := firstNow.Add(2 * time.Minute)

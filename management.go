@@ -68,6 +68,10 @@ type StatusAccount struct {
 	ResetExpiryText              string        `json:"reset_expiry_text,omitempty"`
 	CacheAge                     string        `json:"cache_age,omitempty"`
 	CacheAgeSeconds              int64         `json:"cache_age_seconds,omitempty"`
+	LastError                    string        `json:"last_error,omitempty"`
+	RefreshDueReason             string        `json:"refresh_due_reason,omitempty"`
+	NextRetryText                string        `json:"next_retry_text,omitempty"`
+	AuthFailure                  bool          `json:"auth_failure,omitempty"`
 	FiveHour                     StatusWindow  `json:"five_hour"`
 	LongWindow                   StatusWindow  `json:"long_window"`
 	Circuit                      StatusCircuit `json:"circuit"`
@@ -444,9 +448,13 @@ func BuildStatusPayload(snapshot StateSnapshot, ordered []ScheduledAccount) Stat
 			UnavailableReason: scheduled.UnavailableReason,
 			ResetExpiry:       scheduled.SortTime,
 			ResetExpiryText:   formatTime(scheduled.SortTime),
+			LastError:         account.LastError,
+			NextRetryText:     formatTime(account.Refresh.NextRetryAt),
+			AuthFailure:       account.Refresh.AuthFailure,
 			FiveHour:          statusWindow(account.Quota.FiveHour, "5 小时额度"),
 			LongWindow:        statusWindow(account.Quota.LongWindow, longWindowLabelCN(account.Family)),
 		}
+		_, status.RefreshDueReason = accountRefreshDue(account, snapshot.Config, snapshot.Now)
 		status.Circuit = statusCircuit(account.Circuit, snapshot.Now)
 		status.ResetCreditsAvailableCount = cloneIntPtr(account.Quota.ResetCreditsAvailableCount)
 		status.ResetCreditsTotalEarnedCount = cloneIntPtr(account.Quota.ResetCreditsTotalEarnedCount)

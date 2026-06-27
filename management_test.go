@@ -455,6 +455,76 @@ func TestSettingsPayloadIncludesAdaptiveRefresh(t *testing.T) {
 	}
 }
 
+func TestStatusPayloadIncludesRefreshFailureVisibility(t *testing.T) {
+	now := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	store.UpsertQuota(AccountState{
+		AuthID:        "auth-1",
+		AuthIndex:     "idx-1",
+		Provider:      "codex",
+		Priority:      1,
+		LastSuccessAt: now.Add(-6 * time.Hour),
+		LastError:     "quota request returned status 403",
+		Refresh: AccountRefreshState{
+			LastFailureKind: RefreshFailureTransient,
+			RetryAttempt:    1,
+			NextRetryAt:     now.Add(time.Minute),
+			LastFailureAt:   now,
+		},
+	})
+	store.RecordCodexActivity(now)
+
+	snapshot := store.Snapshot(now)
+	ordered := BuildOrderedAccounts(syntheticStatusRequest(snapshot), snapshot, now)
+	payload := BuildStatusPayload(snapshot, ordered)
+	if len(payload.Accounts) != 1 {
+		t.Fatalf("accounts = %d, want 1", len(payload.Accounts))
+	}
+	account := payload.Accounts[0]
+	if account.LastError != "quota request returned status 403" {
+		t.Fatalf("LastError = %q", account.LastError)
+	}
+	if account.AuthFailure {
+		t.Fatal("AuthFailure = true, want false")
+	}
+	if account.NextRetryText != now.Add(time.Minute).UTC().Format(time.RFC3339) {
+		t.Fatalf("NextRetryText = %q, want retry timestamp", account.NextRetryText)
+	}
+	if account.RefreshDueReason != "retry_wait" {
+		t.Fatalf("RefreshDueReason = %q, want retry_wait", account.RefreshDueReason)
+	}
+}
+
+func TestStatusPayloadIncludesAuthFailureVisibility(t *testing.T) {
+	now := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	store.UpsertQuota(AccountState{
+		AuthID:    "auth-1",
+		Provider:  "codex",
+		Priority:  1,
+		LastError: "quota request returned status 401",
+		Refresh: AccountRefreshState{
+			LastFailureKind: RefreshFailureAuth,
+			AuthFailure:     true,
+			LastFailureAt:   now,
+		},
+	})
+
+	snapshot := store.Snapshot(now)
+	ordered := BuildOrderedAccounts(syntheticStatusRequest(snapshot), snapshot, now)
+	payload := BuildStatusPayload(snapshot, ordered)
+	if len(payload.Accounts) != 1 {
+		t.Fatalf("accounts = %d, want 1", len(payload.Accounts))
+	}
+	account := payload.Accounts[0]
+	if !account.AuthFailure {
+		t.Fatal("AuthFailure = false, want true")
+	}
+	if account.RefreshDueReason != "auth_failure" {
+		t.Fatalf("RefreshDueReason = %q, want auth_failure", account.RefreshDueReason)
+	}
+}
+
 func TestConfigFromSettingsParsesAdaptiveRefresh(t *testing.T) {
 	cfg, err := ConfigFromSettings(DefaultConfig(), SettingsPayload{
 		HandleEnabled:                   true,
