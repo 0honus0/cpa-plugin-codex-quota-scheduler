@@ -833,7 +833,7 @@ func TestResourceStatusRendersUsablePluginPage(t *testing.T) {
 			t.Fatalf("resource status leaked privileged status marker %q: %s", forbidden, body)
 		}
 	}
-	for _, want := range []string{"logList", "managementKey", "MANAGEMENT_BASE", "/v0/management/plugins/codex-quota-scheduler", "authHeaders()", "let STATUS=", "refreshStatus"} {
+	for _, want := range []string{"logList", "managementKey", "MANAGEMENT_BASE", "/v0/management/plugins/codex-quota-scheduler", "authHeaders()", "let STATUS=", `"shell":true`, "statusLoaded=!STATUS.shell", "notice.statusLoaded", "refreshStatus"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("resource status missing usable plugin page marker %q: %s", want, body)
 		}

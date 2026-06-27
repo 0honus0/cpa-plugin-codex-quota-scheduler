@@ -20,6 +20,7 @@ var managementRefreshOneSoon = func(authID string) {}
 type StatusPayload struct {
 	PluginID      string          `json:"plugin_id"`
 	GeneratedAt   time.Time       `json:"generated_at"`
+	Shell         bool            `json:"shell,omitempty"`
 	NextAuthID    string          `json:"next_auth_id"`
 	MonthlyMode   MonthlyMode     `json:"monthly_mode"`
 	HandleEnabled bool            `json:"handle_enabled"`
@@ -585,6 +586,7 @@ func BuildStatusShellPayload(now time.Time) StatusPayload {
 	return StatusPayload{
 		PluginID:      PluginID,
 		GeneratedAt:   now,
+		Shell:         true,
 		MonthlyMode:   cfg.MonthlyMode,
 		HandleEnabled: cfg.HandleEnabled,
 		Settings:      SettingsFromConfig(cfg),
@@ -905,7 +907,7 @@ const TRANSLATIONS={
     'queue.title':'Account Queue','queue.description':'Account cards are sorted by the current scheduler priority. The first available account is preferred for the next Codex request.','metrics.nextAccount':'Next account','metrics.scheduler':'Scheduler','metrics.lastSelected':'Last selected',
     'logs.title':'Scheduler Logs','logs.empty':'No logs yet. Send a request or refresh quota manually to show records here.',
     'edit.title':'Edit Account','edit.alias':'Alias','edit.groupID':'Group ID','edit.groupName':'Group name','edit.tags':'Tags','edit.notes':'Account notes','edit.groupNotes':'Group notes',
-    'notice.settingsSaved':'Settings saved.','notice.refreshRequested':'Background quota refresh requested.','notice.accountSaved':'Account card saved.','notice.refreshOneRequested':'Quota refresh requested for this account.','notice.configExported':'Configuration exported.','notice.logsExported':'Logs exported.','notice.configImported':'Configuration imported.','error.requestFailed':'Request failed: {status}','error.managementKeyRequired':'CPA management key is required',
+    'notice.settingsSaved':'Settings saved.','notice.statusLoaded':'Current settings loaded. Review them, then save again.','notice.refreshRequested':'Background quota refresh requested.','notice.accountSaved':'Account card saved.','notice.refreshOneRequested':'Quota refresh requested for this account.','notice.configExported':'Configuration exported.','notice.logsExported':'Logs exported.','notice.configImported':'Configuration imported.','error.requestFailed':'Request failed: {status}','error.managementKeyRequired':'CPA management key is required',
     'log.ui.refresh_requested':'UI requested quota refresh','log.ui.settings_saved':'UI saved scheduler settings','log.ui.refresh_one_requested':'UI requested one account quota refresh','log.ui.config_exported':'UI exported plugin configuration','log.ui.config_imported':'UI imported plugin configuration','log.ui.account_saved':'UI saved account card','log.ui.group_saved':'UI saved account group','log.scheduler.selected':'Request handled by plugin'
   },
   'zh-CN':{
@@ -915,7 +917,7 @@ const TRANSLATIONS={
     'queue.title':'账号队列','queue.description':'账号卡片按当前调度优先级排序。第一个可用账号就是下一次 Codex 请求会优先选择的账号。','metrics.nextAccount':'下一账号','metrics.scheduler':'调度','metrics.lastSelected':'最近选择',
     'logs.title':'调度日志','logs.empty':'暂无日志。发起请求或手动刷新额度后，这里会显示记录。',
     'edit.title':'编辑账号','edit.alias':'别名','edit.groupID':'分组 ID','edit.groupName':'分组名称','edit.tags':'标签','edit.notes':'账号备注','edit.groupNotes':'分组备注',
-    'notice.settingsSaved':'设置已保存，页面即将自动刷新。','notice.refreshRequested':'已请求后台刷新额度，页面稍后自动刷新。','notice.accountSaved':'账号卡片已保存，页面即将自动刷新。','notice.refreshOneRequested':'已请求刷新该账号额度，页面稍后自动刷新。','notice.configExported':'配置已导出。','notice.logsExported':'日志已导出。','notice.configImported':'配置已导入，页面即将自动刷新。','error.requestFailed':'请求失败：{status}','error.managementKeyRequired':'需要填写 CPA 管理密钥'
+    'notice.settingsSaved':'设置已保存，页面即将自动刷新。','notice.statusLoaded':'已加载当前设置。请确认后再次保存。','notice.refreshRequested':'已请求后台刷新额度，页面稍后自动刷新。','notice.accountSaved':'账号卡片已保存，页面即将自动刷新。','notice.refreshOneRequested':'已请求刷新该账号额度，页面稍后自动刷新。','notice.configExported':'配置已导出。','notice.logsExported':'日志已导出。','notice.configImported':'配置已导入，页面即将自动刷新。','error.requestFailed':'请求失败：{status}','error.managementKeyRequired':'需要填写 CPA 管理密钥'
   }
 };
 const notice=document.getElementById('notice');
@@ -925,6 +927,7 @@ const accountsByID=new Map();
 const groupsByID=new Map();
 let editingAuthID='';
 let currentLocale=detectLocale();
+let statusLoaded=!STATUS.shell;
 const INLINE_TRANSLATIONS=[
   ['下一优先','Next preferred'],['可用','Available'],['未知类型','unknown type'],['CPA 优先级','CPA priority'],['熔断：','Circuit: '],['熔断','Circuit'],['全开','closed'],['半开','half-open'],
   ['按到期时间','by expiry time'],['优先使用','prefer Monthly'],['已启用','enabled'],['已关闭','disabled'],['暂无','None'],
@@ -942,7 +945,7 @@ function changeLocale(locale){currentLocale=normalizeLocale(locale);try{window.l
 function showNotice(text,isError){notice.hidden=false;notice.textContent=text;notice.className='notice'+(isError?' error':'')}
 function rebuildDerivedState(){accountsByID.clear();groupsByID.clear();for(const account of STATUS.accounts||[]){if(account.auth_id)accountsByID.set(account.auth_id,account);if(account.group_id)groupsByID.set(account.group_id,{name:account.group||'',notes:account.group_notes||''})}for(const group of STATUS.groups||[]){if(group.id)groupsByID.set(group.id,{name:group.name||'',notes:group.notes||''})}}
 function renderMetrics(){const empty=currentLocale==='en'?'None':'暂无';const monthlyMode=STATUS.monthly_mode==='priority'?(currentLocale==='en'?'prefer Monthly':'优先使用'):(currentLocale==='en'?'by expiry time':'按到期时间');const schedulerState=STATUS.handle_enabled===false?(currentLocale==='en'?'disabled':'已关闭'):(currentLocale==='en'?'enabled':'已启用');const setText=(id,text)=>{const node=document.getElementById(id);if(node)node.textContent=text};setText('metricNextAuthID',STATUS.next_auth_id||empty);setText('metricMonthlyMode',monthlyMode);setText('metricSchedulerState',schedulerState);setText('metricLastSelected',STATUS.last_selected||empty)}
-async function refreshStatus(){const data=await requestManagement('/status',{query:{format:'json'}});STATUS=data;rebuildDerivedState();fillSettings();renderMetrics();renderAccounts(STATUS.accounts||[]);renderLogs(STATUS.logs||[]);applyLocale()}
+async function refreshStatus(){const data=await requestManagement('/status',{query:{format:'json'}});STATUS=data;statusLoaded=true;rebuildDerivedState();fillSettings();renderMetrics();renderAccounts(STATUS.accounts||[]);renderLogs(STATUS.logs||[]);applyLocale()}
 async function pollStatus(times,delayMs){for(let i=0;i<times;i++){await new Promise((resolve)=>window.setTimeout(resolve,delayMs));await refreshStatus()}}
 function collectSettingsPayload(){return{handle_enabled:document.getElementById('handleEnabled').checked,enable_usage_feedback:document.getElementById('usageFeedback').checked,monthly_mode:document.getElementById('monthlyMode').value,quota_refresh_interval:document.getElementById('refreshInterval').value.trim(),stale_after:document.getElementById('staleAfter').value.trim(),refresh_active_window:document.getElementById('refreshActiveWindow').value.trim(),refresh_after_reset_delay:document.getElementById('refreshAfterResetDelay').value.trim(),refresh_retry_delays:document.getElementById('refreshRetryDelays').value.trim(),refresh_on_startup:document.getElementById('refreshOnStartup').checked,max_refresh_concurrency:Number.parseInt(document.getElementById('maxConcurrency').value,10)||1,circuit_failure_threshold:Number.parseInt(document.getElementById('circuitFailureThreshold').value,10)||5,circuit_open_duration:document.getElementById('circuitOpenDuration').value.trim(),circuit_half_open_success_threshold:Number.parseInt(document.getElementById('circuitHalfOpenSuccessThreshold').value,10)||2,max_log_entries:Number.parseInt(document.getElementById('maxLogEntries').value,10)||200,log_retention:document.getElementById('logRetention').value.trim()}}
 function node(tag,className,text){const item=document.createElement(tag);if(className)item.className=className;if(text!==undefined)item.textContent=text;return item}
@@ -955,7 +958,7 @@ async function readJSON(resp){const text=await resp.text();if(!text)return{};try
 function authHeaders(){const input=document.getElementById('managementKey');const key=(input&&input.value||'').trim();if(!key)throw new Error(t('error.managementKeyRequired'));const name='Author'+'ization';const scheme='Bea'+'rer ';const headers={};headers[name]=key.toLowerCase().startsWith(scheme.toLowerCase())?key:scheme+key;return headers}
 async function requestManagement(path,options){const opts=options||{};const headers=authHeaders();let url=MANAGEMENT_BASE+path;if(opts.query){const params=new URLSearchParams(opts.query);url+='?'+params.toString()}const init={method:opts.method||'GET',headers};if(Object.prototype.hasOwnProperty.call(opts,'body')){headers['Content-Type']=opts.contentType||'application/json';init.body=typeof opts.body==='string'?opts.body:JSON.stringify(opts.body)}const resp=await fetch(url,init);const data=await readJSON(resp);if(!resp.ok)throw new Error(data.error||data.message||t('error.requestFailed',{status:resp.status}));return data}
 function fillSettings(){const s=STATUS.settings||{};document.getElementById('handleEnabled').checked=s.handle_enabled!==false;document.getElementById('usageFeedback').checked=s.enable_usage_feedback!==false;document.getElementById('monthlyMode').value=s.monthly_mode||'expiry_order';document.getElementById('refreshInterval').value=s.quota_refresh_interval||'30m0s';document.getElementById('staleAfter').value=s.stale_after||'5h0m0s';document.getElementById('refreshActiveWindow').value=s.refresh_active_window||'1h0m0s';document.getElementById('refreshAfterResetDelay').value=s.refresh_after_reset_delay||'1m0s';document.getElementById('refreshRetryDelays').value=s.refresh_retry_delays||'1m0s,5m0s,15m0s';document.getElementById('refreshOnStartup').checked=s.refresh_on_startup===true;document.getElementById('maxConcurrency').value=s.max_refresh_concurrency||1;document.getElementById('circuitFailureThreshold').value=s.circuit_failure_threshold||5;document.getElementById('circuitOpenDuration').value=s.circuit_open_duration||'30m0s';document.getElementById('circuitHalfOpenSuccessThreshold').value=s.circuit_half_open_success_threshold||2;document.getElementById('maxLogEntries').value=s.max_log_entries||200;document.getElementById('logRetention').value=s.log_retention||'24h0m0s'}
-async function saveSettings(){try{await requestManagement('/settings',{method:'PUT',body:collectSettingsPayload()});showNotice(t('notice.settingsSaved'),false);await refreshStatus()}catch(error){showNotice(error.message||String(error),true)}}
+async function saveSettings(){try{if(!statusLoaded){await refreshStatus();showNotice(t('notice.statusLoaded'),false);return}await requestManagement('/settings',{method:'PUT',body:collectSettingsPayload()});showNotice(t('notice.settingsSaved'),false);await refreshStatus()}catch(error){showNotice(error.message||String(error),true)}}
 async function refreshQuota(){try{await requestManagement('/refresh',{method:'POST'});showNotice(t('notice.refreshRequested'),false);await refreshStatus();pollStatus(3,1200)}catch(error){showNotice(error.message||String(error),true)}}
 function splitTags(text){return text.split(',').map((item)=>item.trim()).filter(Boolean)}
 function openEdit(authID){const account=accountsByID.get(authID)||{};editingAuthID=authID;document.getElementById('editAuthID').textContent=authID;document.getElementById('editAlias').value=account.alias||'';document.getElementById('editNotes').value=account.notes||'';document.getElementById('editGroupID').value=account.group_id||'';document.getElementById('editGroupName').value=account.group||'';document.getElementById('editGroupNotes').value=account.group_notes||'';document.getElementById('editTags').value=(account.tags||[]).join(', ');editDialog.showModal()}
