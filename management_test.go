@@ -390,6 +390,21 @@ func TestStatusPageUsesCollapsedSettingsAndNoHardReload(t *testing.T) {
 	}
 }
 
+func TestDynamicAccountRenderingUsesChineseBaseText(t *testing.T) {
+	store := NewPluginState(DefaultConfig())
+	page := renderStatusPageForTest(t, store)
+	for _, want := range []string{"addBadge('可用'", "'5 小时额度'", "'刷新额度'", "'编辑'", "'暂无账号数据。'"} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("page missing localized dynamic rendering marker %q", want)
+		}
+	}
+	for _, forbidden := range []string{"addBadge('Available'", "addQuota(account.five_hour,'5-hour quota'", "'No account data yet.'"} {
+		if strings.Contains(page, forbidden) {
+			t.Fatalf("dynamic account rendering still contains English base text %q", forbidden)
+		}
+	}
+}
+
 func renderStatusPageForTest(t *testing.T, store *PluginState) string {
 	t.Helper()
 	resp := handleStatusRequest(store, pluginapi.ManagementRequest{
