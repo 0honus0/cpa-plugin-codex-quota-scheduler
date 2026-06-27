@@ -26,6 +26,7 @@ type fakeHostClient struct {
 	releaseDo             chan struct{}
 
 	mu           sync.Mutex
+	listCalls    int
 	httpCalls    int
 	activeHTTP   int
 	maxActive    int
@@ -34,6 +35,9 @@ type fakeHostClient struct {
 }
 
 func (f *fakeHostClient) ListAuths() ([]pluginapi.HostAuthFileEntry, error) {
+	f.mu.Lock()
+	f.listCalls++
+	f.mu.Unlock()
 	return f.authList, nil
 }
 
@@ -157,6 +161,12 @@ func (f *fakeHostClient) httpCallCount() int {
 	return f.httpCalls
 }
 
+func (f *fakeHostClient) listCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.listCalls
+}
+
 func (f *fakeHostClient) requestedURLs() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -178,6 +188,95 @@ func accountByAuthID(t *testing.T, snapshot StateSnapshot, authID string) Accoun
 	}
 	t.Fatalf("missing account with auth ID %q in %#v", authID, snapshot.Accounts)
 	return AccountState{}
+}
+
+func TestRefreshDueOnceSkipsFreshAccountsAndRefreshesOnlyDueAccounts(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	staleToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-stale"})
+	freshToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-fresh"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{
+			{ID: "stale", AuthIndex: "idx-stale", Provider: "codex"},
+			{ID: "fresh", AuthIndex: "idx-fresh", Provider: "codex"},
+		},
+		authJSON: map[string]json.RawMessage{
+			"idx-stale": json.RawMessage(`{"access_token":"access-stale","id_token":"` + staleToken + `"}`),
+			"idx-fresh": json.RawMessage(`{"access_token":"access-fresh","id_token":"` + freshToken + `"}`),
+		},
+		httpBody: []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+	}
+	store := NewPluginState(DefaultConfig())
+	store.RecordCodexActivity(now)
+	store.UpsertQuota(AccountState{
+		AuthID:        "stale",
+		AuthIndex:     "idx-stale",
+		Provider:      "codex",
+		LastSuccessAt: now.Add(-6 * time.Hour),
+	})
+	store.UpsertQuota(AccountState{
+		AuthID:        "fresh",
+		AuthIndex:     "idx-fresh",
+		Provider:      "codex",
+		LastSuccessAt: now.Add(-time.Hour),
+	})
+
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	if err := refresher.RefreshDueOnce(); err != nil {
+		t.Fatalf("RefreshDueOnce returned error: %v", err)
+	}
+
+	host.assertNoHeaderErrors(t)
+	if got := host.httpCallCount(); got != 2 {
+		t.Fatalf("HTTP calls = %d, want 2 quota/reset calls for stale account only", got)
+	}
+	stale := accountByAuthID(t, store.Snapshot(now), "stale")
+	if stale.LastSuccessAt.IsZero() {
+		t.Fatal("stale account LastSuccessAt is zero, want refreshed")
+	}
+	fresh := accountByAuthID(t, store.Snapshot(now), "fresh")
+	if !fresh.LastSuccessAt.Equal(now.Add(-time.Hour)) {
+		t.Fatalf("fresh LastSuccessAt = %s, want unchanged", fresh.LastSuccessAt)
+	}
+}
+
+func TestRefreshDueOnceDoesNothingOutsideActiveWindow(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	store.UpsertQuota(AccountState{
+		AuthID:        "stale",
+		AuthIndex:     "idx-stale",
+		Provider:      "codex",
+		LastSuccessAt: now.Add(-6 * time.Hour),
+	})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{ID: "stale", AuthIndex: "idx-stale", Provider: "codex"}},
+	}
+
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	if err := refresher.RefreshDueOnce(); err != nil {
+		t.Fatalf("RefreshDueOnce returned error: %v", err)
+	}
+	if got := host.listCallCount(); got != 0 {
+		t.Fatalf("ListAuths calls = %d, want 0 outside active window", got)
+	}
+}
+
+func TestStartDoesNotPollAllAccountsWhileIdle(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.QuotaRefreshInterval = 20 * time.Millisecond
+	store := NewPluginState(cfg)
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{ID: "auth-1", AuthIndex: "idx-1", Provider: "codex"}},
+	}
+	refresher := NewQuotaRefresher(host, store, time.Now)
+
+	refresher.Start()
+	defer refresher.Stop()
+	time.Sleep(80 * time.Millisecond)
+
+	if got := host.listCallCount(); got != 0 {
+		t.Fatalf("ListAuths calls = %d, want 0 while idle", got)
+	}
 }
 
 func TestRefreshOnceLoadsCodexAuthAndQuota(t *testing.T) {

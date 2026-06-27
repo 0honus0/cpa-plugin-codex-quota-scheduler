@@ -83,6 +83,48 @@ func (r *QuotaRefresher) RefreshOnce() error {
 		return nil
 	}
 
+	r.refreshAuths(eligible)
+	return nil
+}
+
+func (r *QuotaRefresher) RefreshDueOnce() error {
+	now := r.now()
+	if !r.state.RefreshActive(now) {
+		return nil
+	}
+	dueAccounts := r.state.DueAccounts(now)
+	if len(dueAccounts) == 0 {
+		return nil
+	}
+	dueAuthIDs := make(map[string]struct{}, len(dueAccounts))
+	for _, account := range dueAccounts {
+		if account.AuthID != "" {
+			dueAuthIDs[account.AuthID] = struct{}{}
+		}
+	}
+	if len(dueAuthIDs) == 0 {
+		return nil
+	}
+
+	auths, err := r.host.ListAuths()
+	if err != nil {
+		return fmt.Errorf("list auths: %w", err)
+	}
+	eligible := make([]pluginapi.HostAuthFileEntry, 0, len(dueAuthIDs))
+	for _, auth := range auths {
+		if _, due := dueAuthIDs[auth.ID]; due && isRefreshEligible(auth) {
+			eligible = append(eligible, auth)
+		}
+	}
+	if len(eligible) == 0 {
+		return nil
+	}
+
+	r.refreshAuths(eligible)
+	return nil
+}
+
+func (r *QuotaRefresher) refreshAuths(eligible []pluginapi.HostAuthFileEntry) {
 	concurrency := r.state.Config().MaxRefreshConcurrency
 	if concurrency <= 0 {
 		concurrency = 1
@@ -107,7 +149,6 @@ func (r *QuotaRefresher) RefreshOnce() error {
 	}
 	close(jobs)
 	wg.Wait()
-	return nil
 }
 
 func (r *QuotaRefresher) RefreshOneAuthID(authID string) error {
@@ -227,6 +268,29 @@ func (r *QuotaRefresher) RefreshSoon() {
 		}()
 		if err := r.RefreshOnce(); err != nil {
 			r.host.Log("error", "quota refresh failed", map[string]any{"error": redactSecrets(err.Error())})
+		}
+	}()
+}
+
+func (r *QuotaRefresher) RefreshDueSoon() {
+	r.mu.Lock()
+	if r.refreshing || r.stopping {
+		r.mu.Unlock()
+		return
+	}
+	r.refreshing = true
+	r.wg.Add(1)
+	r.mu.Unlock()
+
+	go func() {
+		defer func() {
+			r.mu.Lock()
+			r.refreshing = false
+			r.mu.Unlock()
+			r.wg.Done()
+		}()
+		if err := r.RefreshDueOnce(); err != nil {
+			r.host.Log("error", "quota due refresh failed", map[string]any{"error": redactSecrets(err.Error())})
 		}
 	}()
 }

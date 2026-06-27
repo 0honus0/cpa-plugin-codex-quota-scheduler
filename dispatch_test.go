@@ -1,11 +1,137 @@
 package main
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
+
+func withGlobalRefresherForTest(t *testing.T, store *PluginState, refresher *QuotaRefresher) {
+	t.Helper()
+
+	refresherMu.Lock()
+	previousState := globalState
+	previousRefresher := globalRefresher
+	previousDefaultStatePath := defaultStatePath
+	globalState = store
+	globalRefresher = refresher
+	defaultStatePath = func() string { return t.TempDir() + "\\state.json" }
+	refresherMu.Unlock()
+
+	t.Cleanup(func() {
+		if refresher != nil {
+			refresher.Stop()
+		}
+		refresherMu.Lock()
+		globalState = previousState
+		globalRefresher = previousRefresher
+		defaultStatePath = previousDefaultStatePath
+		refresherMu.Unlock()
+	})
+}
+
+func lifecyclePayload(t *testing.T, configYAML string) []byte {
+	t.Helper()
+	raw, err := json.Marshal(lifecycleRequest{ConfigYAML: []byte(configYAML)})
+	if err != nil {
+		t.Fatalf("marshal lifecycle payload: %v", err)
+	}
+	return raw
+}
+
+func waitForCondition(t *testing.T, timeout time.Duration, condition func() bool) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return condition()
+}
+
+func TestPluginRegisterStartsRefresherWithoutStartupRefreshByDefault(t *testing.T) {
+	store := NewPluginState(DefaultConfig())
+	host := &fakeHostClient{}
+	refresher := NewQuotaRefresher(host, store, time.Now)
+	withGlobalRefresherForTest(t, store, refresher)
+
+	if _, err := handleMethod(pluginabi.MethodPluginRegister, lifecyclePayload(t, "quota_refresh_interval: 1h\n")); err != nil {
+		t.Fatalf("plugin.register returned error: %v", err)
+	}
+
+	refresher.mu.Lock()
+	running := refresher.running
+	refresher.mu.Unlock()
+	if !running {
+		t.Fatal("refresher running = false, want true")
+	}
+	if refreshed := waitForCondition(t, 50*time.Millisecond, func() bool { return host.listCallCount() > 0 }); refreshed {
+		t.Fatalf("ListAuths calls = %d, want 0 startup refreshes", host.listCallCount())
+	}
+}
+
+func TestPluginRegisterRefreshesOnStartupWhenConfigured(t *testing.T) {
+	store := NewPluginState(DefaultConfig())
+	host := &fakeHostClient{}
+	refresher := NewQuotaRefresher(host, store, time.Now)
+	withGlobalRefresherForTest(t, store, refresher)
+
+	if _, err := handleMethod(pluginabi.MethodPluginRegister, lifecyclePayload(t, "quota_refresh_interval: 1h\nrefresh_on_startup: true\n")); err != nil {
+		t.Fatalf("plugin.register returned error: %v", err)
+	}
+
+	if refreshed := waitForCondition(t, time.Second, func() bool { return host.listCallCount() > 0 }); !refreshed {
+		t.Fatal("ListAuths was not called, want startup refresh")
+	}
+}
+
+func TestSchedulerPickRecordsCodexActivityAndRequestsDueRefresh(t *testing.T) {
+	now := time.Date(2026, 6, 25, 10, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	store.UpsertQuota(AccountState{
+		AuthID:        "auth-1",
+		AuthIndex:     "idx-1",
+		Provider:      "codex",
+		LastSuccessAt: now.Add(-6 * time.Hour),
+	})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{
+			ID: "auth-1", AuthIndex: "idx-1", Provider: "codex",
+		}},
+	}
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	withGlobalRefresherForTest(t, store, refresher)
+
+	req, err := json.Marshal(pluginapi.SchedulerPickRequest{
+		Provider: "codex",
+		Model:    "gpt-5-codex",
+		Candidates: []pluginapi.SchedulerAuthCandidate{{
+			ID: "auth-1", Provider: "codex",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal pick request: %v", err)
+	}
+	if _, err := handleSchedulerPick(req); err != nil {
+		t.Fatalf("scheduler.pick returned error: %v", err)
+	}
+
+	snapshot := store.Snapshot(now)
+	if snapshot.LastCodexActivityAt.IsZero() {
+		t.Fatal("LastCodexActivityAt is zero, want Codex activity recorded")
+	}
+	if !store.RefreshActive(time.Now()) {
+		t.Fatalf("RefreshActive = false after scheduler.pick; LastCodexActivityAt=%s", snapshot.LastCodexActivityAt)
+	}
+	if refreshed := waitForCondition(t, time.Second, func() bool { return host.listCallCount() > 0 }); !refreshed {
+		t.Fatal("ListAuths was not called, want due refresh request")
+	}
+}
 
 func TestLogSchedulerDecisionIncludesDetailedFallbackReason(t *testing.T) {
 	now := time.Date(2026, 6, 25, 10, 0, 0, 0, time.UTC)
