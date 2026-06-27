@@ -357,6 +357,9 @@ func applyCircuitFailure(account *AccountState, cfg Config, reason string, reset
 	circuit.Reason = reason
 	circuit.LastFailureAt = now
 	nextProbeAt := now.Add(cfg.CircuitOpenDuration)
+	if reason == usageLimitNoResetReason && !resetAt.IsZero() && resetAt.After(now) {
+		nextProbeAt = resetAt
+	}
 	if !resetAt.IsZero() && resetAt.After(nextProbeAt) {
 		nextProbeAt = resetAt
 	}
