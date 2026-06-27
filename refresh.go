@@ -571,6 +571,9 @@ func (e tokenRefreshStatusError) Error() string { return e.msg }
 func refreshTokenFailureKind(err error) RefreshFailureKind {
 	var statusErr tokenRefreshStatusError
 	if errors.As(err, &statusErr) {
+		if statusErr.status == http.StatusBadRequest || statusErr.status == http.StatusUnauthorized || strings.Contains(strings.ToLower(statusErr.msg), "invalid_grant") {
+			return RefreshFailureAuth
+		}
 		return refreshFailureKind(statusErr.status)
 	}
 	if strings.Contains(err.Error(), "refresh_token is missing") ||

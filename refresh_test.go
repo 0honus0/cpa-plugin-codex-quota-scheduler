@@ -514,6 +514,33 @@ func TestRefreshTokenFailure401MarksAuthFailure(t *testing.T) {
 	}
 }
 
+func TestRefreshTokenFailure400InvalidGrantMarksAuthFailure(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	oldIDToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{ID: "auth-1", AuthIndex: "idx-1", Provider: "codex"}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"old-access","refresh_token":"old-refresh","id_token":"` + oldIDToken + `","account_id":"acct-1","expired":"` + now.Add(-time.Hour).Format(time.RFC3339) + `"}`),
+		},
+		responseByURL: map[string]pluginapi.HTTPResponse{
+			codexTokenEndpoint: {StatusCode: http.StatusBadRequest, Body: []byte(`{"error":"invalid_grant"}`)},
+		},
+	}
+	store := NewPluginState(DefaultConfig())
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+
+	if err := refresher.RefreshOnce(); err != nil {
+		t.Fatalf("RefreshOnce returned error: %v", err)
+	}
+	account := accountByAuthID(t, store.Snapshot(now), "auth-1")
+	if !account.Refresh.AuthFailure {
+		t.Fatalf("AuthFailure = false, want true: %#v", account.Refresh)
+	}
+	if !account.Refresh.NextRetryAt.IsZero() {
+		t.Fatalf("NextRetryAt = %s, want zero", account.Refresh.NextRetryAt)
+	}
+}
+
 func TestRefreshTokenFailure403SchedulesRetry(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	oldIDToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
