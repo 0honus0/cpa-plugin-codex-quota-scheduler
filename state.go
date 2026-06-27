@@ -301,7 +301,7 @@ func accountRefreshDue(account AccountState, cfg Config, now time.Time) (bool, s
 		if account.Circuit.NextProbeAt.After(now) {
 			return false, "circuit_wait"
 		}
-		if account.Circuit.State == CircuitStateOpen || account.Circuit.EffectiveState == CircuitStateHalfOpen {
+		if account.Circuit.State == CircuitStateOpen || account.Circuit.EffectiveState == CircuitStateHalfOpen || account.Circuit.FailureCount > 0 {
 			return true, "circuit_probe_due"
 		}
 	}
