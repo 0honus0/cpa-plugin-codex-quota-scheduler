@@ -396,6 +396,12 @@ The resource displays the current scheduler priority order. Opening the page
 should make it immediately clear which account would be selected if a Codex
 request arrived at that moment.
 
+The resource route is not a write-action API. It is exposed under
+`/v0/resource/plugins/...`, which CPA does not protect with the Management key.
+It must not mutate plugin state, import configuration, replace annotations,
+trigger quota refresh, or call privileged host callbacks through query
+parameters such as `action` or `payload`.
+
 The primary account list is sorted by the plugin's effective scheduling order,
 not by account name, CPA auth ID, or original config order.
 
@@ -426,11 +432,20 @@ Management Center can be added later, but it is not required for v1.
 ### Management Routes
 
 The plugin resource page can call plugin-owned management routes for controlled
-actions:
+actions after the user supplies the CPA Management key. The page may keep the key
+only in memory for the current browser page session; it must not write the key to
+local storage, session storage, plugin state, logs, exports, or rendered status
+payloads.
 
 - `GET /plugins/codex-quota-scheduler/status`: JSON status snapshot.
 - `POST /plugins/codex-quota-scheduler/refresh`: trigger refresh for all or one
   account.
+- `PUT /plugins/codex-quota-scheduler/settings`: update scheduler settings.
+- `GET /plugins/codex-quota-scheduler/logs`: read scheduler logs.
+- `GET /plugins/codex-quota-scheduler/export`: export scheduler settings and
+  annotations.
+- `POST /plugins/codex-quota-scheduler/import`: import scheduler settings and
+  annotations.
 - `GET /plugins/codex-quota-scheduler/annotations`: read aliases, notes, tags,
   and groups.
 - `PUT /plugins/codex-quota-scheduler/annotations`: replace annotation state.
@@ -440,6 +455,13 @@ actions:
 
 These routes are plugin-owned CPA Management API routes, so CPA still protects
 them with the management key. They do not expose raw tokens.
+
+Security review must check that resource routes never reintroduce
+`GET /v0/resource/plugins/codex-quota-scheduler/status?action=<action>` or any
+equivalent query/body dispatch that mutates state or triggers credential-bearing
+requests. Review must also check that `quota_endpoint` remains restricted to
+`https://chatgpt.com/backend-api/wham/usage`, because quota refresh sends Codex
+credentials as `Authorization: Bearer <access_token>` to that endpoint.
 
 ## Configuration
 

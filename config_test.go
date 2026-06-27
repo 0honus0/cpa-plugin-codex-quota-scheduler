@@ -47,7 +47,7 @@ monthly_mode: priority
 fallback: fill-first
 enable_usage_feedback: false
 max_refresh_concurrency: 8
-quota_endpoint: https://example.test/usage
+quota_endpoint: https://chatgpt.com/backend-api/wham/usage
 max_log_entries: 50
 log_retention: 2h
 `)
@@ -76,8 +76,8 @@ log_retention: 2h
 	if cfg.MaxRefreshConcurrency != 8 {
 		t.Fatalf("MaxRefreshConcurrency = %d, want 8", cfg.MaxRefreshConcurrency)
 	}
-	if cfg.QuotaEndpoint != "https://example.test/usage" {
-		t.Fatalf("QuotaEndpoint = %q, want %q", cfg.QuotaEndpoint, "https://example.test/usage")
+	if cfg.QuotaEndpoint != "https://chatgpt.com/backend-api/wham/usage" {
+		t.Fatalf("QuotaEndpoint = %q, want %q", cfg.QuotaEndpoint, "https://chatgpt.com/backend-api/wham/usage")
 	}
 	if cfg.MaxLogEntries != 50 {
 		t.Fatalf("MaxLogEntries = %d, want 50", cfg.MaxLogEntries)
@@ -121,6 +121,13 @@ func TestDecodeConfigRejectsInvalidLogRetention(t *testing.T) {
 	}
 	if _, err := DecodeConfig([]byte("max_log_entries: 0\n")); err == nil {
 		t.Fatalf("DecodeConfig accepted non-positive max log entries")
+	}
+}
+
+func TestDecodeConfigRejectsNonChatGPTQuotaEndpoint(t *testing.T) {
+	_, err := DecodeConfig([]byte("quota_endpoint: https://example.test/usage\n"))
+	if err == nil {
+		t.Fatalf("DecodeConfig accepted non-ChatGPT quota endpoint")
 	}
 }
 

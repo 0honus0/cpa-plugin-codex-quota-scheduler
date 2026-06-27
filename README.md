@@ -22,10 +22,13 @@ reset or expiry time.
 
 ## Privacy And Data Disclosure
 
-This plugin runs inside CPA and uses CPA-provided host callbacks plus the CPA
-plugin resource API. The Management UI does not require, store, or call a CPA
-Management key, and it does not call the external CPA/VLink Management API. It
-does not run an external service and does not send data to the plugin author.
+This plugin runs inside CPA and uses CPA-provided host callbacks plus
+plugin-owned CPA Management API routes. The browser resource page is only the UI
+surface. State-changing actions require the CPA Management key and are sent to
+`/v0/management/plugins/codex-quota-scheduler/...`. The page keeps that key only
+in the current browser page session and does not write it to plugin state,
+exports, logs, `localStorage`, or `sessionStorage`. The plugin does not run an
+external service and does not send data to the plugin author.
 
 The plugin may send authenticated requests to ChatGPT's quota and reset-credit
 endpoints:
@@ -121,6 +124,12 @@ The page follows the browser language by default and can be switched between
 English and Chinese manually. Settings, buttons, account cards, common status
 text, and new UI log messages follow the selected language.
 
+The resource page asks for the CPA Management key before it performs protected
+actions such as saving settings, importing state, editing annotations, viewing
+logs through the API, or requesting quota refresh. This follows CPA's security
+boundary: `/v0/resource/plugins/...` serves the browser resource page, while
+`/v0/management/...` handles authenticated management operations.
+
 The page provides:
 
 - Scheduler settings.
@@ -156,13 +165,13 @@ make build
 Build and package the release zip:
 
 ```bash
-make package VERSION=0.1.0
+make package VERSION=0.1.1
 ```
 
 Generate an aggregate checksum file for local release assets:
 
 ```bash
-make checksums VERSION=0.1.0
+make checksums VERSION=0.1.1
 ```
 
 Windows users can also use the PowerShell helper:
@@ -176,13 +185,15 @@ compiler such as MinGW-w64 on `PATH`.
 
 ## GitHub Releases
 
-Version `0.1.0` is the first public release version for this repository.
-GitHub Actions builds release assets when a tag matching `v*` is pushed. Use a
-dotted numeric version tag such as:
+Version `0.1.1` moves all state-changing and privileged operations behind CPA
+Management API routes and restricts `quota_endpoint` to the expected ChatGPT
+quota endpoint. Version `0.1.0` was the first public release version for this
+repository. GitHub Actions builds release assets when a tag matching `v*` is
+pushed. Use a dotted numeric version tag such as:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 The `Build` workflow runs tests and creates the release automatically. Release
@@ -193,48 +204,53 @@ codex-quota-scheduler_<version>_<goos>_<goarch>.zip
 checksums.txt
 ```
 
-For `v0.1.0`, the expected platform assets are:
+For `v0.1.1`, the expected platform assets are:
 
-- `codex-quota-scheduler_0.1.0_darwin_amd64.zip`
-- `codex-quota-scheduler_0.1.0_darwin_arm64.zip`
-- `codex-quota-scheduler_0.1.0_freebsd_amd64.zip`
-- `codex-quota-scheduler_0.1.0_linux_amd64.zip`
-- `codex-quota-scheduler_0.1.0_linux_arm64.zip`
-- `codex-quota-scheduler_0.1.0_windows_amd64.zip`
-- `codex-quota-scheduler_0.1.0_windows_arm64.zip`
+- `codex-quota-scheduler_0.1.1_darwin_amd64.zip`
+- `codex-quota-scheduler_0.1.1_darwin_arm64.zip`
+- `codex-quota-scheduler_0.1.1_freebsd_amd64.zip`
+- `codex-quota-scheduler_0.1.1_linux_amd64.zip`
+- `codex-quota-scheduler_0.1.1_linux_arm64.zip`
+- `codex-quota-scheduler_0.1.1_windows_amd64.zip`
+- `codex-quota-scheduler_0.1.1_windows_arm64.zip`
 - `checksums.txt`
 
 `checksums.txt` uses sha256sum format:
 
 ```text
-<sha256>  codex-quota-scheduler_0.1.0_darwin_arm64.zip
+<sha256>  codex-quota-scheduler_0.1.1_darwin_arm64.zip
 ```
 
 ## Management API
 
-The Management UI uses the CPA plugin resource API instead of the CPA
-Management HTTP API. All page actions are sent as `GET` requests to:
+The plugin resource page is served from:
 
 ```text
-GET /v0/resource/plugins/codex-quota-scheduler/status?action=<action>
+GET /v0/resource/plugins/codex-quota-scheduler/status
 ```
 
-Actions that modify data include a JSON `payload` query parameter. Supported
-actions are:
+That resource route must not be used as a write-action API. All state-changing
+or privileged operations are exposed through CPA Management API routes and
+require the Management key:
 
-- `settings`: update scheduler settings.
-- `refresh`: request quota refresh for all accounts.
-- `refresh_account`: request quota refresh for one account.
-- `logs`: read recent scheduler logs.
-- `export`: export scheduler settings and annotations.
-- `import`: import scheduler settings and annotations.
-- `annotations`: read account and group annotations.
-- `annotations_replace`: replace all annotations.
-- `annotations_account`: update one account annotation.
-- `annotations_group`: update one group annotation.
+```text
+GET  /v0/management/plugins/codex-quota-scheduler/status?format=json
+GET  /v0/management/plugins/codex-quota-scheduler/logs
+GET  /v0/management/plugins/codex-quota-scheduler/export
+PUT  /v0/management/plugins/codex-quota-scheduler/settings
+POST /v0/management/plugins/codex-quota-scheduler/refresh
+POST /v0/management/plugins/codex-quota-scheduler/refresh/account
+POST /v0/management/plugins/codex-quota-scheduler/import
+PUT  /v0/management/plugins/codex-quota-scheduler/annotations
+PATCH /v0/management/plugins/codex-quota-scheduler/annotations/account
+PATCH /v0/management/plugins/codex-quota-scheduler/annotations/group
+```
 
-CPA host integrations may still list the plugin's management routes for
-compatibility, but the bundled UI does not depend on a Management key.
+For quota refresh safety, `quota_endpoint` is restricted to:
+
+```text
+https://chatgpt.com/backend-api/wham/usage
+```
 
 ## License
 

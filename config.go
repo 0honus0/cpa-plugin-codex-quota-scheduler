@@ -13,13 +13,15 @@ import (
 const (
 	PluginID = "codex-quota-scheduler"
 
+	chatGPTQuotaEndpoint = "https://chatgpt.com/backend-api/wham/usage"
+
 	MonthlyModePriority    MonthlyMode = "priority"
 	MonthlyModeExpiryOrder MonthlyMode = "expiry_order"
 
 	FallbackFillFirst FallbackMode = "fill-first"
 )
 
-var pluginVersion = "0.1.0"
+var pluginVersion = "0.1.1"
 
 type MonthlyMode string
 
@@ -78,7 +80,7 @@ func DefaultConfig() Config {
 		Fallback:                        FallbackFillFirst,
 		EnableUsageFeedback:             true,
 		MaxRefreshConcurrency:           1,
-		QuotaEndpoint:                   "https://chatgpt.com/backend-api/wham/usage",
+		QuotaEndpoint:                   chatGPTQuotaEndpoint,
 		CircuitFailureThreshold:         3,
 		CircuitOpenDuration:             10 * time.Minute,
 		CircuitHalfOpenSuccessThreshold: 1,
@@ -180,7 +182,11 @@ func DecodeConfig(raw []byte) (Config, error) {
 		cfg.MaxRefreshConcurrency = *decoded.MaxRefreshConcurrency
 	}
 	if decoded.QuotaEndpoint != "" {
-		cfg.QuotaEndpoint = decoded.QuotaEndpoint
+		endpoint, err := validateQuotaEndpoint(decoded.QuotaEndpoint)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.QuotaEndpoint = endpoint
 	}
 	if decoded.CircuitFailureThreshold != nil {
 		if *decoded.CircuitFailureThreshold <= 0 {
@@ -221,6 +227,17 @@ func DecodeConfig(raw []byte) (Config, error) {
 		cfg.LogRetention = d
 	}
 	return NormalizeConfig(cfg), nil
+}
+
+func validateQuotaEndpoint(raw string) (string, error) {
+	endpoint := strings.TrimSpace(raw)
+	if endpoint == "" {
+		return "", nil
+	}
+	if endpoint != chatGPTQuotaEndpoint {
+		return "", fmt.Errorf("quota_endpoint must be %s", chatGPTQuotaEndpoint)
+	}
+	return endpoint, nil
 }
 
 func PluginRegistration() registration {

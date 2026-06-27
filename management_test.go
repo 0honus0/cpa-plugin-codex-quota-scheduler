@@ -329,7 +329,7 @@ func TestStatusHTMLRedactsSensitiveFieldsAndEscapesUserFields(t *testing.T) {
 	}
 }
 
-func TestStatusHTMLUsesResourceActionsModalProgressAndLogs(t *testing.T) {
+func TestStatusHTMLUsesManagementAPIActionsModalProgressAndLogs(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	store := NewPluginState(DefaultConfig())
 	account := weeklyAccount("auth-1", 5, now.Add(24*time.Hour), false)
@@ -343,12 +343,12 @@ func TestStatusHTMLUsesResourceActionsModalProgressAndLogs(t *testing.T) {
 	}
 	html := string(resp.Body)
 	lower := strings.ToLower(html)
-	for _, want := range []string{"quota-bar", "editDialog", "logList", "openEdit", "exportLogs", "codex-quota-scheduler-logs.json", "maxLogEntries", "logRetention", "refreshOneQuota", "schedulePageRefresh", "RESOURCE_ENDPOINT", "/v0/resource/plugins/codex-quota-scheduler/status", "requestPlugin(action,options)", "localeSelect", "TRANSLATIONS", "codex-quota-scheduler-locale-v1", "Scheduler Settings", "Account Queue", "INLINE_TRANSLATIONS", "Reset credits", "Refresh Quota"} {
+	for _, want := range []string{"quota-bar", "editDialog", "logList", "openEdit", "exportLogs", "codex-quota-scheduler-logs.json", "maxLogEntries", "logRetention", "refreshOneQuota", "schedulePageRefresh", "managementKey", "MANAGEMENT_BASE", "/v0/management/plugins/codex-quota-scheduler", "authHeaders()", "localeSelect", "TRANSLATIONS", "codex-quota-scheduler-locale-v1", "Scheduler Settings", "Account Queue", "INLINE_TRANSLATIONS", "Reset credits", "Refresh Quota"} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("html missing marker %q: %s", want, html)
 		}
 	}
-	for _, forbidden := range []string{"managementKey", "missing management key", "details class=\"editor\"", "action_token", "MANAGEMENT_BASE", "/v0/management/plugins/codex-quota-scheduler"} {
+	for _, forbidden := range []string{"RESOURCE_ENDPOINT", "/v0/resource/plugins/codex-quota-scheduler/status?action", "requestPlugin(action,options)", "details class=\"editor\"", "action_token"} {
 		if strings.Contains(html, forbidden) {
 			t.Fatalf("html still contains removed marker %q: %s", forbidden, html)
 		}
@@ -519,7 +519,7 @@ func TestStatusHTMLShowsRemainingQuotaLocalResetTimesAndCompactMetadata(t *testi
 	}
 }
 
-func TestManagementSettingsEndpointDoesNotRequireManagementKey(t *testing.T) {
+func TestManagementSettingsEndpointUpdatesConfig(t *testing.T) {
 	dir := t.TempDir()
 	previousDefaultStatePath := defaultStatePath
 	defaultStatePath = func() string { return filepath.Join(dir, "state.json") }
@@ -540,34 +540,80 @@ func TestManagementSettingsEndpointDoesNotRequireManagementKey(t *testing.T) {
 	}
 }
 
-func TestResourceRoutesServePluginPageEndpoints(t *testing.T) {
+func TestResourceStatusQueryActionsDoNotMutateState(t *testing.T) {
+	dir := t.TempDir()
+	previousDefaultStatePath := defaultStatePath
+	defaultStatePath = func() string { return filepath.Join(dir, "state.json") }
+	t.Cleanup(func() { defaultStatePath = previousDefaultStatePath })
+
 	store := NewPluginState(DefaultConfig())
-	resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
-		Method: http.MethodGet,
-		Path:   "/v0/resource/plugins/codex-quota-scheduler/status",
-		Query: url.Values{
-			"action":  []string{"settings"},
-			"payload": []string{`{"handle_enabled":false,"monthly_mode":"priority","quota_refresh_interval":"45m","stale_after":"6h","enable_usage_feedback":false,"max_refresh_concurrency":2,"max_log_entries":30,"log_retention":"4h"}`},
+	originalConfig := store.Config()
+	store.SetAnnotations(AnnotationState{
+		Accounts: map[string]AccountAnnotation{
+			"auth:auth-1": {Alias: "original"},
 		},
-	}, time.Now())
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("settings StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, resp.Body)
+	})
+
+	refreshes := 0
+	refreshOne := ""
+	previousRefreshSoon := managementRefreshSoon
+	previousRefreshOneSoon := managementRefreshOneSoon
+	managementRefreshSoon = func() { refreshes++ }
+	managementRefreshOneSoon = func(authID string) { refreshOne = authID }
+	t.Cleanup(func() {
+		managementRefreshSoon = previousRefreshSoon
+		managementRefreshOneSoon = previousRefreshOneSoon
+	})
+
+	actions := map[string]string{
+		"settings":            `{"handle_enabled":false,"monthly_mode":"priority","quota_refresh_interval":"45m","stale_after":"6h","enable_usage_feedback":false,"max_refresh_concurrency":2,"max_log_entries":30,"log_retention":"4h"}`,
+		"refresh":             `{}`,
+		"refresh_account":     `{"auth_id":"auth-1"}`,
+		"import":              `{"config":{"monthly_mode":"priority","quota_refresh_interval":2700000000000,"stale_after":21600000000000,"max_refresh_concurrency":2}}`,
+		"annotations_replace": `{"accounts":{"auth:auth-1":{"alias":"replaced"}}}`,
+		"annotations_account": `{"auth_id":"auth-1","alias":"changed"}`,
+		"annotations_group":   `{"id":"group-1","name":"changed"}`,
 	}
-	if store.Config().HandleEnabled || store.Config().MonthlyMode != MonthlyModePriority {
-		t.Fatalf("resource settings did not update config: %#v", store.Config())
-	}
-	for _, action := range []string{
-		"logs",
-		"export",
-	} {
+	for action, payload := range actions {
 		resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
 			Method: http.MethodGet,
 			Path:   "/v0/resource/plugins/codex-quota-scheduler/status",
-			Query:  url.Values{"action": []string{action}},
+			Query: url.Values{
+				"action":  []string{action},
+				"payload": []string{payload},
+			},
 		}, time.Now())
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("%s StatusCode = %d, want %d; body=%s", action, resp.StatusCode, http.StatusOK, resp.Body)
 		}
+	}
+	if store.Config() != originalConfig {
+		t.Fatalf("resource action changed config: %#v", store.Config())
+	}
+	if got := store.Annotations().Accounts["auth:auth-1"].Alias; got != "original" {
+		t.Fatalf("resource action changed annotation alias = %q, want original", got)
+	}
+	if refreshes != 0 || refreshOne != "" {
+		t.Fatalf("resource action triggered refreshes = %d, refreshOne = %q; want none", refreshes, refreshOne)
+	}
+}
+
+func TestResourceStatusFormatJSONStillRendersHTMLShell(t *testing.T) {
+	store := NewPluginState(DefaultConfig())
+	resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/resource/plugins/codex-quota-scheduler/status",
+		Query:  url.Values{"format": []string{"json"}},
+	}, time.Now())
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, resp.Body)
+	}
+	if got := resp.Headers.Get("Content-Type"); got != "text/html; charset=utf-8" {
+		t.Fatalf("Content-Type = %q, want text/html", got)
+	}
+	body := strings.TrimSpace(string(resp.Body))
+	if strings.HasPrefix(body, "{") || !strings.Contains(body, "<!doctype html>") {
+		t.Fatalf("resource format=json returned non-HTML body: %s", body)
 	}
 }
 
@@ -590,19 +636,19 @@ func TestResourceStatusRendersUsablePluginPage(t *testing.T) {
 		t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, resp.Body)
 	}
 	body := string(resp.Body)
-	for _, forbidden := range []string{"window.location.replace", "http-equiv=\"refresh\"", "/v0/management/plugins/codex-quota-scheduler/status"} {
+	for _, forbidden := range []string{"window.location.replace", "http-equiv=\"refresh\"", "requestPlugin(action,options)", "RESOURCE_ENDPOINT+'?'"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("resource status still depends on management redirect marker %q: %s", forbidden, body)
 		}
 	}
-	for _, want := range []string{"secret alias", "private note", "private log", "logList", "RESOURCE_ENDPOINT", "/v0/resource/plugins/codex-quota-scheduler/status", "requestPlugin(action,options)"} {
+	for _, want := range []string{"secret alias", "private note", "private log", "logList", "managementKey", "MANAGEMENT_BASE", "/v0/management/plugins/codex-quota-scheduler", "authHeaders()"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("resource status missing usable plugin page marker %q: %s", want, body)
 		}
 	}
 }
 
-func TestManagementAccountEndpointDoesNotRequireManagementKey(t *testing.T) {
+func TestManagementAccountEndpointUpdatesAnnotation(t *testing.T) {
 	dir := t.TempDir()
 	previousDefaultStatePath := defaultStatePath
 	defaultStatePath = func() string { return filepath.Join(dir, "state.json") }
@@ -719,6 +765,38 @@ func TestResourceExportImportRoundTrip(t *testing.T) {
 	}
 	if got := imported.Annotations().Accounts["auth:auth-1"].Alias; got != "A" {
 		t.Fatalf("imported account alias = %q, want A", got)
+	}
+}
+
+func TestManagementSettingsAndImportRejectNonChatGPTQuotaEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	previousDefaultStatePath := defaultStatePath
+	defaultStatePath = func() string { return filepath.Join(dir, "state.json") }
+	t.Cleanup(func() { defaultStatePath = previousDefaultStatePath })
+
+	store := NewPluginState(DefaultConfig())
+	settingsResp := HandleManagementRequest(store, pluginapi.ManagementRequest{
+		Method: http.MethodPut,
+		Path:   "/v0/management/plugins/codex-quota-scheduler/settings",
+		Body:   []byte(`{"handle_enabled":true,"monthly_mode":"expiry_order","quota_refresh_interval":"30m","stale_after":"5h","enable_usage_feedback":true,"max_refresh_concurrency":1,"quota_endpoint":"https://example.test/usage","max_log_entries":2000,"log_retention":"24h"}`),
+	}, time.Now())
+	if settingsResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("settings StatusCode = %d, want %d; body=%s", settingsResp.StatusCode, http.StatusBadRequest, settingsResp.Body)
+	}
+	if store.Config().QuotaEndpoint != DefaultConfig().QuotaEndpoint {
+		t.Fatalf("settings changed quota endpoint to %q", store.Config().QuotaEndpoint)
+	}
+
+	importResp := HandleManagementRequest(store, pluginapi.ManagementRequest{
+		Method: http.MethodPost,
+		Path:   "/v0/management/plugins/codex-quota-scheduler/import",
+		Body:   []byte(`{"config":{"HandleEnabled":true,"MonthlyMode":"expiry_order","QuotaRefreshInterval":1800000000000,"StaleAfter":18000000000000,"MaxRefreshConcurrency":1,"QuotaEndpoint":"https://example.test/usage","MaxLogEntries":2000,"LogRetention":86400000000000}}`),
+	}, time.Now())
+	if importResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("import StatusCode = %d, want %d; body=%s", importResp.StatusCode, http.StatusBadRequest, importResp.Body)
+	}
+	if store.Config().QuotaEndpoint != DefaultConfig().QuotaEndpoint {
+		t.Fatalf("import changed quota endpoint to %q", store.Config().QuotaEndpoint)
 	}
 }
 

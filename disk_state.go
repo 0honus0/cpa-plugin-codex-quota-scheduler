@@ -73,6 +73,9 @@ func normalizePluginDiskState(state PluginDiskState) PluginDiskState {
 		cfg = DefaultConfig()
 	}
 	cfg = NormalizeConfig(cfg)
+	if _, err := validateQuotaEndpoint(cfg.QuotaEndpoint); err != nil {
+		cfg.QuotaEndpoint = DefaultConfig().QuotaEndpoint
+	}
 	annotations := NormalizeAnnotationState(AnnotationState{
 		Accounts: state.Accounts,
 		Groups:   state.Groups,

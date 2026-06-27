@@ -143,9 +143,6 @@ func HandleManagementRequest(store *PluginState, req pluginapi.ManagementRequest
 	}
 	switch {
 	case method == http.MethodGet && path == "/status":
-		if resp, ok := handleResourceAction(store, req, now); ok {
-			return resp
-		}
 		return handleStatusRequest(store, req, now)
 	case method == http.MethodGet && path == "/settings":
 		return jsonManagementResponse(http.StatusOK, SettingsFromConfig(store.Config()))
@@ -190,44 +187,6 @@ func resourceRouteAllowed(method, path string) bool {
 		}
 	}
 	return false
-}
-
-func handleResourceAction(store *PluginState, req pluginapi.ManagementRequest, now time.Time) (pluginapi.ManagementResponse, bool) {
-	if !isResourcePath(req.Path) {
-		return pluginapi.ManagementResponse{}, false
-	}
-	action := strings.TrimSpace(req.Query.Get("action"))
-	if action == "" {
-		return pluginapi.ManagementResponse{}, false
-	}
-	payloadReq := req
-	payloadReq.Body = []byte(req.Query.Get("payload"))
-	switch action {
-	case "settings":
-		return handlePutSettings(store, payloadReq, now), true
-	case "refresh":
-		triggerRefreshSoon()
-		store.RecordLog("info", "ui.refresh_requested", "页面请求刷新额度", nil, now)
-		return jsonManagementResponse(http.StatusAccepted, map[string]bool{"ok": true}), true
-	case "refresh_account":
-		return handleRefreshAccountRequest(store, payloadReq, now), true
-	case "logs":
-		return jsonManagementResponse(http.StatusOK, map[string]any{"logs": store.Snapshot(now).Logs}), true
-	case "export":
-		return handleExportState(store, now), true
-	case "import":
-		return handleImportState(store, payloadReq.Body, now), true
-	case "annotations":
-		return jsonManagementResponse(http.StatusOK, store.Annotations()), true
-	case "annotations_replace":
-		return handlePutAnnotations(store, payloadReq), true
-	case "annotations_account":
-		return handlePatchAccountAnnotation(store, payloadReq, now), true
-	case "annotations_group":
-		return handlePatchGroupAnnotation(store, payloadReq, now), true
-	default:
-		return jsonManagementResponse(http.StatusNotFound, map[string]string{"error": "not found"}), true
-	}
 }
 
 func SettingsFromConfig(cfg Config) SettingsPayload {
@@ -276,7 +235,11 @@ func ConfigFromSettings(base Config, payload SettingsPayload) (Config, error) {
 	}
 	cfg.MaxRefreshConcurrency = payload.MaxRefreshConcurrency
 	if strings.TrimSpace(payload.QuotaEndpoint) != "" {
-		cfg.QuotaEndpoint = strings.TrimSpace(payload.QuotaEndpoint)
+		endpoint, err := validateQuotaEndpoint(payload.QuotaEndpoint)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.QuotaEndpoint = endpoint
 	}
 	if payload.CircuitFailureThreshold > 0 {
 		cfg.CircuitFailureThreshold = payload.CircuitFailureThreshold
@@ -367,6 +330,9 @@ func handleImportState(store *PluginState, body []byte, now time.Time) pluginapi
 	}
 	var state PluginDiskState
 	if err := json.Unmarshal([]byte(raw), &state); err != nil {
+		return jsonManagementResponse(http.StatusBadRequest, map[string]string{"error": err.Error()})
+	}
+	if _, err := validateQuotaEndpoint(state.Config.QuotaEndpoint); err != nil {
 		return jsonManagementResponse(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
 	state = normalizePluginDiskState(state)
@@ -570,7 +536,7 @@ func handleStatusRequest(store *PluginState, req pluginapi.ManagementRequest, no
 	snapshot := store.Snapshot(now)
 	ordered := BuildOrderedAccounts(syntheticStatusRequest(snapshot), snapshot, now)
 	payload := BuildStatusPayload(snapshot, ordered)
-	if req.Query.Get("format") == "json" {
+	if req.Query.Get("format") == "json" && !isResourcePath(req.Path) {
 		return jsonManagementResponse(http.StatusOK, payload)
 	}
 	return pluginapi.ManagementResponse{
@@ -825,6 +791,7 @@ var statusTemplateV2 = template.Must(template.New("status-v2").Funcs(template.Fu
 <aside class="sidebar">
 <div class="brand"><h1 data-i18n="app.title">Codex 额度调度器</h1><p data-i18n="app.subtitle">优化版 Fill First。配置、别名、分组、标签和备注由插件内部状态文件保存。</p></div>
 <label class="field"><span data-i18n="app.language">界面语言</span><select id="localeSelect"><option value="zh-CN">中文</option><option value="en">English</option></select></label>
+<label class="field"><span data-i18n="connection.managementKey">CPA 管理密钥</span><input id="managementKey" type="password" autocomplete="off" spellcheck="false"></label>
 <div class="section"><h2 data-i18n="settings.title">调度设置</h2>
 <label class="toggle"><span data-i18n="settings.handleEnabled">启用调度接管</span><input id="handleEnabled" type="checkbox"></label>
 <label class="toggle"><span data-i18n="settings.usageFeedback">失败反馈标记额度耗尽</span><input id="usageFeedback" type="checkbox"></label>
@@ -857,27 +824,27 @@ var statusTemplateV2 = template.Must(template.New("status-v2").Funcs(template.Fu
 <dialog id="editDialog"><form method="dialog" class="dialogBody"><div class="dialogHead"><div><h2 data-i18n="edit.title">编辑账号</h2><p id="editAuthID"></p></div><button type="button" id="closeDialog" class="ghost" data-i18n="actions.close">关闭</button></div><div class="dialogGrid"><label class="field"><span data-i18n="edit.alias">别名</span><input id="editAlias"></label><label class="field"><span data-i18n="edit.groupID">分组 ID</span><input id="editGroupID" placeholder="team-a"></label><label class="field"><span data-i18n="edit.groupName">分组名称</span><input id="editGroupName"></label><label class="field"><span data-i18n="edit.tags">标签</span><input id="editTags" placeholder="team, paid"></label><label class="field wide"><span data-i18n="edit.notes">账号备注</span><textarea id="editNotes"></textarea></label><label class="field wide"><span data-i18n="edit.groupNotes">分组备注</span><textarea id="editGroupNotes"></textarea></label></div><div class="dialogActions"><button type="button" id="saveAccount" class="secondary" data-i18n="actions.saveAccount">保存账号</button><button type="button" id="cancelEdit" class="ghost" data-i18n="actions.cancel">取消</button></div></form></dialog>
 <script>
 const STATUS={{json .}};
-const RESOURCE_ENDPOINT='/v0/resource/plugins/codex-quota-scheduler/status';
+const MANAGEMENT_BASE='/v0/management/plugins/codex-quota-scheduler';
 const LOCALE_STORAGE_KEY='codex-quota-scheduler-locale-v1';
 const TRANSLATIONS={
   en:{
-    'app.title':'Codex Quota Scheduler','app.subtitle':'Optimized Fill First scheduling. Configuration, aliases, groups, tags, and notes are saved in the plugin state file.','app.language':'Language',
+    'app.title':'Codex Quota Scheduler','app.subtitle':'Optimized Fill First scheduling. Configuration, aliases, groups, tags, and notes are saved in the plugin state file.','app.language':'Language','connection.managementKey':'CPA management key',
     'settings.title':'Scheduler Settings','settings.handleEnabled':'Enable scheduler takeover','settings.usageFeedback':'Mark quota exhausted from failure feedback','settings.monthlyMode':'Monthly mode','settings.expiryOrder':'Sort by expiry time','settings.monthlyPriority':'Prefer Monthly','settings.refreshInterval':'Quota refresh interval','settings.staleAfter':'Stale cache threshold','settings.maxConcurrency':'Max refresh concurrency','settings.circuitFailureThreshold':'Circuit failure threshold','settings.circuitOpenDuration':'Circuit open duration','settings.circuitHalfOpenSuccessThreshold':'Half-open recovery successes','settings.maxLogEntries':'Max log entries','settings.logRetention':'Log retention',
     'actions.saveSettings':'Save Settings','actions.refreshQuota':'Refresh Quota','actions.exportConfig':'Export Config','actions.importConfig':'Import Config','actions.refreshLogs':'Refresh Logs','actions.exportLogs':'Export Logs','actions.close':'Close','actions.saveAccount':'Save Account','actions.cancel':'Cancel',
     'queue.title':'Account Queue','queue.description':'Account cards are sorted by the current scheduler priority. The first available account is preferred for the next Codex request.','metrics.nextAccount':'Next account','metrics.scheduler':'Scheduler','metrics.lastSelected':'Last selected',
     'logs.title':'Scheduler Logs','logs.empty':'No logs yet. Send a request or refresh quota manually to show records here.',
     'edit.title':'Edit Account','edit.alias':'Alias','edit.groupID':'Group ID','edit.groupName':'Group name','edit.tags':'Tags','edit.notes':'Account notes','edit.groupNotes':'Group notes',
-    'notice.settingsSaved':'Settings saved. The page will refresh shortly.','notice.refreshRequested':'Background quota refresh requested. The page will refresh shortly.','notice.accountSaved':'Account card saved. The page will refresh shortly.','notice.refreshOneRequested':'Quota refresh requested for this account. The page will refresh shortly.','notice.configExported':'Configuration exported.','notice.logsExported':'Logs exported.','notice.configImported':'Configuration imported. The page will refresh shortly.','error.requestFailed':'Request failed: {status}',
+    'notice.settingsSaved':'Settings saved. The page will refresh shortly.','notice.refreshRequested':'Background quota refresh requested. The page will refresh shortly.','notice.accountSaved':'Account card saved. The page will refresh shortly.','notice.refreshOneRequested':'Quota refresh requested for this account. The page will refresh shortly.','notice.configExported':'Configuration exported.','notice.logsExported':'Logs exported.','notice.configImported':'Configuration imported. The page will refresh shortly.','error.requestFailed':'Request failed: {status}','error.managementKeyRequired':'CPA management key is required',
     'log.ui.refresh_requested':'UI requested quota refresh','log.ui.settings_saved':'UI saved scheduler settings','log.ui.refresh_one_requested':'UI requested one account quota refresh','log.ui.config_exported':'UI exported plugin configuration','log.ui.config_imported':'UI imported plugin configuration','log.ui.account_saved':'UI saved account card','log.ui.group_saved':'UI saved account group','log.scheduler.selected':'Request handled by plugin'
   },
   'zh-CN':{
-    'app.title':'Codex 额度调度器','app.subtitle':'优化版 Fill First。配置、别名、分组、标签和备注由插件内部状态文件保存。','app.language':'界面语言',
+    'app.title':'Codex 额度调度器','app.subtitle':'优化版 Fill First。配置、别名、分组、标签和备注由插件内部状态文件保存。','app.language':'界面语言','connection.managementKey':'CPA 管理密钥',
     'settings.title':'调度设置','settings.handleEnabled':'启用调度接管','settings.usageFeedback':'失败反馈标记额度耗尽','settings.monthlyMode':'Monthly 模式','settings.expiryOrder':'按到期时间排序','settings.monthlyPriority':'优先使用 Monthly','settings.refreshInterval':'额度刷新间隔','settings.staleAfter':'缓存过期判定','settings.maxConcurrency':'最大并发刷新','settings.circuitFailureThreshold':'熔断失败阈值','settings.circuitOpenDuration':'熔断等待时间','settings.circuitHalfOpenSuccessThreshold':'半开恢复成功次数','settings.maxLogEntries':'最大日志条数','settings.logRetention':'日志保留时间',
     'actions.saveSettings':'保存设置','actions.refreshQuota':'刷新额度','actions.exportConfig':'导出配置','actions.importConfig':'导入配置','actions.refreshLogs':'刷新日志','actions.exportLogs':'导出日志','actions.close':'关闭','actions.saveAccount':'保存账号','actions.cancel':'取消',
     'queue.title':'账号队列','queue.description':'账号卡片按当前调度优先级排序。第一个可用账号就是下一次 Codex 请求会优先选择的账号。','metrics.nextAccount':'下一账号','metrics.scheduler':'调度','metrics.lastSelected':'最近选择',
     'logs.title':'调度日志','logs.empty':'暂无日志。发起请求或手动刷新额度后，这里会显示记录。',
     'edit.title':'编辑账号','edit.alias':'别名','edit.groupID':'分组 ID','edit.groupName':'分组名称','edit.tags':'标签','edit.notes':'账号备注','edit.groupNotes':'分组备注',
-    'notice.settingsSaved':'设置已保存，页面即将自动刷新。','notice.refreshRequested':'已请求后台刷新额度，页面稍后自动刷新。','notice.accountSaved':'账号卡片已保存，页面即将自动刷新。','notice.refreshOneRequested':'已请求刷新该账号额度，页面稍后自动刷新。','notice.configExported':'配置已导出。','notice.logsExported':'日志已导出。','notice.configImported':'配置已导入，页面即将自动刷新。','error.requestFailed':'请求失败：{status}'
+    'notice.settingsSaved':'设置已保存，页面即将自动刷新。','notice.refreshRequested':'已请求后台刷新额度，页面稍后自动刷新。','notice.accountSaved':'账号卡片已保存，页面即将自动刷新。','notice.refreshOneRequested':'已请求刷新该账号额度，页面稍后自动刷新。','notice.configExported':'配置已导出。','notice.logsExported':'日志已导出。','notice.configImported':'配置已导入，页面即将自动刷新。','error.requestFailed':'请求失败：{status}','error.managementKeyRequired':'需要填写 CPA 管理密钥'
   }
 };
 const notice=document.getElementById('notice');
@@ -906,23 +873,24 @@ function changeLocale(locale){currentLocale=normalizeLocale(locale);try{window.l
 function showNotice(text,isError){notice.hidden=false;notice.textContent=text;notice.className='notice'+(isError?' error':'')}
 function schedulePageRefresh(delay){window.setTimeout(()=>window.location.reload(),delay||900)}
 async function readJSON(resp){const text=await resp.text();if(!text)return{};try{return JSON.parse(text)}catch{return{error:text}}}
-async function requestPlugin(action,options){const params=new URLSearchParams({action});if(options&&Object.prototype.hasOwnProperty.call(options,'payload')){const payload=typeof options.payload==='string'?options.payload:JSON.stringify(options.payload);params.set('payload',payload)}const resp=await fetch(RESOURCE_ENDPOINT+'?'+params.toString());const data=await readJSON(resp);if(!resp.ok)throw new Error(data.error||data.message||t('error.requestFailed',{status:resp.status}));return data}
+function authHeaders(){const input=document.getElementById('managementKey');const key=(input&&input.value||'').trim();if(!key)throw new Error(t('error.managementKeyRequired'));const name='Author'+'ization';const scheme='Bea'+'rer ';const headers={};headers[name]=key.toLowerCase().startsWith(scheme.toLowerCase())?key:scheme+key;return headers}
+async function requestManagement(path,options){const opts=options||{};const headers=authHeaders();let url=MANAGEMENT_BASE+path;if(opts.query){const params=new URLSearchParams(opts.query);url+='?'+params.toString()}const init={method:opts.method||'GET',headers};if(Object.prototype.hasOwnProperty.call(opts,'body')){headers['Content-Type']=opts.contentType||'application/json';init.body=typeof opts.body==='string'?opts.body:JSON.stringify(opts.body)}const resp=await fetch(url,init);const data=await readJSON(resp);if(!resp.ok)throw new Error(data.error||data.message||t('error.requestFailed',{status:resp.status}));return data}
 function fillSettings(){const s=STATUS.settings||{};document.getElementById('handleEnabled').checked=s.handle_enabled!==false;document.getElementById('usageFeedback').checked=s.enable_usage_feedback!==false;document.getElementById('monthlyMode').value=s.monthly_mode||'expiry_order';document.getElementById('refreshInterval').value=s.quota_refresh_interval||'30m0s';document.getElementById('staleAfter').value=s.stale_after||'5h0m0s';document.getElementById('maxConcurrency').value=s.max_refresh_concurrency||1;document.getElementById('circuitFailureThreshold').value=s.circuit_failure_threshold||3;document.getElementById('circuitOpenDuration').value=s.circuit_open_duration||'10m0s';document.getElementById('circuitHalfOpenSuccessThreshold').value=s.circuit_half_open_success_threshold||1;document.getElementById('maxLogEntries').value=s.max_log_entries||2000;document.getElementById('logRetention').value=s.log_retention||'24h0m0s'}
-async function saveSettings(){try{const payload={handle_enabled:document.getElementById('handleEnabled').checked,enable_usage_feedback:document.getElementById('usageFeedback').checked,monthly_mode:document.getElementById('monthlyMode').value,quota_refresh_interval:document.getElementById('refreshInterval').value.trim(),stale_after:document.getElementById('staleAfter').value.trim(),max_refresh_concurrency:Number.parseInt(document.getElementById('maxConcurrency').value,10)||1,circuit_failure_threshold:Number.parseInt(document.getElementById('circuitFailureThreshold').value,10)||3,circuit_open_duration:document.getElementById('circuitOpenDuration').value.trim(),circuit_half_open_success_threshold:Number.parseInt(document.getElementById('circuitHalfOpenSuccessThreshold').value,10)||1,max_log_entries:Number.parseInt(document.getElementById('maxLogEntries').value,10)||2000,log_retention:document.getElementById('logRetention').value.trim()};await requestPlugin('settings',{payload});showNotice(t('notice.settingsSaved'),false);await refreshLogs();schedulePageRefresh(700)}catch(error){showNotice(error.message||String(error),true)}}
-async function refreshQuota(){try{await requestPlugin('refresh');showNotice(t('notice.refreshRequested'),false);await refreshLogs();schedulePageRefresh(1800)}catch(error){showNotice(error.message||String(error),true)}}
+async function saveSettings(){try{const payload={handle_enabled:document.getElementById('handleEnabled').checked,enable_usage_feedback:document.getElementById('usageFeedback').checked,monthly_mode:document.getElementById('monthlyMode').value,quota_refresh_interval:document.getElementById('refreshInterval').value.trim(),stale_after:document.getElementById('staleAfter').value.trim(),max_refresh_concurrency:Number.parseInt(document.getElementById('maxConcurrency').value,10)||1,circuit_failure_threshold:Number.parseInt(document.getElementById('circuitFailureThreshold').value,10)||3,circuit_open_duration:document.getElementById('circuitOpenDuration').value.trim(),circuit_half_open_success_threshold:Number.parseInt(document.getElementById('circuitHalfOpenSuccessThreshold').value,10)||1,max_log_entries:Number.parseInt(document.getElementById('maxLogEntries').value,10)||2000,log_retention:document.getElementById('logRetention').value.trim()};await requestManagement('/settings',{method:'PUT',body:payload});showNotice(t('notice.settingsSaved'),false);await refreshLogs();schedulePageRefresh(700)}catch(error){showNotice(error.message||String(error),true)}}
+async function refreshQuota(){try{await requestManagement('/refresh',{method:'POST'});showNotice(t('notice.refreshRequested'),false);await refreshLogs();schedulePageRefresh(1800)}catch(error){showNotice(error.message||String(error),true)}}
 function splitTags(text){return text.split(',').map((item)=>item.trim()).filter(Boolean)}
 function openEdit(authID){const account=accountsByID.get(authID)||{};editingAuthID=authID;document.getElementById('editAuthID').textContent=authID;document.getElementById('editAlias').value=account.alias||'';document.getElementById('editNotes').value=account.notes||'';document.getElementById('editGroupID').value=account.group_id||'';document.getElementById('editGroupName').value=account.group||'';document.getElementById('editGroupNotes').value=account.group_notes||'';document.getElementById('editTags').value=(account.tags||[]).join(', ');editDialog.showModal()}
 function fillGroupFromID(){const groupID=document.getElementById('editGroupID').value.trim();const group=groupsByID.get(groupID);if(!group)return;if(!document.getElementById('editGroupName').value.trim())document.getElementById('editGroupName').value=group.name||'';if(!document.getElementById('editGroupNotes').value.trim())document.getElementById('editGroupNotes').value=group.notes||''}
-async function saveAccountModal(){if(!editingAuthID)return;const groupID=document.getElementById('editGroupID').value.trim();const groupName=document.getElementById('editGroupName').value.trim();const groupNotes=document.getElementById('editGroupNotes').value.trim();try{await requestPlugin('annotations_account',{payload:{auth_id:editingAuthID,alias:document.getElementById('editAlias').value,notes:document.getElementById('editNotes').value,tags:splitTags(document.getElementById('editTags').value),group_id:groupID}});const existingGroup=groupsByID.get(groupID)||{name:'',notes:''};if(groupID&&(groupName!==existingGroup.name||groupNotes!==existingGroup.notes)){await requestPlugin('annotations_group',{payload:{id:groupID,name:groupName,notes:groupNotes}});groupsByID.set(groupID,{name:groupName,notes:groupNotes})}showNotice(t('notice.accountSaved'),false);editDialog.close();await refreshLogs();schedulePageRefresh(700)}catch(error){showNotice(error.message||String(error),true)}}
-async function refreshOneQuota(authID){if(!authID)return;try{await requestPlugin('refresh_account',{payload:{auth_id:authID}});showNotice(t('notice.refreshOneRequested'),false);await refreshLogs();schedulePageRefresh(1800)}catch(error){showNotice(error.message||String(error),true)}}
-async function exportConfig(){try{const data=await requestPlugin('export');const blob=new Blob([JSON.stringify(data,null,2)+'\n'],{type:'application/json'});const link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download='codex-quota-scheduler-config.json';link.click();URL.revokeObjectURL(link.href);showNotice(t('notice.configExported'),false);await refreshLogs()}catch(error){showNotice(error.message||String(error),true)}}
-async function exportLogs(){try{const data=await requestPlugin('logs');const payload={plugin_id:STATUS.plugin_id||'codex-quota-scheduler',exported_at:new Date().toISOString(),logs:data.logs||[]};const blob=new Blob([JSON.stringify(payload,null,2)+'\n'],{type:'application/json'});const link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download='codex-quota-scheduler-logs.json';link.click();URL.revokeObjectURL(link.href);showNotice(t('notice.logsExported'),false)}catch(error){showNotice(error.message||String(error),true)}}
-async function importConfigFile(file){if(!file)return;try{const text=await file.text();await requestPlugin('import',{payload:text});showNotice(t('notice.configImported'),false);await refreshLogs();schedulePageRefresh(700)}catch(error){showNotice(error.message||String(error),true)}}
+async function saveAccountModal(){if(!editingAuthID)return;const groupID=document.getElementById('editGroupID').value.trim();const groupName=document.getElementById('editGroupName').value.trim();const groupNotes=document.getElementById('editGroupNotes').value.trim();try{await requestManagement('/annotations/account',{method:'PATCH',body:{auth_id:editingAuthID,alias:document.getElementById('editAlias').value,notes:document.getElementById('editNotes').value,tags:splitTags(document.getElementById('editTags').value),group_id:groupID}});const existingGroup=groupsByID.get(groupID)||{name:'',notes:''};if(groupID&&(groupName!==existingGroup.name||groupNotes!==existingGroup.notes)){await requestManagement('/annotations/group',{method:'PATCH',body:{id:groupID,name:groupName,notes:groupNotes}});groupsByID.set(groupID,{name:groupName,notes:groupNotes})}showNotice(t('notice.accountSaved'),false);editDialog.close();await refreshLogs();schedulePageRefresh(700)}catch(error){showNotice(error.message||String(error),true)}}
+async function refreshOneQuota(authID){if(!authID)return;try{await requestManagement('/refresh/account',{method:'POST',body:{auth_id:authID}});showNotice(t('notice.refreshOneRequested'),false);await refreshLogs();schedulePageRefresh(1800)}catch(error){showNotice(error.message||String(error),true)}}
+async function exportConfig(){try{const data=await requestManagement('/export');const blob=new Blob([JSON.stringify(data,null,2)+'\n'],{type:'application/json'});const link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download='codex-quota-scheduler-config.json';link.click();URL.revokeObjectURL(link.href);showNotice(t('notice.configExported'),false);await refreshLogs()}catch(error){showNotice(error.message||String(error),true)}}
+async function exportLogs(){try{const data=await requestManagement('/logs');const payload={plugin_id:STATUS.plugin_id||'codex-quota-scheduler',exported_at:new Date().toISOString(),logs:data.logs||[]};const blob=new Blob([JSON.stringify(payload,null,2)+'\n'],{type:'application/json'});const link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download='codex-quota-scheduler-logs.json';link.click();URL.revokeObjectURL(link.href);showNotice(t('notice.logsExported'),false)}catch(error){showNotice(error.message||String(error),true)}}
+async function importConfigFile(file){if(!file)return;try{const text=await file.text();await requestManagement('/import',{method:'POST',body:text});showNotice(t('notice.configImported'),false);await refreshLogs();schedulePageRefresh(700)}catch(error){showNotice(error.message||String(error),true)}}
 function formatLogTime(value){if(!value)return'';const date=new Date(value);if(Number.isNaN(date.getTime()))return value;return date.toLocaleString('zh-CN',{hour12:false})}
 function formatLocalTimes(){for(const node of document.querySelectorAll('.localTime[data-time]')){const raw=node.dataset.time||'';const date=new Date(raw);if(!Number.isNaN(date.getTime()))node.textContent=date.toLocaleString('zh-CN',{hour12:false})}}
 function localizedLogMessage(log){if(currentLocale!=='en')return log.message||'';return t('log.'+(log.event||''))||translateInlineText(log.message||'')}
 function renderLogs(logs){const list=document.getElementById('logList');list.replaceChildren();const items=(logs||[]).slice().reverse().slice(0,80);if(items.length===0){const empty=document.createElement('div');empty.className='empty';empty.textContent=t('logs.empty');list.appendChild(empty);return}for(const log of items){const row=document.createElement('div');row.className='logItem '+(log.level||'info');const meta=document.createElement('div');meta.className='logMeta';meta.textContent=[formatLogTime(log.time),log.event].filter(Boolean).join(' · ');const msg=document.createElement('div');msg.className='logMsg';const fields=log.fields?Object.entries(log.fields).map(([key,value])=>key+'='+value).join(currentLocale==='en'?', ':'，'):'';msg.textContent=fields?(localizedLogMessage(log)+'（'+fields+'）'):localizedLogMessage(log);row.append(meta,msg);list.appendChild(row)}}
-async function refreshLogs(){try{const data=await requestPlugin('logs');renderLogs(data.logs||[])}catch(error){showNotice(error.message||String(error),true)}}
+async function refreshLogs(){try{const data=await requestManagement('/logs');renderLogs(data.logs||[])}catch(error){showNotice(error.message||String(error),true)}}
 localeSelect.addEventListener('change',()=>changeLocale(localeSelect.value));
 document.getElementById('saveSettings').addEventListener('click',saveSettings);
 document.getElementById('refreshQuota').addEventListener('click',refreshQuota);

@@ -1,5 +1,5 @@
 PLUGIN_NAME ?= codex-quota-scheduler
-VERSION ?= 0.1.0
+VERSION ?= 0.1.1
 BUILD_DIR ?= dist
 GOOS ?= $(shell go env GOOS)
 GOARCH ?= $(shell go env GOARCH)
