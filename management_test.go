@@ -493,6 +493,14 @@ func TestStatusPayloadIncludesRefreshFailureVisibility(t *testing.T) {
 	if account.RefreshDueReason != "retry_wait" {
 		t.Fatalf("RefreshDueReason = %q, want retry_wait", account.RefreshDueReason)
 	}
+
+	raw, err := json.Marshal(payload.Accounts[0])
+	if err != nil {
+		t.Fatalf("marshal status account: %v", err)
+	}
+	if !strings.Contains(string(raw), `"auth_failure":false`) {
+		t.Fatalf("status JSON = %s, want explicit auth_failure false", string(raw))
+	}
 }
 
 func TestStatusPayloadIncludesAuthFailureVisibility(t *testing.T) {

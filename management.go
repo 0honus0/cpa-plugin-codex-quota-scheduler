@@ -71,7 +71,7 @@ type StatusAccount struct {
 	LastError                    string        `json:"last_error,omitempty"`
 	RefreshDueReason             string        `json:"refresh_due_reason,omitempty"`
 	NextRetryText                string        `json:"next_retry_text,omitempty"`
-	AuthFailure                  bool          `json:"auth_failure,omitempty"`
+	AuthFailure                  bool          `json:"auth_failure"`
 	FiveHour                     StatusWindow  `json:"five_hour"`
 	LongWindow                   StatusWindow  `json:"long_window"`
 	Circuit                      StatusCircuit `json:"circuit"`

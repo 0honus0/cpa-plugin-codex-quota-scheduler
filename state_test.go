@@ -247,6 +247,22 @@ func TestRecordRefreshAuthFailureStopsRetry(t *testing.T) {
 	}
 }
 
+func TestLocalRefreshFailureBlocksAutomaticDueRefresh(t *testing.T) {
+	now := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	store.UpsertQuota(AccountState{AuthID: "auth-1", AuthIndex: "idx-1", Provider: "codex"})
+	store.RecordRefreshFailure("auth-1", "idx-1", RefreshFailureLocal, "missing access token", now)
+
+	due := store.DueAccounts(now.Add(24 * time.Hour))
+	if len(due) != 0 {
+		t.Fatalf("due accounts after local failure = %#v, want none", due)
+	}
+	account := store.Snapshot(now).Accounts[0]
+	if ok, reason := accountRefreshDue(account, store.Config(), now); ok || reason != "local_failure" {
+		t.Fatalf("accountRefreshDue = %t, %q; want false local_failure", ok, reason)
+	}
+}
+
 func TestAccountRefreshDueReasons(t *testing.T) {
 	now := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
 	cfg := DefaultConfig()

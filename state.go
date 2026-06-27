@@ -294,6 +294,9 @@ func accountRefreshDue(account AccountState, cfg Config, now time.Time) (bool, s
 	if account.Refresh.AuthFailure {
 		return false, "auth_failure"
 	}
+	if account.Refresh.LastFailureKind == RefreshFailureLocal {
+		return false, "local_failure"
+	}
 	if !account.Refresh.NextRetryAt.IsZero() && account.Refresh.NextRetryAt.After(now) {
 		return false, "retry_wait"
 	}
