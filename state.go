@@ -297,6 +297,14 @@ func accountRefreshDue(account AccountState, cfg Config, now time.Time) (bool, s
 	if account.Refresh.LastFailureKind == RefreshFailureLocal {
 		return false, "local_failure"
 	}
+	if !account.Circuit.NextProbeAt.IsZero() {
+		if account.Circuit.NextProbeAt.After(now) {
+			return false, "circuit_wait"
+		}
+		if account.Circuit.State == CircuitStateOpen || account.Circuit.EffectiveState == CircuitStateHalfOpen {
+			return true, "circuit_probe_due"
+		}
+	}
 	if !account.Refresh.NextRetryAt.IsZero() && account.Refresh.NextRetryAt.After(now) {
 		return false, "retry_wait"
 	}

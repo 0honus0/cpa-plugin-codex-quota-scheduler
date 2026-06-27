@@ -133,6 +133,55 @@ func TestSchedulerPickRecordsCodexActivityAndRequestsDueRefresh(t *testing.T) {
 	}
 }
 
+func TestSchedulerPickRefreshesOnlyActivePriorityCandidates(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	highToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-high"})
+	lowToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-low"})
+	store := NewPluginState(DefaultConfig())
+	highBefore := now.Add(-6 * time.Hour)
+	lowBefore := now.Add(-6 * time.Hour)
+	store.UpsertQuota(AccountState{AuthID: "high", AuthIndex: "idx-high", Provider: "codex", LastSuccessAt: highBefore, Priority: 10})
+	store.UpsertQuota(AccountState{AuthID: "low", AuthIndex: "idx-low", Provider: "codex", LastSuccessAt: lowBefore, Priority: 1})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{
+			{ID: "high", AuthIndex: "idx-high", Provider: "codex"},
+			{ID: "low", AuthIndex: "idx-low", Provider: "codex"},
+		},
+		authJSON: map[string]json.RawMessage{
+			"idx-high": json.RawMessage(`{"access_token":"access-high","id_token":"` + highToken + `"}`),
+			"idx-low":  json.RawMessage(`{"access_token":"access-low","id_token":"` + lowToken + `"}`),
+		},
+		httpBody: []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+	}
+	refresher := NewQuotaRefresher(host, store, time.Now)
+	withGlobalRefresherForTest(t, store, refresher)
+
+	req, err := json.Marshal(pluginapi.SchedulerPickRequest{
+		Provider: "codex",
+		Model:    "gpt-5-codex",
+		Candidates: []pluginapi.SchedulerAuthCandidate{
+			{ID: "high", Provider: "codex", Priority: 10},
+			{ID: "low", Provider: "codex", Priority: 1},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal pick request: %v", err)
+	}
+	if _, err := handleSchedulerPick(req); err != nil {
+		t.Fatalf("scheduler.pick returned error: %v", err)
+	}
+
+	if refreshed := waitForCondition(t, time.Second, func() bool {
+		return accountByAuthID(t, store.Snapshot(time.Now()), "high").LastSuccessAt.After(highBefore)
+	}); !refreshed {
+		t.Fatal("high priority account was not refreshed")
+	}
+	low := accountByAuthID(t, store.Snapshot(time.Now()), "low")
+	if !low.LastSuccessAt.Equal(lowBefore) {
+		t.Fatalf("low LastSuccessAt = %s, want unchanged %s", low.LastSuccessAt, lowBefore)
+	}
+}
+
 func TestLogSchedulerDecisionIncludesDetailedFallbackReason(t *testing.T) {
 	now := time.Date(2026, 6, 25, 10, 0, 0, 0, time.UTC)
 	store := NewPluginState(DefaultConfig())

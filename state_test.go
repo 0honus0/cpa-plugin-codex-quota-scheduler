@@ -231,6 +231,25 @@ func TestFutureRetryPreventsNeverRefreshedDue(t *testing.T) {
 	}
 }
 
+func TestCircuitProbeControlsRefreshDue(t *testing.T) {
+	now := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
+	cfg := DefaultConfig()
+	account := AccountState{
+		AuthID:   "auth-1",
+		Provider: "codex",
+		Circuit: CircuitBreakerState{
+			State:       CircuitStateOpen,
+			NextProbeAt: now.Add(2 * time.Minute),
+		},
+	}
+	if due, reason := accountRefreshDue(account, cfg, now); due || reason != "circuit_wait" {
+		t.Fatalf("accountRefreshDue before probe = %t, %q; want false circuit_wait", due, reason)
+	}
+	if due, reason := accountRefreshDue(account, cfg, now.Add(2*time.Minute)); !due || reason != "circuit_probe_due" {
+		t.Fatalf("accountRefreshDue at probe = %t, %q; want true circuit_probe_due", due, reason)
+	}
+}
+
 func TestRecordRefreshAuthFailureStopsRetry(t *testing.T) {
 	now := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
 	store := NewPluginState(DefaultConfig())
