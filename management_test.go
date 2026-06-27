@@ -343,12 +343,12 @@ func TestStatusHTMLUsesResourceActionsModalProgressAndLogs(t *testing.T) {
 	}
 	html := string(resp.Body)
 	lower := strings.ToLower(html)
-	for _, want := range []string{"quota-bar", "editDialog", "logList", "openEdit", "exportLogs", "codex-quota-scheduler-logs.json", "maxLogEntries", "logRetention", "refreshOneQuota", "schedulePageRefresh", "MANAGEMENT_BASE", "/v0/management/plugins/codex-quota-scheduler"} {
+	for _, want := range []string{"quota-bar", "editDialog", "logList", "openEdit", "exportLogs", "codex-quota-scheduler-logs.json", "maxLogEntries", "logRetention", "refreshOneQuota", "schedulePageRefresh", "RESOURCE_ENDPOINT", "/v0/resource/plugins/codex-quota-scheduler/status", "requestPlugin(action,options)", "localeSelect", "TRANSLATIONS", "codex-quota-scheduler-locale-v1", "Scheduler Settings", "Account Queue", "INLINE_TRANSLATIONS", "Reset credits", "Refresh Quota"} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("html missing marker %q: %s", want, html)
 		}
 	}
-	for _, forbidden := range []string{"managementKey", "missing management key", "details class=\"editor\"", "action_token"} {
+	for _, forbidden := range []string{"managementKey", "missing management key", "details class=\"editor\"", "action_token", "MANAGEMENT_BASE", "/v0/management/plugins/codex-quota-scheduler"} {
 		if strings.Contains(html, forbidden) {
 			t.Fatalf("html still contains removed marker %q: %s", forbidden, html)
 		}
@@ -540,37 +540,38 @@ func TestManagementSettingsEndpointDoesNotRequireManagementKey(t *testing.T) {
 	}
 }
 
-func TestResourceMutationRoutesAreReadOnly(t *testing.T) {
+func TestResourceRoutesServePluginPageEndpoints(t *testing.T) {
 	store := NewPluginState(DefaultConfig())
 	resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
 		Method: http.MethodGet,
-		Path:   "/v0/resource/plugins/codex-quota-scheduler/settings",
+		Path:   "/v0/resource/plugins/codex-quota-scheduler/status",
 		Query: url.Values{
-			"save":           []string{"1"},
-			"handle_enabled": []string{"false"},
+			"action":  []string{"settings"},
+			"payload": []string{`{"handle_enabled":false,"monthly_mode":"priority","quota_refresh_interval":"45m","stale_after":"6h","enable_usage_feedback":false,"max_refresh_concurrency":2,"max_log_entries":30,"log_retention":"4h"}`},
 		},
 	}, time.Now())
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusNotFound, resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("settings StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, resp.Body)
 	}
-	if !store.Config().HandleEnabled {
-		t.Fatalf("resource mutation changed config: %#v", store.Config())
+	if store.Config().HandleEnabled || store.Config().MonthlyMode != MonthlyModePriority {
+		t.Fatalf("resource settings did not update config: %#v", store.Config())
 	}
-	for _, path := range []string{
-		"/v0/resource/plugins/codex-quota-scheduler/logs",
-		"/v0/resource/plugins/codex-quota-scheduler/export",
+	for _, action := range []string{
+		"logs",
+		"export",
 	} {
 		resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
 			Method: http.MethodGet,
-			Path:   path,
+			Path:   "/v0/resource/plugins/codex-quota-scheduler/status",
+			Query:  url.Values{"action": []string{action}},
 		}, time.Now())
-		if resp.StatusCode != http.StatusNotFound {
-			t.Fatalf("%s StatusCode = %d, want %d; body=%s", path, resp.StatusCode, http.StatusNotFound, resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s StatusCode = %d, want %d; body=%s", action, resp.StatusCode, http.StatusOK, resp.Body)
 		}
 	}
 }
 
-func TestResourceStatusDoesNotExposeSensitiveSchedulerData(t *testing.T) {
+func TestResourceStatusRendersUsablePluginPage(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	store := NewPluginState(DefaultConfig())
 	store.SetAnnotations(AnnotationState{
@@ -589,13 +590,15 @@ func TestResourceStatusDoesNotExposeSensitiveSchedulerData(t *testing.T) {
 		t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, resp.Body)
 	}
 	body := string(resp.Body)
-	for _, forbidden := range []string{"auth-1", "secret alias", "private note", "private log", "scheduler.selected"} {
+	for _, forbidden := range []string{"window.location.replace", "http-equiv=\"refresh\"", "/v0/management/plugins/codex-quota-scheduler/status"} {
 		if strings.Contains(body, forbidden) {
-			t.Fatalf("resource status leaked %q: %s", forbidden, body)
+			t.Fatalf("resource status still depends on management redirect marker %q: %s", forbidden, body)
 		}
 	}
-	if !strings.Contains(body, "/v0/management/plugins/codex-quota-scheduler/status") {
-		t.Fatalf("resource status did not point to authenticated management page: %s", body)
+	for _, want := range []string{"secret alias", "private note", "private log", "logList", "RESOURCE_ENDPOINT", "/v0/resource/plugins/codex-quota-scheduler/status", "requestPlugin(action,options)"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("resource status missing usable plugin page marker %q: %s", want, body)
+		}
 	}
 }
 

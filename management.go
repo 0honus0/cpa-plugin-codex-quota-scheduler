@@ -138,13 +138,13 @@ func HandleManagementRequest(store *PluginState, req pluginapi.ManagementRequest
 
 	method := strings.ToUpper(req.Method)
 	path := normalizeManagementPath(req.Path)
-	if isResourcePath(req.Path) && !resourceReadOnlyAllowed(method, path) {
+	if isResourcePath(req.Path) && !resourceRouteAllowed(method, path) {
 		return jsonManagementResponse(http.StatusNotFound, map[string]string{"error": "not found"})
 	}
 	switch {
 	case method == http.MethodGet && path == "/status":
-		if isResourcePath(req.Path) {
-			return handleResourceStatusRedirect()
+		if resp, ok := handleResourceAction(store, req, now); ok {
+			return resp
 		}
 		return handleStatusRequest(store, req, now)
 	case method == http.MethodGet && path == "/settings":
@@ -180,15 +180,53 @@ func isResourcePath(path string) bool {
 	return path == "/v0/resource"+managementBasePath || strings.HasPrefix(path, "/v0/resource"+managementBasePath+"/")
 }
 
-func resourceReadOnlyAllowed(method, path string) bool {
-	if method != http.MethodGet {
-		return false
+func resourceRouteAllowed(method, path string) bool {
+	if method == http.MethodGet {
+		switch path {
+		case "/status":
+			return true
+		default:
+			return false
+		}
 	}
-	switch path {
-	case "/status":
-		return true
+	return false
+}
+
+func handleResourceAction(store *PluginState, req pluginapi.ManagementRequest, now time.Time) (pluginapi.ManagementResponse, bool) {
+	if !isResourcePath(req.Path) {
+		return pluginapi.ManagementResponse{}, false
+	}
+	action := strings.TrimSpace(req.Query.Get("action"))
+	if action == "" {
+		return pluginapi.ManagementResponse{}, false
+	}
+	payloadReq := req
+	payloadReq.Body = []byte(req.Query.Get("payload"))
+	switch action {
+	case "settings":
+		return handlePutSettings(store, payloadReq, now), true
+	case "refresh":
+		triggerRefreshSoon()
+		store.RecordLog("info", "ui.refresh_requested", "页面请求刷新额度", nil, now)
+		return jsonManagementResponse(http.StatusAccepted, map[string]bool{"ok": true}), true
+	case "refresh_account":
+		return handleRefreshAccountRequest(store, payloadReq, now), true
+	case "logs":
+		return jsonManagementResponse(http.StatusOK, map[string]any{"logs": store.Snapshot(now).Logs}), true
+	case "export":
+		return handleExportState(store, now), true
+	case "import":
+		return handleImportState(store, payloadReq.Body, now), true
+	case "annotations":
+		return jsonManagementResponse(http.StatusOK, store.Annotations()), true
+	case "annotations_replace":
+		return handlePutAnnotations(store, payloadReq), true
+	case "annotations_account":
+		return handlePatchAccountAnnotation(store, payloadReq, now), true
+	case "annotations_group":
+		return handlePatchGroupAnnotation(store, payloadReq, now), true
 	default:
-		return false
+		return jsonManagementResponse(http.StatusNotFound, map[string]string{"error": "not found"}), true
 	}
 }
 
@@ -542,14 +580,6 @@ func handleStatusRequest(store *PluginState, req pluginapi.ManagementRequest, no
 	}
 }
 
-func handleResourceStatusRedirect() pluginapi.ManagementResponse {
-	return pluginapi.ManagementResponse{
-		StatusCode: http.StatusOK,
-		Headers:    http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
-		Body:       []byte(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Codex 额度调度器</title><meta http-equiv="refresh" content="0;url=/v0/management/plugins/codex-quota-scheduler/status"><style>body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;display:grid;place-items:center;min-height:100vh;color:#1f2937;background:#f6f7f9}.box{background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:22px 24px;box-shadow:0 1px 2px rgba(15,23,42,.04)}a{color:#2563eb}</style></head><body><div class="box">正在进入已认证的插件管理页面... <a href="/v0/management/plugins/codex-quota-scheduler/status">立即打开</a></div><script>window.location.replace('/v0/management/plugins/codex-quota-scheduler/status');</script></body></html>`),
-	}
-}
-
 func syntheticStatusRequest(snapshot StateSnapshot) pluginapi.SchedulerPickRequest {
 	candidates := make([]pluginapi.SchedulerAuthCandidate, 0, len(snapshot.Accounts))
 	for _, account := range snapshot.Accounts {
@@ -793,25 +823,26 @@ var statusTemplateV2 = template.Must(template.New("status-v2").Funcs(template.Fu
 <body>
 <div class="shell">
 <aside class="sidebar">
-<div class="brand"><h1>Codex 额度调度器</h1><p>优化版 Fill First。配置、别名、分组、标签和备注由插件内部状态文件保存。</p></div>
-<div class="section"><h2>调度设置</h2>
-<label class="toggle"><span>启用调度接管</span><input id="handleEnabled" type="checkbox"></label>
-<label class="toggle"><span>失败反馈标记额度耗尽</span><input id="usageFeedback" type="checkbox"></label>
-<label class="field"><span>Monthly 模式</span><select id="monthlyMode"><option value="expiry_order">按到期时间排序</option><option value="priority">优先使用 Monthly</option></select></label>
-<label class="field"><span>额度刷新间隔</span><input id="refreshInterval" spellcheck="false"></label>
-<label class="field"><span>缓存过期判定</span><input id="staleAfter" spellcheck="false"></label>
-<label class="field"><span>最大并发刷新</span><input id="maxConcurrency" type="number" min="1" step="1"></label>
-<label class="field"><span>熔断失败阈值</span><input id="circuitFailureThreshold" type="number" min="1" step="1"></label>
-<label class="field"><span>熔断等待时间</span><input id="circuitOpenDuration" spellcheck="false"></label>
-<label class="field"><span>半开恢复成功次数</span><input id="circuitHalfOpenSuccessThreshold" type="number" min="1" step="1"></label>
-<label class="field"><span>最大日志条数</span><input id="maxLogEntries" type="number" min="1" step="1"></label>
-<label class="field"><span>日志保留时间</span><input id="logRetention" spellcheck="false"></label>
-<div class="actions"><button id="saveSettings" type="button">保存设置</button><button id="refreshQuota" type="button" class="secondary">刷新额度</button><button id="exportConfig" type="button" class="ghost">导出配置</button><button id="importConfig" type="button" class="ghost">导入配置</button><input id="importFile" type="file" accept="application/json,.json" hidden></div>
+<div class="brand"><h1 data-i18n="app.title">Codex 额度调度器</h1><p data-i18n="app.subtitle">优化版 Fill First。配置、别名、分组、标签和备注由插件内部状态文件保存。</p></div>
+<label class="field"><span data-i18n="app.language">界面语言</span><select id="localeSelect"><option value="zh-CN">中文</option><option value="en">English</option></select></label>
+<div class="section"><h2 data-i18n="settings.title">调度设置</h2>
+<label class="toggle"><span data-i18n="settings.handleEnabled">启用调度接管</span><input id="handleEnabled" type="checkbox"></label>
+<label class="toggle"><span data-i18n="settings.usageFeedback">失败反馈标记额度耗尽</span><input id="usageFeedback" type="checkbox"></label>
+<label class="field"><span data-i18n="settings.monthlyMode">Monthly 模式</span><select id="monthlyMode"><option value="expiry_order" data-i18n="settings.expiryOrder">按到期时间排序</option><option value="priority" data-i18n="settings.monthlyPriority">优先使用 Monthly</option></select></label>
+<label class="field"><span data-i18n="settings.refreshInterval">额度刷新间隔</span><input id="refreshInterval" spellcheck="false"></label>
+<label class="field"><span data-i18n="settings.staleAfter">缓存过期判定</span><input id="staleAfter" spellcheck="false"></label>
+<label class="field"><span data-i18n="settings.maxConcurrency">最大并发刷新</span><input id="maxConcurrency" type="number" min="1" step="1"></label>
+<label class="field"><span data-i18n="settings.circuitFailureThreshold">熔断失败阈值</span><input id="circuitFailureThreshold" type="number" min="1" step="1"></label>
+<label class="field"><span data-i18n="settings.circuitOpenDuration">熔断等待时间</span><input id="circuitOpenDuration" spellcheck="false"></label>
+<label class="field"><span data-i18n="settings.circuitHalfOpenSuccessThreshold">半开恢复成功次数</span><input id="circuitHalfOpenSuccessThreshold" type="number" min="1" step="1"></label>
+<label class="field"><span data-i18n="settings.maxLogEntries">最大日志条数</span><input id="maxLogEntries" type="number" min="1" step="1"></label>
+<label class="field"><span data-i18n="settings.logRetention">日志保留时间</span><input id="logRetention" spellcheck="false"></label>
+<div class="actions"><button id="saveSettings" type="button" data-i18n="actions.saveSettings">保存设置</button><button id="refreshQuota" type="button" class="secondary" data-i18n="actions.refreshQuota">刷新额度</button><button id="exportConfig" type="button" class="ghost" data-i18n="actions.exportConfig">导出配置</button><button id="importConfig" type="button" class="ghost" data-i18n="actions.importConfig">导入配置</button><input id="importFile" type="file" accept="application/json,.json" hidden></div>
 <div id="notice" class="notice" hidden></div>
 </div>
 </aside>
 <main class="main">
-<div class="toolbar"><div><h2>账号队列</h2><p>账号卡片按当前调度优先级排序。第一个可用账号就是下一次 Codex 请求会优先选择的账号。</p></div><div class="metrics"><span class="metric">下一账号：<code>{{if .NextAuthID}}{{.NextAuthID}}{{else}}暂无{{end}}</code></span><span class="metric">Monthly：{{if eq .MonthlyMode "priority"}}优先使用{{else}}按到期时间{{end}}</span><span class="metric">调度：{{if .HandleEnabled}}已启用{{else}}已关闭{{end}}</span><span class="metric">最近选择：<code>{{if .LastSelected}}{{.LastSelected}}{{else}}暂无{{end}}</code></span></div></div>
+<div class="toolbar"><div><h2 data-i18n="queue.title">账号队列</h2><p data-i18n="queue.description">账号卡片按当前调度优先级排序。第一个可用账号就是下一次 Codex 请求会优先选择的账号。</p></div><div class="metrics"><span class="metric"><span data-i18n="metrics.nextAccount">下一账号</span>：<code>{{if .NextAuthID}}{{.NextAuthID}}{{else}}暂无{{end}}</code></span><span class="metric">Monthly：{{if eq .MonthlyMode "priority"}}优先使用{{else}}按到期时间{{end}}</span><span class="metric"><span data-i18n="metrics.scheduler">调度</span>：{{if .HandleEnabled}}已启用{{else}}已关闭{{end}}</span><span class="metric"><span data-i18n="metrics.lastSelected">最近选择</span>：<code>{{if .LastSelected}}{{.LastSelected}}{{else}}暂无{{end}}</code></span></div></div>
 <section class="queue" aria-label="账号卡片">{{range .Accounts}}<article class="card {{if and $.NextAuthID (eq $.NextAuthID .AuthID)}}next{{end}}" data-auth-id="{{.AuthID}}">
 <div class="cardTop"><div class="identity"><div class="titleLine"><span class="title">{{if .Alias}}{{.Alias}}{{else}}{{.AuthID}}{{end}}</span>{{if .Group}}<span class="groupPill">{{.Group}}</span>{{end}}</div><div class="sub"><code>{{.AuthID}}</code></div>{{if .Tags}}<div class="metaLine">{{range .Tags}}<span class="chip">{{.}}</span>{{end}}</div>{{end}}</div><span class="rank">#{{.Rank}}</span></div>
 <div class="badges">{{if and $.NextAuthID (eq $.NextAuthID .AuthID)}}<span class="badge next">下一优先</span>{{end}}{{if .Available}}<span class="badge ok">可用</span>{{else}}<span class="badge no">{{.UnavailableReason}}</span>{{end}}<span class="badge">{{if eq .Family "weekly"}}Weekly{{else if eq .Family "monthly"}}Monthly{{else}}未知类型{{end}}</span><span class="badge">CPA 优先级 {{.CPAPriority}}</span><span class="badge">熔断：{{.Circuit.Label}}</span></div>
@@ -820,42 +851,79 @@ var statusTemplateV2 = template.Must(template.New("status-v2").Funcs(template.Fu
 {{if or .Notes .GroupNotes}}<div class="noteBlock">{{if .Notes}}<div>账号备注：{{.Notes}}</div>{{end}}{{if .GroupNotes}}<div>分组备注：{{.GroupNotes}}</div>{{end}}</div>{{end}}
 <div class="cardActions"><button type="button" class="ghost refreshOne" data-auth-id="{{.AuthID}}">刷新额度</button><button type="button" class="secondary openEdit" data-auth-id="{{.AuthID}}">编辑</button></div>
 </article>{{else}}<div class="empty">暂无账号数据。等待额度刷新后，这里会显示账号卡片。</div>{{end}}</section>
-<section class="logs"><div class="logsHeader"><h2>调度日志</h2><div class="actions"><button id="refreshLogs" type="button" class="ghost">刷新日志</button><button id="exportLogs" type="button" class="ghost">导出日志</button></div></div><div id="logList" class="logList"></div></section>
+<section class="logs"><div class="logsHeader"><h2 data-i18n="logs.title">调度日志</h2><div class="actions"><button id="refreshLogs" type="button" class="ghost" data-i18n="actions.refreshLogs">刷新日志</button><button id="exportLogs" type="button" class="ghost" data-i18n="actions.exportLogs">导出日志</button></div></div><div id="logList" class="logList"></div></section>
 </main>
 </div>
-<dialog id="editDialog"><form method="dialog" class="dialogBody"><div class="dialogHead"><div><h2>编辑账号</h2><p id="editAuthID"></p></div><button type="button" id="closeDialog" class="ghost">关闭</button></div><div class="dialogGrid"><label class="field"><span>别名</span><input id="editAlias"></label><label class="field"><span>分组 ID</span><input id="editGroupID" placeholder="team-a"></label><label class="field"><span>分组名称</span><input id="editGroupName"></label><label class="field"><span>标签</span><input id="editTags" placeholder="team, paid"></label><label class="field wide"><span>账号备注</span><textarea id="editNotes"></textarea></label><label class="field wide"><span>分组备注</span><textarea id="editGroupNotes"></textarea></label></div><div class="dialogActions"><button type="button" id="saveAccount" class="secondary">保存账号</button><button type="button" id="cancelEdit" class="ghost">取消</button></div></form></dialog>
+<dialog id="editDialog"><form method="dialog" class="dialogBody"><div class="dialogHead"><div><h2 data-i18n="edit.title">编辑账号</h2><p id="editAuthID"></p></div><button type="button" id="closeDialog" class="ghost" data-i18n="actions.close">关闭</button></div><div class="dialogGrid"><label class="field"><span data-i18n="edit.alias">别名</span><input id="editAlias"></label><label class="field"><span data-i18n="edit.groupID">分组 ID</span><input id="editGroupID" placeholder="team-a"></label><label class="field"><span data-i18n="edit.groupName">分组名称</span><input id="editGroupName"></label><label class="field"><span data-i18n="edit.tags">标签</span><input id="editTags" placeholder="team, paid"></label><label class="field wide"><span data-i18n="edit.notes">账号备注</span><textarea id="editNotes"></textarea></label><label class="field wide"><span data-i18n="edit.groupNotes">分组备注</span><textarea id="editGroupNotes"></textarea></label></div><div class="dialogActions"><button type="button" id="saveAccount" class="secondary" data-i18n="actions.saveAccount">保存账号</button><button type="button" id="cancelEdit" class="ghost" data-i18n="actions.cancel">取消</button></div></form></dialog>
 <script>
 const STATUS={{json .}};
-const RESOURCE_BASE='/v0/resource/plugins/codex-quota-scheduler';
-const MANAGEMENT_BASE='/v0/management/plugins/codex-quota-scheduler';
+const RESOURCE_ENDPOINT='/v0/resource/plugins/codex-quota-scheduler/status';
+const LOCALE_STORAGE_KEY='codex-quota-scheduler-locale-v1';
+const TRANSLATIONS={
+  en:{
+    'app.title':'Codex Quota Scheduler','app.subtitle':'Optimized Fill First scheduling. Configuration, aliases, groups, tags, and notes are saved in the plugin state file.','app.language':'Language',
+    'settings.title':'Scheduler Settings','settings.handleEnabled':'Enable scheduler takeover','settings.usageFeedback':'Mark quota exhausted from failure feedback','settings.monthlyMode':'Monthly mode','settings.expiryOrder':'Sort by expiry time','settings.monthlyPriority':'Prefer Monthly','settings.refreshInterval':'Quota refresh interval','settings.staleAfter':'Stale cache threshold','settings.maxConcurrency':'Max refresh concurrency','settings.circuitFailureThreshold':'Circuit failure threshold','settings.circuitOpenDuration':'Circuit open duration','settings.circuitHalfOpenSuccessThreshold':'Half-open recovery successes','settings.maxLogEntries':'Max log entries','settings.logRetention':'Log retention',
+    'actions.saveSettings':'Save Settings','actions.refreshQuota':'Refresh Quota','actions.exportConfig':'Export Config','actions.importConfig':'Import Config','actions.refreshLogs':'Refresh Logs','actions.exportLogs':'Export Logs','actions.close':'Close','actions.saveAccount':'Save Account','actions.cancel':'Cancel',
+    'queue.title':'Account Queue','queue.description':'Account cards are sorted by the current scheduler priority. The first available account is preferred for the next Codex request.','metrics.nextAccount':'Next account','metrics.scheduler':'Scheduler','metrics.lastSelected':'Last selected',
+    'logs.title':'Scheduler Logs','logs.empty':'No logs yet. Send a request or refresh quota manually to show records here.',
+    'edit.title':'Edit Account','edit.alias':'Alias','edit.groupID':'Group ID','edit.groupName':'Group name','edit.tags':'Tags','edit.notes':'Account notes','edit.groupNotes':'Group notes',
+    'notice.settingsSaved':'Settings saved. The page will refresh shortly.','notice.refreshRequested':'Background quota refresh requested. The page will refresh shortly.','notice.accountSaved':'Account card saved. The page will refresh shortly.','notice.refreshOneRequested':'Quota refresh requested for this account. The page will refresh shortly.','notice.configExported':'Configuration exported.','notice.logsExported':'Logs exported.','notice.configImported':'Configuration imported. The page will refresh shortly.','error.requestFailed':'Request failed: {status}',
+    'log.ui.refresh_requested':'UI requested quota refresh','log.ui.settings_saved':'UI saved scheduler settings','log.ui.refresh_one_requested':'UI requested one account quota refresh','log.ui.config_exported':'UI exported plugin configuration','log.ui.config_imported':'UI imported plugin configuration','log.ui.account_saved':'UI saved account card','log.ui.group_saved':'UI saved account group','log.scheduler.selected':'Request handled by plugin'
+  },
+  'zh-CN':{
+    'app.title':'Codex 额度调度器','app.subtitle':'优化版 Fill First。配置、别名、分组、标签和备注由插件内部状态文件保存。','app.language':'界面语言',
+    'settings.title':'调度设置','settings.handleEnabled':'启用调度接管','settings.usageFeedback':'失败反馈标记额度耗尽','settings.monthlyMode':'Monthly 模式','settings.expiryOrder':'按到期时间排序','settings.monthlyPriority':'优先使用 Monthly','settings.refreshInterval':'额度刷新间隔','settings.staleAfter':'缓存过期判定','settings.maxConcurrency':'最大并发刷新','settings.circuitFailureThreshold':'熔断失败阈值','settings.circuitOpenDuration':'熔断等待时间','settings.circuitHalfOpenSuccessThreshold':'半开恢复成功次数','settings.maxLogEntries':'最大日志条数','settings.logRetention':'日志保留时间',
+    'actions.saveSettings':'保存设置','actions.refreshQuota':'刷新额度','actions.exportConfig':'导出配置','actions.importConfig':'导入配置','actions.refreshLogs':'刷新日志','actions.exportLogs':'导出日志','actions.close':'关闭','actions.saveAccount':'保存账号','actions.cancel':'取消',
+    'queue.title':'账号队列','queue.description':'账号卡片按当前调度优先级排序。第一个可用账号就是下一次 Codex 请求会优先选择的账号。','metrics.nextAccount':'下一账号','metrics.scheduler':'调度','metrics.lastSelected':'最近选择',
+    'logs.title':'调度日志','logs.empty':'暂无日志。发起请求或手动刷新额度后，这里会显示记录。',
+    'edit.title':'编辑账号','edit.alias':'别名','edit.groupID':'分组 ID','edit.groupName':'分组名称','edit.tags':'标签','edit.notes':'账号备注','edit.groupNotes':'分组备注',
+    'notice.settingsSaved':'设置已保存，页面即将自动刷新。','notice.refreshRequested':'已请求后台刷新额度，页面稍后自动刷新。','notice.accountSaved':'账号卡片已保存，页面即将自动刷新。','notice.refreshOneRequested':'已请求刷新该账号额度，页面稍后自动刷新。','notice.configExported':'配置已导出。','notice.logsExported':'日志已导出。','notice.configImported':'配置已导入，页面即将自动刷新。','error.requestFailed':'请求失败：{status}'
+  }
+};
 const notice=document.getElementById('notice');
 const editDialog=document.getElementById('editDialog');
+const localeSelect=document.getElementById('localeSelect');
 const accountsByID=new Map((STATUS.accounts||[]).map((account)=>[account.auth_id,account]));
 const groupsByID=new Map();
 for(const group of STATUS.groups||[]){if(group.id){groupsByID.set(group.id,{name:group.name||'',notes:group.notes||''})}}
 for(const account of STATUS.accounts||[]){if(account.group_id){groupsByID.set(account.group_id,{name:account.group||'',notes:account.group_notes||''})}}
 let editingAuthID='';
+let currentLocale=detectLocale();
+const INLINE_TRANSLATIONS=[
+  ['下一优先','Next preferred'],['可用','Available'],['未知类型','unknown type'],['CPA 优先级','CPA priority'],['熔断：','Circuit: '],['熔断','Circuit'],['全开','closed'],['半开','half-open'],
+  ['按到期时间','by expiry time'],['优先使用','prefer Monthly'],['已启用','enabled'],['已关闭','disabled'],['暂无','None'],
+  ['5 小时额度','5-hour quota'],['周额度','Weekly quota'],['月额度','Monthly quota'],['剩余 ','Remaining '],['5 小时重置：','5-hour reset: '],['长额度重置：','Long quota reset: '],
+  ['缓存时间','Cache age'],['熔断计数','Circuit count'],['失败','Failures'],['成功','Successes'],['主动重置','Reset credits'],[' 次',' times'],['累计','total'],['有效期','expires'],
+  ['账号备注：','Account notes: '],['分组备注：','Group notes: '],['刷新额度','Refresh Quota'],['编辑','Edit'],['Monthly：','Monthly: '],['调度：','Scheduler: '],['下一账号：','Next account: '],['最近选择：','Last selected: ']
+];
+function normalizeLocale(raw){return String(raw||'').toLowerCase().startsWith('zh')?'zh-CN':'en'}
+function detectLocale(){try{const saved=window.localStorage.getItem(LOCALE_STORAGE_KEY);if(saved)return normalizeLocale(saved)}catch(error){}const languages=navigator.languages&&navigator.languages.length?navigator.languages:[navigator.language];for(const language of languages){if(String(language||'').toLowerCase().startsWith('zh'))return'zh-CN'}return'en'}
+function t(key,params){const dictionary=TRANSLATIONS[currentLocale]||TRANSLATIONS.en;let message=dictionary[key]||TRANSLATIONS.en[key]||key;for(const name of Object.keys(params||{})){message=message.split('{'+name+'}').join(String(params[name]))}return message}
+function translateInlineText(raw){let text=String(raw||'');if(currentLocale!=='en')return text;for(const pair of INLINE_TRANSLATIONS){text=text.split(pair[0]).join(pair[1])}return text}
+function applyInlineTranslations(){const nodes=document.querySelectorAll('.badge,.quota-title,.kv span,.noteBlock div,.cardActions button,.empty');for(const node of nodes){if(node.children.length>0)continue;if(!node.dataset.rawText)node.dataset.rawText=node.textContent;node.textContent=translateInlineText(node.dataset.rawText)}formatLocalTimes()}
+function applyLocale(){document.documentElement.lang=currentLocale;document.title=t('app.title');localeSelect.value=currentLocale;for(const node of document.querySelectorAll('[data-i18n]')){node.textContent=t(node.dataset.i18n)}applyInlineTranslations();renderLogs(STATUS.logs||[])}
+function changeLocale(locale){currentLocale=normalizeLocale(locale);try{window.localStorage.setItem(LOCALE_STORAGE_KEY,currentLocale)}catch(error){}applyLocale()}
 function showNotice(text,isError){notice.hidden=false;notice.textContent=text;notice.className='notice'+(isError?' error':'')}
 function schedulePageRefresh(delay){window.setTimeout(()=>window.location.reload(),delay||900)}
 async function readJSON(resp){const text=await resp.text();if(!text)return{};try{return JSON.parse(text)}catch{return{error:text}}}
-async function requestResource(path,params){const query=new URLSearchParams(params||{});const suffix=query.toString()?path+'?'+query.toString():path;const resp=await fetch(RESOURCE_BASE+suffix);const data=await readJSON(resp);if(!resp.ok)throw new Error(data.error||data.message||('请求失败：'+resp.status));return data}
-async function requestManagement(path,options){const resp=await fetch(MANAGEMENT_BASE+path,options||{});const data=await readJSON(resp);if(!resp.ok)throw new Error(data.error||data.message||('请求失败：'+resp.status));return data}
-function jsonRequest(method,payload){return{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}}
+async function requestPlugin(action,options){const params=new URLSearchParams({action});if(options&&Object.prototype.hasOwnProperty.call(options,'payload')){const payload=typeof options.payload==='string'?options.payload:JSON.stringify(options.payload);params.set('payload',payload)}const resp=await fetch(RESOURCE_ENDPOINT+'?'+params.toString());const data=await readJSON(resp);if(!resp.ok)throw new Error(data.error||data.message||t('error.requestFailed',{status:resp.status}));return data}
 function fillSettings(){const s=STATUS.settings||{};document.getElementById('handleEnabled').checked=s.handle_enabled!==false;document.getElementById('usageFeedback').checked=s.enable_usage_feedback!==false;document.getElementById('monthlyMode').value=s.monthly_mode||'expiry_order';document.getElementById('refreshInterval').value=s.quota_refresh_interval||'30m0s';document.getElementById('staleAfter').value=s.stale_after||'5h0m0s';document.getElementById('maxConcurrency').value=s.max_refresh_concurrency||1;document.getElementById('circuitFailureThreshold').value=s.circuit_failure_threshold||3;document.getElementById('circuitOpenDuration').value=s.circuit_open_duration||'10m0s';document.getElementById('circuitHalfOpenSuccessThreshold').value=s.circuit_half_open_success_threshold||1;document.getElementById('maxLogEntries').value=s.max_log_entries||2000;document.getElementById('logRetention').value=s.log_retention||'24h0m0s'}
-async function saveSettings(){try{const payload={handle_enabled:document.getElementById('handleEnabled').checked,enable_usage_feedback:document.getElementById('usageFeedback').checked,monthly_mode:document.getElementById('monthlyMode').value,quota_refresh_interval:document.getElementById('refreshInterval').value.trim(),stale_after:document.getElementById('staleAfter').value.trim(),max_refresh_concurrency:Number.parseInt(document.getElementById('maxConcurrency').value,10)||1,circuit_failure_threshold:Number.parseInt(document.getElementById('circuitFailureThreshold').value,10)||3,circuit_open_duration:document.getElementById('circuitOpenDuration').value.trim(),circuit_half_open_success_threshold:Number.parseInt(document.getElementById('circuitHalfOpenSuccessThreshold').value,10)||1,max_log_entries:Number.parseInt(document.getElementById('maxLogEntries').value,10)||2000,log_retention:document.getElementById('logRetention').value.trim()};await requestManagement('/settings',jsonRequest('PUT',payload));showNotice('设置已保存，页面即将自动刷新。',false);await refreshLogs();schedulePageRefresh(700)}catch(error){showNotice(error.message||String(error),true)}}
-async function refreshQuota(){try{await requestManagement('/refresh',{method:'POST'});showNotice('已请求后台刷新额度，页面稍后自动刷新。',false);await refreshLogs();schedulePageRefresh(1800)}catch(error){showNotice(error.message||String(error),true)}}
+async function saveSettings(){try{const payload={handle_enabled:document.getElementById('handleEnabled').checked,enable_usage_feedback:document.getElementById('usageFeedback').checked,monthly_mode:document.getElementById('monthlyMode').value,quota_refresh_interval:document.getElementById('refreshInterval').value.trim(),stale_after:document.getElementById('staleAfter').value.trim(),max_refresh_concurrency:Number.parseInt(document.getElementById('maxConcurrency').value,10)||1,circuit_failure_threshold:Number.parseInt(document.getElementById('circuitFailureThreshold').value,10)||3,circuit_open_duration:document.getElementById('circuitOpenDuration').value.trim(),circuit_half_open_success_threshold:Number.parseInt(document.getElementById('circuitHalfOpenSuccessThreshold').value,10)||1,max_log_entries:Number.parseInt(document.getElementById('maxLogEntries').value,10)||2000,log_retention:document.getElementById('logRetention').value.trim()};await requestPlugin('settings',{payload});showNotice(t('notice.settingsSaved'),false);await refreshLogs();schedulePageRefresh(700)}catch(error){showNotice(error.message||String(error),true)}}
+async function refreshQuota(){try{await requestPlugin('refresh');showNotice(t('notice.refreshRequested'),false);await refreshLogs();schedulePageRefresh(1800)}catch(error){showNotice(error.message||String(error),true)}}
 function splitTags(text){return text.split(',').map((item)=>item.trim()).filter(Boolean)}
 function openEdit(authID){const account=accountsByID.get(authID)||{};editingAuthID=authID;document.getElementById('editAuthID').textContent=authID;document.getElementById('editAlias').value=account.alias||'';document.getElementById('editNotes').value=account.notes||'';document.getElementById('editGroupID').value=account.group_id||'';document.getElementById('editGroupName').value=account.group||'';document.getElementById('editGroupNotes').value=account.group_notes||'';document.getElementById('editTags').value=(account.tags||[]).join(', ');editDialog.showModal()}
 function fillGroupFromID(){const groupID=document.getElementById('editGroupID').value.trim();const group=groupsByID.get(groupID);if(!group)return;if(!document.getElementById('editGroupName').value.trim())document.getElementById('editGroupName').value=group.name||'';if(!document.getElementById('editGroupNotes').value.trim())document.getElementById('editGroupNotes').value=group.notes||''}
-async function saveAccountModal(){if(!editingAuthID)return;const groupID=document.getElementById('editGroupID').value.trim();const groupName=document.getElementById('editGroupName').value.trim();const groupNotes=document.getElementById('editGroupNotes').value.trim();try{await requestManagement('/annotations/account',jsonRequest('PATCH',{auth_id:editingAuthID,alias:document.getElementById('editAlias').value,notes:document.getElementById('editNotes').value,tags:splitTags(document.getElementById('editTags').value),group_id:groupID}));const existingGroup=groupsByID.get(groupID)||{name:'',notes:''};if(groupID&&(groupName!==existingGroup.name||groupNotes!==existingGroup.notes)){await requestManagement('/annotations/group',jsonRequest('PATCH',{id:groupID,name:groupName,notes:groupNotes}));groupsByID.set(groupID,{name:groupName,notes:groupNotes})}showNotice('账号卡片已保存，页面即将自动刷新。',false);editDialog.close();await refreshLogs();schedulePageRefresh(700)}catch(error){showNotice(error.message||String(error),true)}}
-async function refreshOneQuota(authID){if(!authID)return;try{await requestManagement('/refresh/account',jsonRequest('POST',{auth_id:authID}));showNotice('已请求刷新该账号额度，页面稍后自动刷新。',false);await refreshLogs();schedulePageRefresh(1800)}catch(error){showNotice(error.message||String(error),true)}}
-async function exportConfig(){try{const data=await requestManagement('/export');const blob=new Blob([JSON.stringify(data,null,2)+'\n'],{type:'application/json'});const link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download='codex-quota-scheduler-config.json';link.click();URL.revokeObjectURL(link.href);showNotice('配置已导出。',false);await refreshLogs()}catch(error){showNotice(error.message||String(error),true)}}
-async function exportLogs(){try{const data=await requestManagement('/logs');const payload={plugin_id:STATUS.plugin_id||'codex-quota-scheduler',exported_at:new Date().toISOString(),logs:data.logs||[]};const blob=new Blob([JSON.stringify(payload,null,2)+'\n'],{type:'application/json'});const link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download='codex-quota-scheduler-logs.json';link.click();URL.revokeObjectURL(link.href);showNotice('日志已导出。',false)}catch(error){showNotice(error.message||String(error),true)}}
-async function importConfigFile(file){if(!file)return;try{const text=await file.text();await requestManagement('/import',{method:'POST',headers:{'Content-Type':'application/json'},body:text});showNotice('配置已导入，页面即将自动刷新。',false);await refreshLogs();schedulePageRefresh(700)}catch(error){showNotice(error.message||String(error),true)}}
+async function saveAccountModal(){if(!editingAuthID)return;const groupID=document.getElementById('editGroupID').value.trim();const groupName=document.getElementById('editGroupName').value.trim();const groupNotes=document.getElementById('editGroupNotes').value.trim();try{await requestPlugin('annotations_account',{payload:{auth_id:editingAuthID,alias:document.getElementById('editAlias').value,notes:document.getElementById('editNotes').value,tags:splitTags(document.getElementById('editTags').value),group_id:groupID}});const existingGroup=groupsByID.get(groupID)||{name:'',notes:''};if(groupID&&(groupName!==existingGroup.name||groupNotes!==existingGroup.notes)){await requestPlugin('annotations_group',{payload:{id:groupID,name:groupName,notes:groupNotes}});groupsByID.set(groupID,{name:groupName,notes:groupNotes})}showNotice(t('notice.accountSaved'),false);editDialog.close();await refreshLogs();schedulePageRefresh(700)}catch(error){showNotice(error.message||String(error),true)}}
+async function refreshOneQuota(authID){if(!authID)return;try{await requestPlugin('refresh_account',{payload:{auth_id:authID}});showNotice(t('notice.refreshOneRequested'),false);await refreshLogs();schedulePageRefresh(1800)}catch(error){showNotice(error.message||String(error),true)}}
+async function exportConfig(){try{const data=await requestPlugin('export');const blob=new Blob([JSON.stringify(data,null,2)+'\n'],{type:'application/json'});const link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download='codex-quota-scheduler-config.json';link.click();URL.revokeObjectURL(link.href);showNotice(t('notice.configExported'),false);await refreshLogs()}catch(error){showNotice(error.message||String(error),true)}}
+async function exportLogs(){try{const data=await requestPlugin('logs');const payload={plugin_id:STATUS.plugin_id||'codex-quota-scheduler',exported_at:new Date().toISOString(),logs:data.logs||[]};const blob=new Blob([JSON.stringify(payload,null,2)+'\n'],{type:'application/json'});const link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download='codex-quota-scheduler-logs.json';link.click();URL.revokeObjectURL(link.href);showNotice(t('notice.logsExported'),false)}catch(error){showNotice(error.message||String(error),true)}}
+async function importConfigFile(file){if(!file)return;try{const text=await file.text();await requestPlugin('import',{payload:text});showNotice(t('notice.configImported'),false);await refreshLogs();schedulePageRefresh(700)}catch(error){showNotice(error.message||String(error),true)}}
 function formatLogTime(value){if(!value)return'';const date=new Date(value);if(Number.isNaN(date.getTime()))return value;return date.toLocaleString('zh-CN',{hour12:false})}
 function formatLocalTimes(){for(const node of document.querySelectorAll('.localTime[data-time]')){const raw=node.dataset.time||'';const date=new Date(raw);if(!Number.isNaN(date.getTime()))node.textContent=date.toLocaleString('zh-CN',{hour12:false})}}
-function renderLogs(logs){const list=document.getElementById('logList');list.replaceChildren();const items=(logs||[]).slice().reverse().slice(0,80);if(items.length===0){const empty=document.createElement('div');empty.className='empty';empty.textContent='暂无日志。发起请求或手动刷新额度后，这里会显示记录。';list.appendChild(empty);return}for(const log of items){const row=document.createElement('div');row.className='logItem '+(log.level||'info');const meta=document.createElement('div');meta.className='logMeta';meta.textContent=[formatLogTime(log.time),log.event].filter(Boolean).join(' · ');const msg=document.createElement('div');msg.className='logMsg';const fields=log.fields?Object.entries(log.fields).map(([key,value])=>key+'='+value).join('，'):'';msg.textContent=fields?(log.message+'（'+fields+'）'):log.message;row.append(meta,msg);list.appendChild(row)}}
-async function refreshLogs(){try{const data=await requestManagement('/logs');renderLogs(data.logs||[])}catch(error){showNotice(error.message||String(error),true)}}
+function localizedLogMessage(log){if(currentLocale!=='en')return log.message||'';return t('log.'+(log.event||''))||translateInlineText(log.message||'')}
+function renderLogs(logs){const list=document.getElementById('logList');list.replaceChildren();const items=(logs||[]).slice().reverse().slice(0,80);if(items.length===0){const empty=document.createElement('div');empty.className='empty';empty.textContent=t('logs.empty');list.appendChild(empty);return}for(const log of items){const row=document.createElement('div');row.className='logItem '+(log.level||'info');const meta=document.createElement('div');meta.className='logMeta';meta.textContent=[formatLogTime(log.time),log.event].filter(Boolean).join(' · ');const msg=document.createElement('div');msg.className='logMsg';const fields=log.fields?Object.entries(log.fields).map(([key,value])=>key+'='+value).join(currentLocale==='en'?', ':'，'):'';msg.textContent=fields?(localizedLogMessage(log)+'（'+fields+'）'):localizedLogMessage(log);row.append(meta,msg);list.appendChild(row)}}
+async function refreshLogs(){try{const data=await requestPlugin('logs');renderLogs(data.logs||[])}catch(error){showNotice(error.message||String(error),true)}}
+localeSelect.addEventListener('change',()=>changeLocale(localeSelect.value));
 document.getElementById('saveSettings').addEventListener('click',saveSettings);
 document.getElementById('refreshQuota').addEventListener('click',refreshQuota);
 document.getElementById('refreshLogs').addEventListener('click',refreshLogs);
@@ -872,7 +940,7 @@ for(const button of document.querySelectorAll('.openEdit')){button.addEventListe
 for(const button of document.querySelectorAll('.refreshOne')){button.addEventListener('click',()=>refreshOneQuota(button.dataset.authId||''))}
 fillSettings();
 formatLocalTimes();
-renderLogs(STATUS.logs||[]);
+applyLocale();
 </script>
 </body>
 </html>`))
