@@ -382,6 +382,25 @@ func TestRefreshDueOnceDoesNothingOutsideActiveWindow(t *testing.T) {
 	}
 }
 
+func TestRefreshOnceRecordsCodexAuthScanCount(t *testing.T) {
+	now := time.Date(2026, 6, 29, 9, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{
+			{ID: "openai-1", AuthIndex: "idx-openai", Provider: "openai"},
+		},
+	}
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+
+	if err := refresher.RefreshOnce(); err != nil {
+		t.Fatalf("RefreshOnce returned error: %v", err)
+	}
+	snapshot := store.Snapshot(now)
+	if snapshot.CodexAuthCount != 0 || !snapshot.LastAuthScanAt.Equal(now) {
+		t.Fatalf("auth scan = count %d at %s, want 0 at %s", snapshot.CodexAuthCount, snapshot.LastAuthScanAt, now)
+	}
+}
+
 func TestStartDoesNotPollAllAccountsWhileIdle(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.QuotaRefreshInterval = 20 * time.Millisecond
@@ -397,6 +416,138 @@ func TestStartDoesNotPollAllAccountsWhileIdle(t *testing.T) {
 
 	if got := host.listCallCount(); got != 0 {
 		t.Fatalf("ListAuths calls = %d, want 0 while idle", got)
+	}
+}
+
+func TestStartWakesAtRetryDueBeforeRefreshInterval(t *testing.T) {
+	now := time.Now()
+	cfg := DefaultConfig()
+	cfg.QuotaRefreshInterval = time.Hour
+	cfg.RefreshRetryDelays = []time.Duration{20 * time.Millisecond}
+	store := NewPluginState(cfg)
+	store.RecordCodexActivity(now)
+	store.RecordRefreshFailure("auth-1", "idx-1", RefreshFailureTransient, "temporary failure", now)
+
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{
+			ID: "auth-1", AuthIndex: "idx-1", Provider: "codex",
+		}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"access-1","id_token":"` + idToken + `"}`),
+		},
+		httpBody: []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+	}
+	refresher := NewQuotaRefresher(host, store, time.Now)
+
+	refresher.Start()
+	defer refresher.Stop()
+
+	if !waitUntil(500*time.Millisecond, func() bool { return host.listCallCount() > 0 }) {
+		t.Fatalf("ListAuths calls = %d, want retry wake before quota_refresh_interval", host.listCallCount())
+	}
+}
+
+func TestStartRecomputesDelayAfterAsyncRefreshSchedulesRetry(t *testing.T) {
+	now := time.Now()
+	cfg := DefaultConfig()
+	cfg.QuotaRefreshInterval = time.Hour
+	cfg.RefreshRetryDelays = []time.Duration{20 * time.Millisecond}
+	store := NewPluginState(cfg)
+	store.RecordCodexActivity(now)
+
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{
+			ID: "auth-1", AuthIndex: "idx-1", Provider: "codex",
+		}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"access-1","id_token":"` + idToken + `"}`),
+		},
+		httpStatus: http.StatusForbidden,
+		httpBody:   []byte(`{"error":"temporary"}`),
+	}
+	refresher := NewQuotaRefresher(host, store, time.Now)
+	refresher.Start()
+	defer refresher.Stop()
+
+	time.Sleep(30 * time.Millisecond)
+	if got := host.listCallCount(); got != 0 {
+		t.Fatalf("ListAuths calls = %d, want loop sleeping on quota_refresh_interval before async refresh", got)
+	}
+
+	refresher.RefreshDueCandidatesSoon(pluginapi.SchedulerPickRequest{
+		Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "auth-1", Provider: "codex", Priority: 10}},
+	})
+	if !waitUntil(700*time.Millisecond, func() bool { return host.listCallCount() >= 2 }) {
+		t.Fatalf("ListAuths calls = %d, want async refresh to wake loop for scheduled retry", host.listCallCount())
+	}
+}
+
+func TestStartDoesNotBusyLoopWhenDueRefreshMakesNoProgress(t *testing.T) {
+	now := time.Now()
+	cfg := DefaultConfig()
+	cfg.QuotaRefreshInterval = time.Hour
+	store := NewPluginState(cfg)
+	store.RecordCodexActivity(now)
+	account := weeklyAccount("auth-1", 5, now.Add(24*time.Hour), false)
+	account.LastSuccessAt = now.Add(-6 * time.Hour)
+	store.UpsertQuota(account)
+
+	host := &fakeHostClient{}
+	refresher := NewQuotaRefresher(host, store, time.Now)
+	refresher.Start()
+	defer refresher.Stop()
+
+	if !waitUntil(500*time.Millisecond, func() bool { return host.listCallCount() >= 1 }) {
+		t.Fatalf("ListAuths calls = %d, want initial due refresh", host.listCallCount())
+	}
+	time.Sleep(120 * time.Millisecond)
+	if got := host.listCallCount(); got > 2 {
+		t.Fatalf("ListAuths calls = %d, want no tight loop when due refresh makes no progress", got)
+	}
+}
+
+func TestRefreshDueSuccessCompletesCircuitProbeWithoutRequeue(t *testing.T) {
+	now := time.Date(2026, 6, 29, 9, 0, 0, 0, time.UTC)
+	cfg := DefaultConfig()
+	cfg.CircuitHalfOpenSuccessThreshold = 2
+	store := NewPluginState(cfg)
+	store.RecordCodexActivity(now)
+	account := weeklyAccount("auth-1", 5, now.Add(24*time.Hour), false)
+	account.AuthIndex = "idx-1"
+	account.Circuit = CircuitBreakerState{
+		State:        CircuitStateOpen,
+		FailureCount: 1,
+		NextProbeAt:  now.Add(-time.Minute),
+	}
+	store.UpsertQuota(account)
+
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{
+			ID: "auth-1", AuthIndex: "idx-1", Provider: "codex",
+		}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"access-1","id_token":"` + idToken + `"}`),
+		},
+		httpBody: []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+	}
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+
+	if err := refresher.RefreshDueOnce(); err != nil {
+		t.Fatalf("RefreshDueOnce returned error: %v", err)
+	}
+	snapshot := store.Snapshot(now)
+	if len(snapshot.Accounts) != 1 {
+		t.Fatalf("accounts = %#v, want one account", snapshot.Accounts)
+	}
+	updated := snapshot.Accounts[0]
+	if updated.Circuit.State != CircuitStateHalfOpen || !updated.Circuit.NextProbeAt.IsZero() {
+		t.Fatalf("circuit = %#v, want half-open with cleared probe time", updated.Circuit)
+	}
+	if due, reason := accountRefreshDue(updated, cfg, now); due || reason == "circuit_probe_due" {
+		t.Fatalf("accountRefreshDue = %t, %q; want no repeated circuit probe", due, reason)
 	}
 }
 

@@ -132,6 +132,8 @@ type StateSnapshot struct {
 	LastSelected        string
 	LastReason          string
 	LastCodexActivityAt time.Time
+	LastAuthScanAt      time.Time
+	CodexAuthCount      int
 	Now                 time.Time
 }
 

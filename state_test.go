@@ -124,6 +124,31 @@ func TestPluginStateHalfOpenSuccessClosesCircuit(t *testing.T) {
 	}
 }
 
+func TestPluginStateHalfOpenPartialSuccessClearsProbeDue(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.CircuitFailureThreshold = 1
+	cfg.CircuitOpenDuration = 10 * time.Minute
+	cfg.CircuitHalfOpenSuccessThreshold = 2
+	store := NewPluginState(cfg)
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	store.UpsertQuota(AccountState{AuthID: "auth-1", AuthIndex: "idx-1", Provider: "codex", LastSuccessAt: now})
+	store.RecordAccountFailure("auth-1", "", "usage_limit_reached", time.Time{}, now)
+
+	success, ok := store.RecordAccountSuccess("auth-1", "", now.Add(11*time.Minute))
+	if !ok {
+		t.Fatalf("RecordAccountSuccess returned ok=false")
+	}
+	if success.Circuit.State != CircuitStateHalfOpen || success.Circuit.EffectiveState != CircuitStateHalfOpen || success.Circuit.SuccessCount != 1 {
+		t.Fatalf("circuit = %#v, want persistent half-open partial success", success.Circuit)
+	}
+	if !success.Circuit.NextProbeAt.IsZero() {
+		t.Fatalf("NextProbeAt = %s, want cleared after partial half-open success", success.Circuit.NextProbeAt)
+	}
+	if due, reason := accountRefreshDue(success, cfg, now.Add(11*time.Minute)); due || reason == "circuit_probe_due" {
+		t.Fatalf("accountRefreshDue = %t, %q; want no repeated circuit probe", due, reason)
+	}
+}
+
 func TestPluginStateLogRetentionKeepsNewestEntriesByCount(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MaxLogEntries = 3

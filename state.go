@@ -15,6 +15,8 @@ type PluginState struct {
 	lastSelected        string
 	lastReason          string
 	lastCodexActivityAt time.Time
+	lastAuthScanAt      time.Time
+	codexAuthCount      int
 }
 
 func NewPluginState(cfg Config) *PluginState {
@@ -160,6 +162,19 @@ func (s *PluginState) RecordCodexActivity(now time.Time) {
 	}
 }
 
+func (s *PluginState) RecordAuthScan(codexAuthCount int, now time.Time) {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if codexAuthCount < 0 {
+		codexAuthCount = 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastAuthScanAt = now
+	s.codexAuthCount = codexAuthCount
+}
+
 func (s *PluginState) RefreshActive(now time.Time) bool {
 	if now.IsZero() {
 		now = time.Now()
@@ -243,6 +258,8 @@ func (s *PluginState) Snapshot(now time.Time) StateSnapshot {
 		LastSelected:        s.lastSelected,
 		LastReason:          s.lastReason,
 		LastCodexActivityAt: s.lastCodexActivityAt,
+		LastAuthScanAt:      s.lastAuthScanAt,
+		CodexAuthCount:      s.codexAuthCount,
 		Now:                 now,
 	}
 }
@@ -269,6 +286,58 @@ func (s *PluginState) DueAccounts(now time.Time) []AccountState {
 		return accountStateKey(accounts[i]) < accountStateKey(accounts[j])
 	})
 	return accounts
+}
+
+func (s *PluginState) NextRefreshDueAt(now time.Time) time.Time {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	cfg := NormalizeConfig(s.cfg)
+	if s.lastCodexActivityAt.IsZero() || now.After(s.lastCodexActivityAt.Add(cfg.RefreshActiveWindow)) {
+		return time.Time{}
+	}
+	var next time.Time
+	consider := func(t time.Time) {
+		if t.IsZero() {
+			return
+		}
+		if !t.After(now) {
+			t = now
+		}
+		if next.IsZero() || t.Before(next) {
+			next = t
+		}
+	}
+	for _, account := range s.accounts {
+		if account.Refresh.AuthFailure || account.Refresh.LastFailureKind == RefreshFailureLocal {
+			continue
+		}
+		if !account.Circuit.NextProbeAt.IsZero() {
+			consider(account.Circuit.NextProbeAt)
+			continue
+		}
+		if !account.Refresh.NextRetryAt.IsZero() {
+			consider(account.Refresh.NextRetryAt)
+			continue
+		}
+		if account.LastSuccessAt.IsZero() {
+			consider(now)
+			continue
+		}
+		consider(account.LastSuccessAt.Add(cfg.StaleAfter))
+		if account.Quota.FiveHour != nil && !account.Quota.FiveHour.ResetAt.IsZero() {
+			consider(account.Quota.FiveHour.ResetAt.Add(cfg.RefreshAfterResetDelay))
+		}
+		if account.Quota.LongWindow != nil && !account.Quota.LongWindow.ResetAt.IsZero() {
+			consider(account.Quota.LongWindow.ResetAt.Add(cfg.RefreshAfterResetDelay))
+		}
+		if account.TemporaryExhausted && !account.TemporaryResetAt.IsZero() {
+			consider(account.TemporaryResetAt.Add(cfg.RefreshAfterResetDelay))
+		}
+	}
+	return next
 }
 
 func retainedLogs(logs []LogEntry, cfg Config, now time.Time) []LogEntry {
@@ -405,6 +474,9 @@ func applyCircuitSuccess(account *AccountState, cfg Config, now time.Time) {
 			account.LastError = ""
 			return
 		}
+		circuit.State = CircuitStateHalfOpen
+		circuit.EffectiveState = CircuitStateHalfOpen
+		circuit.NextProbeAt = time.Time{}
 		account.Circuit = circuit
 		account.LastError = ""
 		return

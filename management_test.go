@@ -20,13 +20,17 @@ func TestManagementRegisterExposesStatusResourceAndRoutes(t *testing.T) {
 	for _, resource := range resp.Resources {
 		resources[resource.Path] = resource
 	}
-	for _, path := range []string{"/status"} {
-		if _, ok := resources[path]; !ok {
-			t.Fatalf("missing resource %s in %#v", path, resp.Resources)
-		}
+	if _, ok := resources["/status"]; !ok {
+		t.Fatalf("missing status resource in %#v", resp.Resources)
 	}
 	if resources["/status"].Menu == "" {
 		t.Fatalf("status resource Menu is empty: %#v", resources["/status"])
+	}
+	if _, ok := resources["/status-data"]; !ok {
+		t.Fatalf("missing status-data resource in %#v", resp.Resources)
+	}
+	if resources["/status-data"].Menu != "" {
+		t.Fatalf("status-data resource Menu = %q, want hidden read-only resource", resources["/status-data"].Menu)
 	}
 	if len(resources) != len(resp.Resources) {
 		t.Fatalf("resources = %#v", resp.Resources)
@@ -209,6 +213,62 @@ func TestStatusJSONMovesUnavailableAccountsBehindAvailableAccounts(t *testing.T)
 	}
 }
 
+func TestStatusPayloadExplainsEmptyQueueBeforeFirstRequest(t *testing.T) {
+	now := time.Date(2026, 6, 29, 9, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	payload := BuildStatusPayload(store.Snapshot(now), nil)
+
+	if payload.RefreshActive {
+		t.Fatalf("RefreshActive = true, want false before first request")
+	}
+	if payload.EmptyState.Reason != "sleeping_no_activity" {
+		t.Fatalf("EmptyState reason = %q, want sleeping_no_activity; payload=%#v", payload.EmptyState.Reason, payload.EmptyState)
+	}
+	for _, want := range []string{"1h0m0s", "发送第一次 Codex 请求"} {
+		if !strings.Contains(payload.EmptyState.Message, want) {
+			t.Fatalf("EmptyState message missing %q: %q", want, payload.EmptyState.Message)
+		}
+	}
+}
+
+func TestStatusPayloadExplainsNoCodexAuthAfterAuthScan(t *testing.T) {
+	now := time.Date(2026, 6, 29, 9, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	store.RecordAuthScan(0, now)
+	payload := BuildStatusPayload(store.Snapshot(now), nil)
+
+	if payload.CodexAuthCount != 0 || payload.LastAuthScanText != "2026-06-29T09:00:00Z" {
+		t.Fatalf("auth scan fields = count %d text %q", payload.CodexAuthCount, payload.LastAuthScanText)
+	}
+	if payload.EmptyState.Reason != "no_codex_auth" {
+		t.Fatalf("EmptyState reason = %q, want no_codex_auth; payload=%#v", payload.EmptyState.Reason, payload.EmptyState)
+	}
+	if !strings.Contains(payload.EmptyState.Message, "认证文件中没有 Codex 账号") {
+		t.Fatalf("EmptyState message = %q, want no auth explanation", payload.EmptyState.Message)
+	}
+}
+
+func TestStatusPayloadNotesStaleAccountWhileSleeping(t *testing.T) {
+	now := time.Date(2026, 6, 29, 9, 0, 0, 0, time.UTC)
+	account := weeklyAccount("auth-1", 5, now.Add(24*time.Hour), false)
+	account.LastSuccessAt = now.Add(-6 * time.Hour)
+	store := NewPluginState(DefaultConfig())
+	store.UpsertQuota(account)
+	snapshot := store.Snapshot(now)
+	ordered := BuildOrderedAccounts(syntheticStatusRequest(snapshot), snapshot, now)
+	payload := BuildStatusPayload(snapshot, ordered)
+
+	if len(payload.Accounts) != 1 {
+		t.Fatalf("accounts len = %d, want 1", len(payload.Accounts))
+	}
+	note := payload.Accounts[0].StatusNote
+	for _, want := range []string{"账号额度已过期", "休眠状态", "发送一次 Codex 请求"} {
+		if !strings.Contains(note, want) {
+			t.Fatalf("StatusNote missing %q: %q", want, note)
+		}
+	}
+}
+
 func TestStatusJSONIncludesSchedulerSummary(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	cfg := DefaultConfig()
@@ -377,8 +437,23 @@ func TestStatusPageUsesCollapsedSettingsAndNoHardReload(t *testing.T) {
 	if strings.Contains(page, "schedulePageRefresh") {
 		t.Fatalf("page still contains scheduled hard reload helper")
 	}
-	if !strings.Contains(page, `requestManagement('/status'`) {
-		t.Fatalf("page does not fetch status for dynamic refresh")
+	for _, want := range []string{
+		`summary-toggle`,
+		`hasManagementKey`,
+		`PUBLIC_STATUS_BASE`,
+		`requestPublicStatus`,
+		`requestManagement('/status'`,
+		`refreshStatus`,
+		`window.setInterval`,
+		`默认配置已经都设置好了，正常情况下不需要手动设置。`,
+		`活跃刷新窗口`,
+		`重置后刷新延迟`,
+		`刷新失败重试间隔`,
+		`启动时刷新额度`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("page missing collapsed/public refresh marker %q", want)
+		}
 	}
 	settingsStart := strings.Index(page, `id="settingsPanel"`)
 	refreshStart := strings.Index(page, `id="refreshQuota"`)
@@ -390,10 +465,26 @@ func TestStatusPageUsesCollapsedSettingsAndNoHardReload(t *testing.T) {
 	}
 }
 
+func TestStatusPageDoesNotClobberDirtySettingsOnPublicPoll(t *testing.T) {
+	store := NewPluginState(DefaultConfig())
+	page := renderStatusPageForTest(t, store)
+	for _, want := range []string{
+		"let settingsDirty=false",
+		"settingsFocusedOrDirty",
+		"settingsPanel.addEventListener('input'",
+		"fillSettings:true",
+		"!settingsFocusedOrDirty()",
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("page missing dirty settings guard marker %q", want)
+		}
+	}
+}
+
 func TestDynamicAccountRenderingUsesChineseBaseText(t *testing.T) {
 	store := NewPluginState(DefaultConfig())
 	page := renderStatusPageForTest(t, store)
-	for _, want := range []string{"addBadge('可用'", "'5 小时额度'", "'刷新额度'", "'编辑'", "'暂无账号数据。'"} {
+	for _, want := range []string{"addBadge('可用'", "'5 小时额度'", "'刷新额度'", "'编辑'", "renderEmptyState", "暂无账号数据"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("page missing localized dynamic rendering marker %q", want)
 		}
@@ -402,6 +493,45 @@ func TestDynamicAccountRenderingUsesChineseBaseText(t *testing.T) {
 		if strings.Contains(page, forbidden) {
 			t.Fatalf("dynamic account rendering still contains English base text %q", forbidden)
 		}
+	}
+}
+
+func TestDynamicAccountRenderingShowsResetCreditExpiry(t *testing.T) {
+	store := NewPluginState(DefaultConfig())
+	page := renderStatusPageForTest(t, store)
+	for _, want := range []string{"resetCreditSummary", "reset_credits", "expires_at"} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("page missing reset credit expiry marker %q", want)
+		}
+	}
+}
+
+func TestDynamicAccountRenderingShowsEmptyStateAndStatusNote(t *testing.T) {
+	store := NewPluginState(DefaultConfig())
+	page := renderStatusPageForTest(t, store)
+	for _, want := range []string{"renderEmptyState", "STATUS.empty_state", "account.status_note", "调度状态"} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("page missing empty/status state marker %q", want)
+		}
+	}
+}
+
+func TestStatusPageUsesPublicStatusForReadOnlyCacheAndKeyForEdit(t *testing.T) {
+	store := NewPluginState(DefaultConfig())
+	page := renderStatusPageForTest(t, store)
+	for _, want := range []string{
+		"PUBLIC_STATUS_BASE",
+		"requestPublicStatus",
+		"await requestPublicStatus()",
+		"function openEdit(authID){if(!hasManagementKey())",
+		"logs:STATUS.logs||[]",
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("page missing public read-only/key-gated edit marker %q", want)
+		}
+	}
+	if strings.Contains(page, "requestManagement('/logs'") {
+		t.Fatalf("exportLogs still requires management logs endpoint")
 	}
 }
 
@@ -837,6 +967,67 @@ func TestResourceStatusRendersUsablePluginPage(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("resource status missing usable plugin page marker %q: %s", want, body)
 		}
+	}
+}
+
+func TestResourceStatusDataPublishesSanitizedCacheWithoutManagementKey(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	store.SetAnnotations(AnnotationState{
+		Accounts: map[string]AccountAnnotation{
+			"auth:auth-1": {Alias: "公开别名", Notes: "公开备注"},
+		},
+	})
+	account := weeklyAccount("auth-1", 5, now.Add(24*time.Hour), false)
+	count := 1
+	account.Quota.ResetCreditsAvailableCount = &count
+	account.Quota.ResetCredits = []ResetCredit{{ExpiresAt: now.Add(30 * 24 * time.Hour), Status: "available"}}
+	store.UpsertQuota(account)
+	store.RecordLog("info", "scheduler.selected", "请求已由插件接管", map[string]any{"auth_id": "auth-1"}, now)
+
+	refreshes := 0
+	refreshOne := ""
+	previousRefreshSoon := managementRefreshSoon
+	previousRefreshOneSoon := managementRefreshOneSoon
+	managementRefreshSoon = func() { refreshes++ }
+	managementRefreshOneSoon = func(authID string) { refreshOne = authID }
+	t.Cleanup(func() {
+		managementRefreshSoon = previousRefreshSoon
+		managementRefreshOneSoon = previousRefreshOneSoon
+	})
+
+	resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/resource/plugins/codex-quota-scheduler/status-data",
+		Query:  url.Values{"action": []string{"refresh"}, "payload": []string{"{}"}},
+	}, now)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, resp.Body)
+	}
+	if refreshes != 0 || refreshOne != "" {
+		t.Fatalf("public status data triggered refreshes = %d, refreshOne = %q; want none", refreshes, refreshOne)
+	}
+	bodyText := strings.ToLower(string(resp.Body))
+	for _, forbidden := range []string{"access_token", "refresh_token", "id_token", "bearer ", "authorization", "cookie", chatGPTQuotaEndpoint} {
+		if strings.Contains(bodyText, forbidden) {
+			t.Fatalf("public status data leaked sensitive marker %q: %s", forbidden, resp.Body)
+		}
+	}
+	var body StatusPayload
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		t.Fatalf("json.Unmarshal returned error: %v; body=%s", err, resp.Body)
+	}
+	if body.Shell || len(body.Accounts) != 1 || len(body.Logs) != 1 {
+		t.Fatalf("body shell/accounts/logs = %v/%d/%d; want public cached status payload", body.Shell, len(body.Accounts), len(body.Logs))
+	}
+	if body.Settings.QuotaEndpoint != "" {
+		t.Fatalf("public settings quota_endpoint = %q, want redacted", body.Settings.QuotaEndpoint)
+	}
+	if body.Accounts[0].AuthID != "auth-1" || body.Accounts[0].Alias == "" || len(body.Accounts[0].ResetCredits) != 1 {
+		t.Fatalf("account body = %#v, want cached queue and quota data", body.Accounts[0])
+	}
+	if body.Logs[0].Event != "scheduler.selected" {
+		t.Fatalf("logs = %#v, want cached scheduler logs", body.Logs)
 	}
 }
 
