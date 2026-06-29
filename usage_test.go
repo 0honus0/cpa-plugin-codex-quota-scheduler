@@ -342,3 +342,29 @@ func TestUsageHandleDisabledDoesNotMutateState(t *testing.T) {
 		t.Fatalf("account = %#v", snapshot.Accounts[0])
 	}
 }
+
+func TestUsageLimitWithoutResetSchedulesShortPause(t *testing.T) {
+	now := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	store.UpsertQuota(AccountState{AuthID: "auth-1", AuthIndex: "idx-1", Provider: "codex"})
+	record := pluginapi.UsageRecord{
+		Provider:  "codex",
+		AuthID:    "auth-1",
+		AuthIndex: "idx-1",
+		Failed:    true,
+		Failure: pluginapi.UsageFailure{
+			StatusCode: 429,
+			Body:       `{"error":{"type":"usage_limit_reached"}}`,
+		},
+	}
+
+	HandleUsageFeedback(store, record, now)
+
+	account := store.Snapshot(now).Accounts[0]
+	if account.Circuit.NextProbeAt.IsZero() {
+		t.Fatal("NextProbeAt is zero, want short pause")
+	}
+	if !account.Circuit.NextProbeAt.Equal(now.Add(2 * time.Minute)) {
+		t.Fatalf("NextProbeAt = %s, want %s", account.Circuit.NextProbeAt, now.Add(2*time.Minute))
+	}
+}

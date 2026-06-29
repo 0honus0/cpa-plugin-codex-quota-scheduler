@@ -157,6 +157,12 @@ func accountAvailable(account AccountState, now time.Time) (bool, string) {
 }
 
 func accountQueueState(account AccountState, now time.Time) (QueueStatus, bool, string, time.Time) {
+	if account.Refresh.AuthFailure {
+		return QueueStatusUnavailable, false, "auth_failure", time.Time{}
+	}
+	if account.Refresh.LastFailureKind == RefreshFailureLocal {
+		return QueueStatusUnavailable, false, "local_failure", time.Time{}
+	}
 	if account.Stale {
 		return QueueStatusUnavailable, false, "stale_quota", time.Time{}
 	}

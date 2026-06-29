@@ -155,6 +155,38 @@ func TestPickSkipsWeeklyWhenFiveHourExhausted(t *testing.T) {
 	}
 }
 
+func TestPickSkipsAuthFailedAccount(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	blocked := weeklyAccount("blocked", 5, now.Add(time.Hour), false)
+	blocked.Refresh.AuthFailure = true
+	available := weeklyAccount("available", 5, now.Add(2*time.Hour), false)
+	snapshot := StateSnapshot{Config: DefaultConfig(), Now: now, Accounts: []AccountState{blocked, available}}
+
+	decision := PickCodexAccount(requestWithCandidates("blocked", "available"), snapshot, now)
+	if decision.AuthID != "available" {
+		t.Fatalf("AuthID = %q, want available; ordered=%#v", decision.AuthID, decision.Ordered)
+	}
+	if decision.Ordered[1].Available || decision.Ordered[1].UnavailableReason != "auth_failure" {
+		t.Fatalf("blocked account = %#v, want unavailable auth_failure", decision.Ordered[1])
+	}
+}
+
+func TestPickSkipsLocalRefreshFailureAccount(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	blocked := weeklyAccount("blocked", 5, now.Add(time.Hour), false)
+	blocked.Refresh.LastFailureKind = RefreshFailureLocal
+	available := weeklyAccount("available", 5, now.Add(2*time.Hour), false)
+	snapshot := StateSnapshot{Config: DefaultConfig(), Now: now, Accounts: []AccountState{blocked, available}}
+
+	decision := PickCodexAccount(requestWithCandidates("blocked", "available"), snapshot, now)
+	if decision.AuthID != "available" {
+		t.Fatalf("AuthID = %q, want available; ordered=%#v", decision.AuthID, decision.Ordered)
+	}
+	if decision.Ordered[1].Available || decision.Ordered[1].UnavailableReason != "local_failure" {
+		t.Fatalf("blocked account = %#v, want unavailable local_failure", decision.Ordered[1])
+	}
+}
+
 func TestOrderedAccountsPutAvailableBeforeExhaustedWithinPriority(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	blocked := weeklyAccount("blocked", 5, now.Add(time.Hour), true)

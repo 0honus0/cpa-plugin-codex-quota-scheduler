@@ -26,6 +26,7 @@ type fakeHostClient struct {
 	releaseDo             chan struct{}
 
 	mu           sync.Mutex
+	listCalls    int
 	httpCalls    int
 	activeHTTP   int
 	maxActive    int
@@ -34,6 +35,9 @@ type fakeHostClient struct {
 }
 
 func (f *fakeHostClient) ListAuths() ([]pluginapi.HostAuthFileEntry, error) {
+	f.mu.Lock()
+	f.listCalls++
+	f.mu.Unlock()
 	return f.authList, nil
 }
 
@@ -157,6 +161,12 @@ func (f *fakeHostClient) httpCallCount() int {
 	return f.httpCalls
 }
 
+func (f *fakeHostClient) listCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.listCalls
+}
+
 func (f *fakeHostClient) requestedURLs() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -178,6 +188,367 @@ func accountByAuthID(t *testing.T, snapshot StateSnapshot, authID string) Accoun
 	}
 	t.Fatalf("missing account with auth ID %q in %#v", authID, snapshot.Accounts)
 	return AccountState{}
+}
+
+func TestRefreshDueOnceSkipsFreshAccountsAndRefreshesOnlyDueAccounts(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	staleToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-stale"})
+	freshToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-fresh"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{
+			{ID: "stale", AuthIndex: "idx-stale", Provider: "codex"},
+			{ID: "fresh", AuthIndex: "idx-fresh", Provider: "codex"},
+		},
+		authJSON: map[string]json.RawMessage{
+			"idx-stale": json.RawMessage(`{"access_token":"access-stale","id_token":"` + staleToken + `"}`),
+			"idx-fresh": json.RawMessage(`{"access_token":"access-fresh","id_token":"` + freshToken + `"}`),
+		},
+		httpBody: []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+	}
+	store := NewPluginState(DefaultConfig())
+	store.RecordCodexActivity(now)
+	store.UpsertQuota(AccountState{
+		AuthID:        "stale",
+		AuthIndex:     "idx-stale",
+		Provider:      "codex",
+		LastSuccessAt: now.Add(-6 * time.Hour),
+	})
+	store.UpsertQuota(AccountState{
+		AuthID:        "fresh",
+		AuthIndex:     "idx-fresh",
+		Provider:      "codex",
+		LastSuccessAt: now.Add(-time.Hour),
+	})
+
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	if err := refresher.RefreshDueOnce(); err != nil {
+		t.Fatalf("RefreshDueOnce returned error: %v", err)
+	}
+
+	host.assertNoHeaderErrors(t)
+	if got := host.httpCallCount(); got != 2 {
+		t.Fatalf("HTTP calls = %d, want 2 quota/reset calls for stale account only", got)
+	}
+	stale := accountByAuthID(t, store.Snapshot(now), "stale")
+	if stale.LastSuccessAt.IsZero() {
+		t.Fatal("stale account LastSuccessAt is zero, want refreshed")
+	}
+	fresh := accountByAuthID(t, store.Snapshot(now), "fresh")
+	if !fresh.LastSuccessAt.Equal(now.Add(-time.Hour)) {
+		t.Fatalf("fresh LastSuccessAt = %s, want unchanged", fresh.LastSuccessAt)
+	}
+}
+
+func TestRefreshDueOnceSkipsAllFreshKnownAccounts(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	store.RecordCodexActivity(now)
+	store.UpsertQuota(AccountState{
+		AuthID:        "fresh",
+		AuthIndex:     "idx-fresh",
+		Provider:      "codex",
+		LastSuccessAt: now.Add(-time.Hour),
+	})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{ID: "fresh", AuthIndex: "idx-fresh", Provider: "codex"}},
+	}
+
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	if err := refresher.RefreshDueOnce(); err != nil {
+		t.Fatalf("RefreshDueOnce returned error: %v", err)
+	}
+
+	if got := host.listCallCount(); got != 0 {
+		t.Fatalf("ListAuths calls = %d, want 0 when known accounts are fresh", got)
+	}
+	if got := host.httpCallCount(); got != 0 {
+		t.Fatalf("HTTP calls = %d, want 0 when known accounts are fresh", got)
+	}
+}
+
+func TestRefreshDueOnceDiscoversAuthsWhenStateIsEmpty(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{
+			ID: "auth-1", AuthIndex: "idx-1", Provider: "codex",
+		}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"access-1","id_token":"` + idToken + `"}`),
+		},
+		httpBody: []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+	}
+	store := NewPluginState(DefaultConfig())
+	store.RecordCodexActivity(now)
+
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	if err := refresher.RefreshDueOnce(); err != nil {
+		t.Fatalf("RefreshDueOnce returned error: %v", err)
+	}
+
+	host.assertNoHeaderErrors(t)
+	if got := host.httpCallCount(); got != 2 {
+		t.Fatalf("HTTP calls = %d, want quota/reset discovery calls", got)
+	}
+	account := accountByAuthID(t, store.Snapshot(now), "auth-1")
+	if account.LastSuccessAt.IsZero() {
+		t.Fatal("discovered account LastSuccessAt is zero")
+	}
+}
+
+func TestRefreshDueCandidatesOnceUsesActivePriorityCandidates(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	highToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-high"})
+	lowToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-low"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{
+			{ID: "high", AuthIndex: "idx-high", Provider: "codex"},
+			{ID: "low", AuthIndex: "idx-low", Provider: "codex"},
+		},
+		authJSON: map[string]json.RawMessage{
+			"idx-high": json.RawMessage(`{"access_token":"access-high","id_token":"` + highToken + `"}`),
+			"idx-low":  json.RawMessage(`{"access_token":"access-low","id_token":"` + lowToken + `"}`),
+		},
+		httpBody: []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+	}
+	store := NewPluginState(DefaultConfig())
+	store.RecordCodexActivity(now)
+	store.UpsertQuota(AccountState{AuthID: "high", AuthIndex: "idx-high", Provider: "codex", LastSuccessAt: now.Add(-6 * time.Hour), Priority: 10})
+	store.UpsertQuota(AccountState{AuthID: "low", AuthIndex: "idx-low", Provider: "codex", LastSuccessAt: now.Add(-6 * time.Hour), Priority: 1})
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+
+	req := pluginapi.SchedulerPickRequest{Provider: "codex", Candidates: []pluginapi.SchedulerAuthCandidate{
+		{ID: "high", Provider: "codex", Priority: 10},
+		{ID: "low", Provider: "codex", Priority: 1},
+	}}
+	if err := refresher.RefreshDueCandidatesOnce(req); err != nil {
+		t.Fatalf("RefreshDueCandidatesOnce returned error: %v", err)
+	}
+
+	high := accountByAuthID(t, store.Snapshot(now), "high")
+	if high.LastSuccessAt.IsZero() || !high.LastSuccessAt.Equal(now) {
+		t.Fatalf("high LastSuccessAt = %s, want refreshed now", high.LastSuccessAt)
+	}
+	low := accountByAuthID(t, store.Snapshot(now), "low")
+	if !low.LastSuccessAt.Equal(now.Add(-6 * time.Hour)) {
+		t.Fatalf("low LastSuccessAt = %s, want unchanged", low.LastSuccessAt)
+	}
+}
+
+func TestRefreshDueCandidatesOnceSkipsFreshKnownCandidates(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	store.RecordCodexActivity(now)
+	store.UpsertQuota(AccountState{AuthID: "high", AuthIndex: "idx-high", Provider: "codex", LastSuccessAt: now.Add(-time.Hour), Priority: 10})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{ID: "high", AuthIndex: "idx-high", Provider: "codex"}},
+	}
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+
+	req := pluginapi.SchedulerPickRequest{Provider: "codex", Candidates: []pluginapi.SchedulerAuthCandidate{
+		{ID: "high", Provider: "codex", Priority: 10},
+	}}
+	if err := refresher.RefreshDueCandidatesOnce(req); err != nil {
+		t.Fatalf("RefreshDueCandidatesOnce returned error: %v", err)
+	}
+
+	if got := host.listCallCount(); got != 0 {
+		t.Fatalf("ListAuths calls = %d, want 0 when candidate is already fresh", got)
+	}
+	if got := host.httpCallCount(); got != 0 {
+		t.Fatalf("HTTP calls = %d, want 0 when candidate is already fresh", got)
+	}
+}
+
+func TestRefreshDueOnceDoesNothingOutsideActiveWindow(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	store.UpsertQuota(AccountState{
+		AuthID:        "stale",
+		AuthIndex:     "idx-stale",
+		Provider:      "codex",
+		LastSuccessAt: now.Add(-6 * time.Hour),
+	})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{ID: "stale", AuthIndex: "idx-stale", Provider: "codex"}},
+	}
+
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	if err := refresher.RefreshDueOnce(); err != nil {
+		t.Fatalf("RefreshDueOnce returned error: %v", err)
+	}
+	if got := host.listCallCount(); got != 0 {
+		t.Fatalf("ListAuths calls = %d, want 0 outside active window", got)
+	}
+}
+
+func TestRefreshOnceRecordsCodexAuthScanCount(t *testing.T) {
+	now := time.Date(2026, 6, 29, 9, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{
+			{ID: "openai-1", AuthIndex: "idx-openai", Provider: "openai"},
+		},
+	}
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+
+	if err := refresher.RefreshOnce(); err != nil {
+		t.Fatalf("RefreshOnce returned error: %v", err)
+	}
+	snapshot := store.Snapshot(now)
+	if snapshot.CodexAuthCount != 0 || !snapshot.LastAuthScanAt.Equal(now) {
+		t.Fatalf("auth scan = count %d at %s, want 0 at %s", snapshot.CodexAuthCount, snapshot.LastAuthScanAt, now)
+	}
+}
+
+func TestStartDoesNotPollAllAccountsWhileIdle(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.QuotaRefreshInterval = 20 * time.Millisecond
+	store := NewPluginState(cfg)
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{ID: "auth-1", AuthIndex: "idx-1", Provider: "codex"}},
+	}
+	refresher := NewQuotaRefresher(host, store, time.Now)
+
+	refresher.Start()
+	defer refresher.Stop()
+	time.Sleep(80 * time.Millisecond)
+
+	if got := host.listCallCount(); got != 0 {
+		t.Fatalf("ListAuths calls = %d, want 0 while idle", got)
+	}
+}
+
+func TestStartWakesAtRetryDueBeforeRefreshInterval(t *testing.T) {
+	now := time.Now()
+	cfg := DefaultConfig()
+	cfg.QuotaRefreshInterval = time.Hour
+	cfg.RefreshRetryDelays = []time.Duration{20 * time.Millisecond}
+	store := NewPluginState(cfg)
+	store.RecordCodexActivity(now)
+	store.RecordRefreshFailure("auth-1", "idx-1", RefreshFailureTransient, "temporary failure", now)
+
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{
+			ID: "auth-1", AuthIndex: "idx-1", Provider: "codex",
+		}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"access-1","id_token":"` + idToken + `"}`),
+		},
+		httpBody: []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+	}
+	refresher := NewQuotaRefresher(host, store, time.Now)
+
+	refresher.Start()
+	defer refresher.Stop()
+
+	if !waitUntil(500*time.Millisecond, func() bool { return host.listCallCount() > 0 }) {
+		t.Fatalf("ListAuths calls = %d, want retry wake before quota_refresh_interval", host.listCallCount())
+	}
+}
+
+func TestStartRecomputesDelayAfterAsyncRefreshSchedulesRetry(t *testing.T) {
+	now := time.Now()
+	cfg := DefaultConfig()
+	cfg.QuotaRefreshInterval = time.Hour
+	cfg.RefreshRetryDelays = []time.Duration{20 * time.Millisecond}
+	store := NewPluginState(cfg)
+	store.RecordCodexActivity(now)
+
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{
+			ID: "auth-1", AuthIndex: "idx-1", Provider: "codex",
+		}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"access-1","id_token":"` + idToken + `"}`),
+		},
+		httpStatus: http.StatusForbidden,
+		httpBody:   []byte(`{"error":"temporary"}`),
+	}
+	refresher := NewQuotaRefresher(host, store, time.Now)
+	refresher.Start()
+	defer refresher.Stop()
+
+	time.Sleep(30 * time.Millisecond)
+	if got := host.listCallCount(); got != 0 {
+		t.Fatalf("ListAuths calls = %d, want loop sleeping on quota_refresh_interval before async refresh", got)
+	}
+
+	refresher.RefreshDueCandidatesSoon(pluginapi.SchedulerPickRequest{
+		Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "auth-1", Provider: "codex", Priority: 10}},
+	})
+	if !waitUntil(700*time.Millisecond, func() bool { return host.listCallCount() >= 2 }) {
+		t.Fatalf("ListAuths calls = %d, want async refresh to wake loop for scheduled retry", host.listCallCount())
+	}
+}
+
+func TestStartDoesNotBusyLoopWhenDueRefreshMakesNoProgress(t *testing.T) {
+	now := time.Now()
+	cfg := DefaultConfig()
+	cfg.QuotaRefreshInterval = time.Hour
+	store := NewPluginState(cfg)
+	store.RecordCodexActivity(now)
+	account := weeklyAccount("auth-1", 5, now.Add(24*time.Hour), false)
+	account.LastSuccessAt = now.Add(-6 * time.Hour)
+	store.UpsertQuota(account)
+
+	host := &fakeHostClient{}
+	refresher := NewQuotaRefresher(host, store, time.Now)
+	refresher.Start()
+	defer refresher.Stop()
+
+	if !waitUntil(500*time.Millisecond, func() bool { return host.listCallCount() >= 1 }) {
+		t.Fatalf("ListAuths calls = %d, want initial due refresh", host.listCallCount())
+	}
+	time.Sleep(120 * time.Millisecond)
+	if got := host.listCallCount(); got > 2 {
+		t.Fatalf("ListAuths calls = %d, want no tight loop when due refresh makes no progress", got)
+	}
+}
+
+func TestRefreshDueSuccessCompletesCircuitProbeWithoutRequeue(t *testing.T) {
+	now := time.Date(2026, 6, 29, 9, 0, 0, 0, time.UTC)
+	cfg := DefaultConfig()
+	cfg.CircuitHalfOpenSuccessThreshold = 2
+	store := NewPluginState(cfg)
+	store.RecordCodexActivity(now)
+	account := weeklyAccount("auth-1", 5, now.Add(24*time.Hour), false)
+	account.AuthIndex = "idx-1"
+	account.Circuit = CircuitBreakerState{
+		State:        CircuitStateOpen,
+		FailureCount: 1,
+		NextProbeAt:  now.Add(-time.Minute),
+	}
+	store.UpsertQuota(account)
+
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{
+			ID: "auth-1", AuthIndex: "idx-1", Provider: "codex",
+		}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"access-1","id_token":"` + idToken + `"}`),
+		},
+		httpBody: []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+	}
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+
+	if err := refresher.RefreshDueOnce(); err != nil {
+		t.Fatalf("RefreshDueOnce returned error: %v", err)
+	}
+	snapshot := store.Snapshot(now)
+	if len(snapshot.Accounts) != 1 {
+		t.Fatalf("accounts = %#v, want one account", snapshot.Accounts)
+	}
+	updated := snapshot.Accounts[0]
+	if updated.Circuit.State != CircuitStateHalfOpen || !updated.Circuit.NextProbeAt.IsZero() {
+		t.Fatalf("circuit = %#v, want half-open with cleared probe time", updated.Circuit)
+	}
+	if due, reason := accountRefreshDue(updated, cfg, now); due || reason == "circuit_probe_due" {
+		t.Fatalf("accountRefreshDue = %t, %q; want no repeated circuit probe", due, reason)
+	}
 }
 
 func TestRefreshOnceLoadsCodexAuthAndQuota(t *testing.T) {
@@ -264,6 +635,87 @@ func TestRefreshOnceRefreshesExpiredAccessTokenAndSavesAuth(t *testing.T) {
 	account := accountByAuthID(t, store.Snapshot(now), "auth-1")
 	if account.LastError != "" || account.LastSuccessAt.IsZero() {
 		t.Fatalf("account refresh state = %#v, want success", account)
+	}
+}
+
+func TestRefreshTokenFailure401MarksAuthFailure(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	oldIDToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{ID: "auth-1", AuthIndex: "idx-1", Provider: "codex"}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"old-access","refresh_token":"old-refresh","id_token":"` + oldIDToken + `","account_id":"acct-1","expired":"` + now.Add(-time.Hour).Format(time.RFC3339) + `"}`),
+		},
+		responseByURL: map[string]pluginapi.HTTPResponse{
+			codexTokenEndpoint: {StatusCode: http.StatusUnauthorized, Body: []byte(`{"error":"invalid_grant"}`)},
+		},
+	}
+	store := NewPluginState(DefaultConfig())
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+
+	if err := refresher.RefreshOnce(); err != nil {
+		t.Fatalf("RefreshOnce returned error: %v", err)
+	}
+	account := accountByAuthID(t, store.Snapshot(now), "auth-1")
+	if !account.Refresh.AuthFailure {
+		t.Fatalf("AuthFailure = false, want true: %#v", account.Refresh)
+	}
+	if !account.Refresh.NextRetryAt.IsZero() {
+		t.Fatalf("NextRetryAt = %s, want zero", account.Refresh.NextRetryAt)
+	}
+}
+
+func TestRefreshTokenFailure400InvalidGrantMarksAuthFailure(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	oldIDToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{ID: "auth-1", AuthIndex: "idx-1", Provider: "codex"}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"old-access","refresh_token":"old-refresh","id_token":"` + oldIDToken + `","account_id":"acct-1","expired":"` + now.Add(-time.Hour).Format(time.RFC3339) + `"}`),
+		},
+		responseByURL: map[string]pluginapi.HTTPResponse{
+			codexTokenEndpoint: {StatusCode: http.StatusBadRequest, Body: []byte(`{"error":"invalid_grant"}`)},
+		},
+	}
+	store := NewPluginState(DefaultConfig())
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+
+	if err := refresher.RefreshOnce(); err != nil {
+		t.Fatalf("RefreshOnce returned error: %v", err)
+	}
+	account := accountByAuthID(t, store.Snapshot(now), "auth-1")
+	if !account.Refresh.AuthFailure {
+		t.Fatalf("AuthFailure = false, want true: %#v", account.Refresh)
+	}
+	if !account.Refresh.NextRetryAt.IsZero() {
+		t.Fatalf("NextRetryAt = %s, want zero", account.Refresh.NextRetryAt)
+	}
+}
+
+func TestRefreshTokenFailure403SchedulesRetry(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	oldIDToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{ID: "auth-1", AuthIndex: "idx-1", Provider: "codex"}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"old-access","refresh_token":"old-refresh","id_token":"` + oldIDToken + `","account_id":"acct-1","expired":"` + now.Add(-time.Hour).Format(time.RFC3339) + `"}`),
+		},
+		responseByURL: map[string]pluginapi.HTTPResponse{
+			codexTokenEndpoint: {StatusCode: http.StatusForbidden, Body: []byte(`{"error":"forbidden"}`)},
+		},
+	}
+	store := NewPluginState(DefaultConfig())
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+
+	if err := refresher.RefreshOnce(); err != nil {
+		t.Fatalf("RefreshOnce returned error: %v", err)
+	}
+	account := accountByAuthID(t, store.Snapshot(now), "auth-1")
+	if account.Refresh.AuthFailure {
+		t.Fatalf("AuthFailure = true, want false: %#v", account.Refresh)
+	}
+	if !account.Refresh.NextRetryAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("NextRetryAt = %s, want %s", account.Refresh.NextRetryAt, now.Add(time.Minute))
 	}
 }
 
@@ -502,6 +954,68 @@ func TestRefreshOnceHTTPNon2xxRecordsRedactedErrorWithoutQuotaSuccess(t *testing
 	}
 	if account.Quota.FiveHour != nil {
 		t.Fatalf("FiveHour quota = %#v, want nil", account.Quota.FiveHour)
+	}
+}
+
+func TestRefreshFailure401MarksAuthFailureWithoutRetry(t *testing.T) {
+	now := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{
+			ID: "auth-1", AuthIndex: "idx-1", Provider: "codex",
+		}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"access-1","id_token":"` + idToken + `"}`),
+		},
+		httpStatus: http.StatusUnauthorized,
+		httpBody:   []byte(`{"error":"expired"}`),
+	}
+	store := NewPluginState(DefaultConfig())
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	if err := refresher.RefreshOnce(); err != nil {
+		t.Fatalf("RefreshOnce returned error: %v", err)
+	}
+
+	account := accountByAuthID(t, store.Snapshot(now), "auth-1")
+	if account.Refresh.LastFailureKind != RefreshFailureAuth {
+		t.Fatalf("LastFailureKind = %q, want auth", account.Refresh.LastFailureKind)
+	}
+	if !account.Refresh.AuthFailure {
+		t.Fatal("AuthFailure = false, want true")
+	}
+	if !account.Refresh.NextRetryAt.IsZero() {
+		t.Fatalf("NextRetryAt = %s, want zero", account.Refresh.NextRetryAt)
+	}
+}
+
+func TestRefreshFailure403SchedulesTransientRetry(t *testing.T) {
+	now := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{
+			ID: "auth-1", AuthIndex: "idx-1", Provider: "codex",
+		}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"access-1","id_token":"` + idToken + `"}`),
+		},
+		httpStatus: http.StatusForbidden,
+		httpBody:   []byte(`{"error":"forbidden"}`),
+	}
+	store := NewPluginState(DefaultConfig())
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	if err := refresher.RefreshOnce(); err != nil {
+		t.Fatalf("RefreshOnce returned error: %v", err)
+	}
+
+	account := accountByAuthID(t, store.Snapshot(now), "auth-1")
+	if account.Refresh.LastFailureKind != RefreshFailureTransient {
+		t.Fatalf("LastFailureKind = %q, want transient", account.Refresh.LastFailureKind)
+	}
+	if account.Refresh.AuthFailure {
+		t.Fatal("AuthFailure = true, want false")
+	}
+	if !account.Refresh.NextRetryAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("NextRetryAt = %s, want %s", account.Refresh.NextRetryAt, now.Add(time.Minute))
 	}
 }
 

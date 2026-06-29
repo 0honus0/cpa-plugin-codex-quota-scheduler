@@ -86,6 +86,10 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 		}
 	}
 	now := time.Now()
+	if requestIncludesCodex(req) {
+		globalState.RecordCodexActivity(now)
+		refreshGlobalRefresherDueSoon(req)
+	}
 	decision := PickCodexAccount(req, globalState.Snapshot(now), now)
 	if decision.AuthID != "" {
 		globalState.RecordSelection(decision.AuthID, decision.Reason)
@@ -201,7 +205,9 @@ func startGlobalRefresher() {
 		return
 	}
 	refresher.Start()
-	refresher.RefreshSoon()
+	if globalState.Config().RefreshOnStartup {
+		refresher.RefreshSoon()
+	}
 }
 
 func refreshGlobalRefresherSoon() {
@@ -221,5 +227,14 @@ func refreshGlobalRefresherOneSoon(authID string) {
 	if refresher != nil {
 		globalState.RecordLog("info", "quota.refresh_one_requested", "已请求后台刷新单个账号额度", map[string]any{"auth_id": authID}, time.Now())
 		refresher.RefreshOneSoon(authID)
+	}
+}
+
+func refreshGlobalRefresherDueSoon(req pluginapi.SchedulerPickRequest) {
+	refresherMu.Lock()
+	refresher := globalRefresher
+	refresherMu.Unlock()
+	if refresher != nil {
+		refresher.RefreshDueCandidatesSoon(req)
 	}
 }

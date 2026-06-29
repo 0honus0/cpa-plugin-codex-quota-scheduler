@@ -54,6 +54,7 @@ type QuotaRefresher struct {
 	stopping   bool
 	stop       chan struct{}
 	done       chan struct{}
+	wake       chan struct{}
 	wg         sync.WaitGroup
 }
 
@@ -73,6 +74,7 @@ func (r *QuotaRefresher) RefreshOnce() error {
 	if err != nil {
 		return fmt.Errorf("list auths: %w", err)
 	}
+	r.recordAuthScan(auths)
 	eligible := make([]pluginapi.HostAuthFileEntry, 0, len(auths))
 	for _, auth := range auths {
 		if isRefreshEligible(auth) {
@@ -83,6 +85,165 @@ func (r *QuotaRefresher) RefreshOnce() error {
 		return nil
 	}
 
+	r.refreshAuths(eligible)
+	return nil
+}
+
+func (r *QuotaRefresher) RefreshDueOnce() error {
+	now := r.now()
+	if !r.state.RefreshActive(now) {
+		return nil
+	}
+	dueAccounts := r.state.DueAccounts(now)
+	dueAuthIDs := make(map[string]struct{}, len(dueAccounts))
+	for _, account := range dueAccounts {
+		if account.AuthID != "" {
+			dueAuthIDs[account.AuthID] = struct{}{}
+		}
+	}
+	knownAuthIDs := knownAccountAuthIDs(r.state.Snapshot(now))
+	if len(dueAuthIDs) == 0 && len(knownAuthIDs) > 0 {
+		return nil
+	}
+
+	auths, err := r.host.ListAuths()
+	if err != nil {
+		return fmt.Errorf("list auths: %w", err)
+	}
+	r.recordAuthScan(auths)
+	eligible := make([]pluginapi.HostAuthFileEntry, 0, len(auths))
+	for _, auth := range auths {
+		if !isRefreshEligible(auth) {
+			continue
+		}
+		if len(dueAuthIDs) == 0 {
+			eligible = append(eligible, auth)
+			continue
+		}
+		if _, due := dueAuthIDs[auth.ID]; due {
+			eligible = append(eligible, auth)
+		}
+	}
+	if len(eligible) == 0 {
+		return nil
+	}
+
+	r.refreshAuths(eligible)
+	return nil
+}
+
+func (r *QuotaRefresher) RefreshDueCandidatesOnce(req pluginapi.SchedulerPickRequest) error {
+	now := r.now()
+	if !r.state.RefreshActive(now) {
+		return nil
+	}
+	candidateIDs := activePriorityCandidateIDs(req)
+	if len(candidateIDs) == 0 {
+		return r.RefreshDueOnce()
+	}
+	dueAccounts := r.state.DueAccounts(now)
+	dueAuthIDs := make(map[string]struct{}, len(dueAccounts))
+	for _, account := range dueAccounts {
+		if account.AuthID != "" {
+			dueAuthIDs[account.AuthID] = struct{}{}
+		}
+	}
+	knownAuthIDs := knownAccountAuthIDs(r.state.Snapshot(now))
+	if len(dueAuthIDs) == 0 && !hasUnknownCandidate(candidateIDs, knownAuthIDs) {
+		return nil
+	}
+	auths, err := r.host.ListAuths()
+	if err != nil {
+		return fmt.Errorf("list auths: %w", err)
+	}
+	r.recordAuthScan(auths)
+	eligible := make([]pluginapi.HostAuthFileEntry, 0, len(candidateIDs))
+	for _, auth := range auths {
+		if !isRefreshEligible(auth) {
+			continue
+		}
+		if _, candidate := candidateIDs[auth.ID]; !candidate {
+			continue
+		}
+		if len(dueAuthIDs) == 0 {
+			if _, known := knownAuthIDs[auth.ID]; !known {
+				eligible = append(eligible, auth)
+			}
+			continue
+		}
+		if _, due := dueAuthIDs[auth.ID]; due {
+			eligible = append(eligible, auth)
+			continue
+		}
+		if _, known := knownAuthIDs[auth.ID]; !known {
+			eligible = append(eligible, auth)
+		}
+	}
+	if len(eligible) == 0 {
+		return nil
+	}
+	r.refreshAuths(eligible)
+	return nil
+}
+
+func activePriorityCandidateIDs(req pluginapi.SchedulerPickRequest) map[string]struct{} {
+	maxPriority := 0
+	hasCandidate := false
+	for _, candidate := range req.Candidates {
+		if candidate.ID == "" || candidate.Provider != "codex" {
+			continue
+		}
+		if !hasCandidate || candidate.Priority > maxPriority {
+			maxPriority = candidate.Priority
+			hasCandidate = true
+		}
+	}
+	if !hasCandidate {
+		return nil
+	}
+	ids := make(map[string]struct{})
+	for _, candidate := range req.Candidates {
+		if candidate.ID == "" || candidate.Provider != "codex" || candidate.Priority != maxPriority {
+			continue
+		}
+		ids[candidate.ID] = struct{}{}
+	}
+	return ids
+}
+
+func (r *QuotaRefresher) recordAuthScan(auths []pluginapi.HostAuthFileEntry) {
+	if r.state == nil {
+		return
+	}
+	count := 0
+	for _, auth := range auths {
+		if isRefreshEligible(auth) {
+			count++
+		}
+	}
+	r.state.RecordAuthScan(count, r.now())
+}
+
+func knownAccountAuthIDs(snapshot StateSnapshot) map[string]struct{} {
+	ids := make(map[string]struct{}, len(snapshot.Accounts))
+	for _, account := range snapshot.Accounts {
+		if account.AuthID != "" {
+			ids[account.AuthID] = struct{}{}
+		}
+	}
+	return ids
+}
+
+func hasUnknownCandidate(candidateIDs, knownAuthIDs map[string]struct{}) bool {
+	for candidateID := range candidateIDs {
+		if _, known := knownAuthIDs[candidateID]; !known {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *QuotaRefresher) refreshAuths(eligible []pluginapi.HostAuthFileEntry) {
 	concurrency := r.state.Config().MaxRefreshConcurrency
 	if concurrency <= 0 {
 		concurrency = 1
@@ -107,7 +268,6 @@ func (r *QuotaRefresher) RefreshOnce() error {
 	}
 	close(jobs)
 	wg.Wait()
-	return nil
 }
 
 func (r *QuotaRefresher) RefreshOneAuthID(authID string) error {
@@ -139,10 +299,12 @@ func (r *QuotaRefresher) RefreshOneSoon(authID string) {
 		return
 	}
 	r.wg.Add(1)
+	previousDue := r.state.NextRefreshDueAt(r.now())
 	r.mu.Unlock()
 
 	go func() {
 		defer r.wg.Done()
+		defer r.wakeRefreshLoopIfDueAdvanced(previousDue)
 		if err := r.RefreshOneAuthID(authID); err != nil {
 			r.host.Log("error", "quota refresh failed", map[string]any{"auth_id": authID, "error": redactSecrets(err.Error())})
 			if r.state != nil {
@@ -160,8 +322,10 @@ func (r *QuotaRefresher) Start() {
 	}
 	stop := make(chan struct{})
 	done := make(chan struct{})
+	wake := make(chan struct{}, 1)
 	r.stop = stop
 	r.done = done
+	r.wake = wake
 	r.running = true
 	r.stopping = false
 	r.mu.Unlock()
@@ -175,19 +339,78 @@ func (r *QuotaRefresher) Start() {
 		}()
 
 		for {
-			interval := r.state.Config().QuotaRefreshInterval
+			interval := r.nextRefreshLoopDelay()
+			if interval <= 0 {
+				r.RefreshDueSoon()
+				interval = minDuration(r.state.Config().QuotaRefreshInterval, time.Second)
+			}
 			timer := time.NewTimer(interval)
 			select {
 			case <-timer.C:
-				r.RefreshSoon()
+				r.RefreshDueSoon()
+			case <-wake:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
 			case <-stop:
 				if !timer.Stop() {
-					<-timer.C
+					select {
+					case <-timer.C:
+					default:
+					}
 				}
 				return
 			}
 		}
 	}()
+}
+
+func (r *QuotaRefresher) nextRefreshLoopDelay() time.Duration {
+	now := r.now()
+	interval := r.state.Config().QuotaRefreshInterval
+	if dueAt := r.state.NextRefreshDueAt(now); !dueAt.IsZero() {
+		delay := dueAt.Sub(now)
+		if delay < interval {
+			return delay
+		}
+	}
+	return interval
+}
+
+func (r *QuotaRefresher) wakeRefreshLoop() {
+	r.mu.Lock()
+	wake := r.wake
+	running := r.running
+	stopping := r.stopping
+	r.mu.Unlock()
+	if !running || stopping || wake == nil {
+		return
+	}
+	select {
+	case wake <- struct{}{}:
+	default:
+	}
+}
+
+func (r *QuotaRefresher) wakeRefreshLoopIfDueAdvanced(previous time.Time) {
+	now := r.now()
+	next := r.state.NextRefreshDueAt(now)
+	if next.IsZero() || !next.After(now) {
+		return
+	}
+	if previous.IsZero() || !previous.After(now) || next.Before(previous) {
+		r.wakeRefreshLoop()
+	}
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func (r *QuotaRefresher) Stop() {
@@ -216,6 +439,7 @@ func (r *QuotaRefresher) RefreshSoon() {
 	}
 	r.refreshing = true
 	r.wg.Add(1)
+	previousDue := r.state.NextRefreshDueAt(r.now())
 	r.mu.Unlock()
 
 	go func() {
@@ -224,9 +448,47 @@ func (r *QuotaRefresher) RefreshSoon() {
 			r.refreshing = false
 			r.mu.Unlock()
 			r.wg.Done()
+			r.wakeRefreshLoopIfDueAdvanced(previousDue)
 		}()
 		if err := r.RefreshOnce(); err != nil {
 			r.host.Log("error", "quota refresh failed", map[string]any{"error": redactSecrets(err.Error())})
+		}
+	}()
+}
+
+func (r *QuotaRefresher) RefreshDueSoon() {
+	r.refreshDueSoon(func() error {
+		return r.RefreshDueOnce()
+	})
+}
+
+func (r *QuotaRefresher) RefreshDueCandidatesSoon(req pluginapi.SchedulerPickRequest) {
+	r.refreshDueSoon(func() error {
+		return r.RefreshDueCandidatesOnce(req)
+	})
+}
+
+func (r *QuotaRefresher) refreshDueSoon(refresh func() error) {
+	r.mu.Lock()
+	if r.refreshing || r.stopping {
+		r.mu.Unlock()
+		return
+	}
+	r.refreshing = true
+	r.wg.Add(1)
+	previousDue := r.state.NextRefreshDueAt(r.now())
+	r.mu.Unlock()
+
+	go func() {
+		defer func() {
+			r.mu.Lock()
+			r.refreshing = false
+			r.mu.Unlock()
+			r.wg.Done()
+			r.wakeRefreshLoopIfDueAdvanced(previousDue)
+		}()
+		if err := refresh(); err != nil {
+			r.host.Log("error", "quota due refresh failed", map[string]any{"error": redactSecrets(err.Error())})
 		}
 	}()
 }
@@ -236,22 +498,23 @@ func (r *QuotaRefresher) refreshAuth(auth pluginapi.HostAuthFileEntry) {
 
 	authResp, err := r.host.GetAuth(auth.AuthIndex)
 	if err != nil {
-		r.upsertRefreshFailure(account, redactSecrets(fmt.Sprintf("get auth: %v", err)))
+		r.upsertRefreshFailure(account, redactSecrets(fmt.Sprintf("get auth: %v", err)), RefreshFailureTransient)
 		return
 	}
 
 	credentials, err := ExtractCodexCredentials(authResp.JSON)
 	if err != nil {
-		r.upsertRefreshFailure(account, redactWithCredentials(fmt.Sprintf("extract credentials: %v", err), credentials))
+		r.upsertRefreshFailure(account, redactWithCredentials(fmt.Sprintf("extract credentials: %v", err), credentials), RefreshFailureLocal)
 		return
 	}
 	if accessTokenExpired(credentials, r.now()) {
 		credentials, err = r.refreshAndSaveCredentials(authResp, credentials)
 		if err != nil {
-			r.upsertRefreshFailure(account, redactWithCredentials(fmt.Sprintf("refresh access token: %v", err), credentials))
+			r.upsertRefreshFailure(account, redactWithCredentials(fmt.Sprintf("refresh access token: %v", err), credentials), refreshTokenFailureKind(err))
 			return
 		}
 	}
+	account = r.mergeExistingAccount(account)
 	account.ChatGPTAccountID = credentials.ChatGPTAccountID
 
 	cfg := r.state.Config()
@@ -267,18 +530,18 @@ func (r *QuotaRefresher) refreshAuth(auth pluginapi.HostAuthFileEntry) {
 	}
 	resp, err := r.host.Do(req)
 	if err != nil {
-		r.upsertRefreshFailure(account, redactWithCredentials(fmt.Sprintf("quota request: %v", err), credentials))
+		r.upsertRefreshFailure(account, redactWithCredentials(fmt.Sprintf("quota request: %v", err), credentials), RefreshFailureTransient)
 		return
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		message := fmt.Sprintf("quota request returned status %d: response body: %s", resp.StatusCode, sanitizedBodySummary(resp.Body))
-		r.upsertRefreshFailure(account, redactWithCredentials(message, credentials))
+		r.upsertRefreshFailure(account, redactWithCredentials(message, credentials), refreshFailureKind(resp.StatusCode))
 		return
 	}
 
 	quota, err := ParseCodexUsagePayload(resp.Body, r.now())
 	if err != nil {
-		r.upsertRefreshFailure(account, redactWithCredentials(fmt.Sprintf("parse quota: %v", err), credentials))
+		r.upsertRefreshFailure(account, redactWithCredentials(fmt.Sprintf("parse quota: %v", err), credentials), RefreshFailureTransient)
 		return
 	}
 	if resetCredits, err := r.refreshResetCredits(credentials); err != nil {
@@ -291,6 +554,7 @@ func (r *QuotaRefresher) refreshAuth(auth pluginapi.HostAuthFileEntry) {
 	account.LastError = ""
 	account.LastSuccessAt = r.now()
 	r.state.UpsertQuota(account)
+	r.state.RecordAccountSuccess(account.AuthID, account.AuthIndex, r.now())
 	r.state.RecordLog("info", "quota.refresh_success", "账号额度刷新成功", map[string]any{"auth_id": account.AuthID}, r.now())
 }
 
@@ -351,7 +615,10 @@ func (r *QuotaRefresher) refreshCodexAccessToken(refreshToken string) (CodexCred
 		return CodexCredentials{}, fmt.Errorf("token refresh request: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return CodexCredentials{}, fmt.Errorf("token refresh returned status %d: response body: %s", resp.StatusCode, sanitizedBodySummary(resp.Body))
+		return CodexCredentials{}, tokenRefreshStatusError{
+			status: resp.StatusCode,
+			msg:    fmt.Sprintf("token refresh returned status %d: response body: %s", resp.StatusCode, sanitizedBodySummary(resp.Body)),
+		}
 	}
 	var tokenResp struct {
 		AccessToken  string `json:"access_token"`
@@ -378,6 +645,29 @@ func (r *QuotaRefresher) refreshCodexAccessToken(refreshToken string) (CodexCred
 		credentials.ExpiresAt = r.now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 	}
 	return credentials, nil
+}
+
+type tokenRefreshStatusError struct {
+	status int
+	msg    string
+}
+
+func (e tokenRefreshStatusError) Error() string { return e.msg }
+
+func refreshTokenFailureKind(err error) RefreshFailureKind {
+	var statusErr tokenRefreshStatusError
+	if errors.As(err, &statusErr) {
+		if statusErr.status == http.StatusBadRequest || statusErr.status == http.StatusUnauthorized || strings.Contains(strings.ToLower(statusErr.msg), "invalid_grant") {
+			return RefreshFailureAuth
+		}
+		return refreshFailureKind(statusErr.status)
+	}
+	if strings.Contains(err.Error(), "refresh_token is missing") ||
+		strings.Contains(err.Error(), "auth file name is required") ||
+		strings.Contains(err.Error(), "refresh response did not include access_token") {
+		return RefreshFailureLocal
+	}
+	return RefreshFailureTransient
 }
 
 func updateCodexAuthJSON(raw json.RawMessage, credentials CodexCredentials, now time.Time) (json.RawMessage, error) {
@@ -443,11 +733,19 @@ func mergeResetCredits(quota *ParsedQuota, resetCredits ParsedQuota) {
 	}
 }
 
-func (r *QuotaRefresher) upsertRefreshFailure(account AccountState, message string) {
+func refreshFailureKind(status int) RefreshFailureKind {
+	if status == http.StatusUnauthorized {
+		return RefreshFailureAuth
+	}
+	return RefreshFailureTransient
+}
+
+func (r *QuotaRefresher) upsertRefreshFailure(account AccountState, message string, kind RefreshFailureKind) {
 	merged := r.mergeExistingAccount(account)
 	merged.LastRefreshAt = account.LastRefreshAt
 	merged.LastError = message
 	r.state.UpsertQuota(merged)
+	r.state.RecordRefreshFailure(merged.AuthID, merged.AuthIndex, kind, message, r.now())
 	r.state.RecordLog("warn", "quota.refresh_failed", "账号额度刷新失败", map[string]any{"auth_id": merged.AuthID, "error": message}, r.now())
 }
 
