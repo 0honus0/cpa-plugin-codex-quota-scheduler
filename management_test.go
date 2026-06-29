@@ -516,6 +516,30 @@ func TestDynamicAccountRenderingShowsEmptyStateAndStatusNote(t *testing.T) {
 	}
 }
 
+func TestDynamicAccountRenderingHasBilingualStatusLabels(t *testing.T) {
+	store := NewPluginState(DefaultConfig())
+	page := renderStatusPageForTest(t, store)
+	for _, want := range []string{
+		"DUE_REASON_LABELS",
+		"UNAVAILABLE_REASON_LABELS",
+		"labelDueReason(account.refresh_due_reason)",
+		"labelUnavailableReason(account.unavailable_reason)",
+		".empty strong,.empty div",
+		"Quota data is stale or pending refresh",
+		"No Codex accounts were found",
+		"The scheduler is sleeping",
+		"Retry is due now",
+		"Circuit wait",
+		"No data",
+		"Used up",
+		"Scheduler state",
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("page missing bilingual dynamic label marker %q", want)
+		}
+	}
+}
+
 func TestStatusPageUsesPublicStatusForReadOnlyCacheAndKeyForEdit(t *testing.T) {
 	store := NewPluginState(DefaultConfig())
 	page := renderStatusPageForTest(t, store)
