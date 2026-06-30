@@ -465,6 +465,35 @@ func TestStatusPageUsesCollapsedSettingsAndNoHardReload(t *testing.T) {
 	}
 }
 
+func TestStatusPageShowsResetProbeWarningOutsideSettingsPanel(t *testing.T) {
+	store := NewPluginState(DefaultConfig())
+	page := renderStatusPageForTest(t, store)
+	warningStart := strings.Index(page, `id="resetProbeWarning"`)
+	settingsStart := strings.Index(page, `id="settingsPanel"`)
+	if warningStart < 0 {
+		t.Fatalf("page missing reset probe warning: %s", page)
+	}
+	if settingsStart < 0 {
+		t.Fatalf("page missing settings panel: %s", page)
+	}
+	if warningStart > settingsStart {
+		t.Fatalf("reset probe warning renders after settings panel")
+	}
+	for _, want := range []string{
+		`data-i18n="resetProbe.warningTitle"`,
+		`data-i18n="resetProbe.warningBody"`,
+		`name="enable_reset_probe"`,
+		`id="enableResetProbe"`,
+		`data-i18n="settings.enableResetProbe"`,
+		`enable_reset_probe:document.getElementById('enableResetProbe').checked`,
+		`document.getElementById('enableResetProbe').checked=s.enable_reset_probe===true`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("page missing reset probe marker %q", want)
+		}
+	}
+}
+
 func TestStatusPageDoesNotClobberDirtySettingsOnPublicPoll(t *testing.T) {
 	store := NewPluginState(DefaultConfig())
 	page := renderStatusPageForTest(t, store)
@@ -761,6 +790,69 @@ func TestStatusPayloadIncludesAuthFailureVisibility(t *testing.T) {
 	}
 }
 
+func TestStatusPayloadIncludesResetProbeStatus(t *testing.T) {
+	now := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	account := weeklyAccount("auth-1", 5, now.Add(24*time.Hour), false)
+	account.ResetProbes = map[WindowKind]ResetProbeState{
+		WindowWeekly: {
+			WindowKind:  WindowWeekly,
+			Status:      ResetProbeStatusFailed,
+			ResetAt:     now.Add(7 * time.Hour),
+			NextCheckAt: now.Add(8 * time.Hour),
+			LastProbeAt: now.Add(-10 * time.Minute),
+			VerifiedAt:  now.Add(-5 * time.Minute),
+			Attempts:    2,
+			Error:       "redacted upstream error",
+		},
+		WindowFiveHour: {
+			WindowKind:  WindowFiveHour,
+			Status:      ResetProbeStatusPending,
+			ResetAt:     now.Add(5 * time.Hour),
+			NextCheckAt: now.Add(6 * time.Hour),
+		},
+	}
+	store.UpsertQuota(account)
+
+	snapshot := store.Snapshot(now)
+	ordered := BuildOrderedAccounts(syntheticStatusRequest(snapshot), snapshot, now)
+	payload := BuildStatusPayload(snapshot, ordered)
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal status payload: %v", err)
+	}
+	var body struct {
+		Accounts []struct {
+			ResetProbes []struct {
+				WindowKind  string `json:"window_kind"`
+				Status      string `json:"status"`
+				ResetAt     string `json:"reset_at,omitempty"`
+				NextCheckAt string `json:"next_check_at,omitempty"`
+				LastProbeAt string `json:"last_probe_at,omitempty"`
+				VerifiedAt  string `json:"verified_at,omitempty"`
+				Attempts    int    `json:"attempts,omitempty"`
+				Error       string `json:"error,omitempty"`
+			} `json:"reset_probes"`
+		} `json:"accounts"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("unmarshal status payload: %v; body=%s", err, raw)
+	}
+	if len(body.Accounts) != 1 || len(body.Accounts[0].ResetProbes) != 2 {
+		t.Fatalf("reset probes = %#v; body=%s", body.Accounts, raw)
+	}
+	probes := body.Accounts[0].ResetProbes
+	if probes[0].WindowKind != "five_hour" || probes[1].WindowKind != "weekly" {
+		t.Fatalf("reset probes not sorted by window kind: %#v", probes)
+	}
+	if probes[0].Status != "pending" || probes[0].ResetAt != formatTime(now.Add(5*time.Hour)) || probes[0].NextCheckAt != formatTime(now.Add(6*time.Hour)) {
+		t.Fatalf("five-hour probe = %#v", probes[0])
+	}
+	if probes[1].Status != "failed" || probes[1].LastProbeAt != formatTime(now.Add(-10*time.Minute)) || probes[1].VerifiedAt != formatTime(now.Add(-5*time.Minute)) || probes[1].Attempts != 2 || probes[1].Error != "redacted upstream error" {
+		t.Fatalf("weekly probe = %#v", probes[1])
+	}
+}
+
 func TestConfigFromSettingsParsesAdaptiveRefresh(t *testing.T) {
 	cfg, err := ConfigFromSettings(DefaultConfig(), SettingsPayload{
 		HandleEnabled:                   true,
@@ -925,7 +1017,7 @@ func TestResourceStatusQueryActionsDoNotMutateState(t *testing.T) {
 	})
 
 	actions := map[string]string{
-		"settings":            `{"handle_enabled":false,"monthly_mode":"priority","quota_refresh_interval":"45m","stale_after":"6h","enable_usage_feedback":false,"max_refresh_concurrency":2,"max_log_entries":30,"log_retention":"4h"}`,
+		"settings":            `{"handle_enabled":false,"monthly_mode":"priority","quota_refresh_interval":"45m","stale_after":"6h","enable_usage_feedback":false,"enable_reset_probe":true,"max_refresh_concurrency":2,"max_log_entries":30,"log_retention":"4h"}`,
 		"refresh":             `{}`,
 		"refresh_account":     `{"auth_id":"auth-1"}`,
 		"import":              `{"config":{"monthly_mode":"priority","quota_refresh_interval":2700000000000,"stale_after":21600000000000,"max_refresh_concurrency":2}}`,
@@ -948,6 +1040,9 @@ func TestResourceStatusQueryActionsDoNotMutateState(t *testing.T) {
 	}
 	if !reflect.DeepEqual(store.Config(), originalConfig) {
 		t.Fatalf("resource action changed config: %#v", store.Config())
+	}
+	if store.Config().EnableResetProbe {
+		t.Fatalf("resource action enabled reset probe: %#v", store.Config())
 	}
 	if got := store.Annotations().Accounts["auth:auth-1"].Alias; got != "original" {
 		t.Fatalf("resource action changed annotation alias = %q, want original", got)
@@ -1024,6 +1119,17 @@ func TestResourceStatusDataPublishesSanitizedCacheWithoutManagementKey(t *testin
 	count := 1
 	account.Quota.ResetCreditsAvailableCount = &count
 	account.Quota.ResetCredits = []ResetCredit{{ExpiresAt: now.Add(30 * 24 * time.Hour), Status: "available"}}
+	account.ResetProbes = map[WindowKind]ResetProbeState{
+		WindowFiveHour: {
+			WindowKind:  WindowFiveHour,
+			Status:      ResetProbeStatusFailed,
+			ResetAt:     now.Add(5 * time.Hour),
+			NextCheckAt: now.Add(6 * time.Hour),
+			LastProbeAt: now.Add(-time.Minute),
+			Attempts:    1,
+			Error:       "redacted access_token bearer authorization cookie " + chatGPTQuotaEndpoint,
+		},
+	}
 	store.UpsertQuota(account)
 	store.RecordLog("info", "scheduler.selected", "请求已由插件接管", map[string]any{"auth_id": "auth-1"}, now)
 
@@ -1054,6 +1160,9 @@ func TestResourceStatusDataPublishesSanitizedCacheWithoutManagementKey(t *testin
 		if strings.Contains(bodyText, forbidden) {
 			t.Fatalf("public status data leaked sensitive marker %q: %s", forbidden, resp.Body)
 		}
+	}
+	if !strings.Contains(bodyText, `"reset_probes"`) {
+		t.Fatalf("public status data missing reset probe status: %s", resp.Body)
 	}
 	var body StatusPayload
 	if err := json.Unmarshal(resp.Body, &body); err != nil {

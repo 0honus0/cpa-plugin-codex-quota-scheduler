@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -65,34 +66,46 @@ type SettingsPayload struct {
 }
 
 type StatusAccount struct {
-	Rank                         int           `json:"rank"`
-	AuthID                       string        `json:"auth_id"`
-	Alias                        string        `json:"alias,omitempty"`
-	Notes                        string        `json:"notes,omitempty"`
-	GroupID                      string        `json:"group_id,omitempty"`
-	Group                        string        `json:"group,omitempty"`
-	GroupNotes                   string        `json:"group_notes,omitempty"`
-	Tags                         []string      `json:"tags,omitempty"`
-	CPAPriority                  int           `json:"cpa_priority"`
-	Family                       AccountFamily `json:"family"`
-	QueueStatus                  QueueStatus   `json:"queue_status"`
-	Available                    bool          `json:"available"`
-	UnavailableReason            string        `json:"unavailable_reason,omitempty"`
-	ResetExpiry                  time.Time     `json:"reset_expiry,omitempty"`
-	ResetExpiryText              string        `json:"reset_expiry_text,omitempty"`
-	CacheAge                     string        `json:"cache_age,omitempty"`
-	CacheAgeSeconds              int64         `json:"cache_age_seconds,omitempty"`
-	LastError                    string        `json:"last_error,omitempty"`
-	RefreshDueReason             string        `json:"refresh_due_reason,omitempty"`
-	NextRetryText                string        `json:"next_retry_text,omitempty"`
-	AuthFailure                  bool          `json:"auth_failure"`
-	StatusNote                   string        `json:"status_note,omitempty"`
-	FiveHour                     StatusWindow  `json:"five_hour"`
-	LongWindow                   StatusWindow  `json:"long_window"`
-	Circuit                      StatusCircuit `json:"circuit"`
-	ResetCreditsAvailableCount   *int          `json:"reset_credits_available_count,omitempty"`
-	ResetCreditsTotalEarnedCount *int          `json:"reset_credits_total_earned_count,omitempty"`
-	ResetCredits                 []ResetCredit `json:"reset_credits,omitempty"`
+	Rank                         int                `json:"rank"`
+	AuthID                       string             `json:"auth_id"`
+	Alias                        string             `json:"alias,omitempty"`
+	Notes                        string             `json:"notes,omitempty"`
+	GroupID                      string             `json:"group_id,omitempty"`
+	Group                        string             `json:"group,omitempty"`
+	GroupNotes                   string             `json:"group_notes,omitempty"`
+	Tags                         []string           `json:"tags,omitempty"`
+	CPAPriority                  int                `json:"cpa_priority"`
+	Family                       AccountFamily      `json:"family"`
+	QueueStatus                  QueueStatus        `json:"queue_status"`
+	Available                    bool               `json:"available"`
+	UnavailableReason            string             `json:"unavailable_reason,omitempty"`
+	ResetExpiry                  time.Time          `json:"reset_expiry,omitempty"`
+	ResetExpiryText              string             `json:"reset_expiry_text,omitempty"`
+	CacheAge                     string             `json:"cache_age,omitempty"`
+	CacheAgeSeconds              int64              `json:"cache_age_seconds,omitempty"`
+	LastError                    string             `json:"last_error,omitempty"`
+	RefreshDueReason             string             `json:"refresh_due_reason,omitempty"`
+	NextRetryText                string             `json:"next_retry_text,omitempty"`
+	AuthFailure                  bool               `json:"auth_failure"`
+	StatusNote                   string             `json:"status_note,omitempty"`
+	FiveHour                     StatusWindow       `json:"five_hour"`
+	LongWindow                   StatusWindow       `json:"long_window"`
+	Circuit                      StatusCircuit      `json:"circuit"`
+	ResetCreditsAvailableCount   *int               `json:"reset_credits_available_count,omitempty"`
+	ResetCreditsTotalEarnedCount *int               `json:"reset_credits_total_earned_count,omitempty"`
+	ResetCredits                 []ResetCredit      `json:"reset_credits,omitempty"`
+	ResetProbes                  []StatusResetProbe `json:"reset_probes,omitempty"`
+}
+
+type StatusResetProbe struct {
+	WindowKind  WindowKind       `json:"window_kind"`
+	Status      ResetProbeStatus `json:"status"`
+	ResetAt     string           `json:"reset_at,omitempty"`
+	NextCheckAt string           `json:"next_check_at,omitempty"`
+	LastProbeAt string           `json:"last_probe_at,omitempty"`
+	VerifiedAt  string           `json:"verified_at,omitempty"`
+	Attempts    int              `json:"attempts,omitempty"`
+	Error       string           `json:"error,omitempty"`
 }
 
 type StatusCircuit struct {
@@ -492,6 +505,7 @@ func BuildStatusPayload(snapshot StateSnapshot, ordered []ScheduledAccount) Stat
 		status.ResetCreditsAvailableCount = cloneIntPtr(account.Quota.ResetCreditsAvailableCount)
 		status.ResetCreditsTotalEarnedCount = cloneIntPtr(account.Quota.ResetCreditsTotalEarnedCount)
 		status.ResetCredits = append([]ResetCredit(nil), account.Quota.ResetCredits...)
+		status.ResetProbes = statusResetProbes(account.ResetProbes)
 		if !account.LastSuccessAt.IsZero() {
 			age := snapshot.Now.Sub(account.LastSuccessAt)
 			if age < 0 {
@@ -657,6 +671,52 @@ func statusCircuit(circuit CircuitBreakerState, now time.Time) StatusCircuit {
 	}
 }
 
+func statusResetProbes(probes map[WindowKind]ResetProbeState) []StatusResetProbe {
+	if len(probes) == 0 {
+		return nil
+	}
+	kinds := make([]WindowKind, 0, len(probes))
+	for kind := range probes {
+		kinds = append(kinds, kind)
+	}
+	sort.Slice(kinds, func(i, j int) bool {
+		return string(kinds[i]) < string(kinds[j])
+	})
+	statuses := make([]StatusResetProbe, 0, len(kinds))
+	for _, kind := range kinds {
+		probe := probes[kind]
+		windowKind := probe.WindowKind
+		if windowKind == "" {
+			windowKind = kind
+		}
+		statuses = append(statuses, StatusResetProbe{
+			WindowKind:  windowKind,
+			Status:      probe.Status,
+			ResetAt:     formatTime(probe.ResetAt),
+			NextCheckAt: formatTime(probe.NextCheckAt),
+			LastProbeAt: formatTime(probe.LastProbeAt),
+			VerifiedAt:  formatTime(probe.VerifiedAt),
+			Attempts:    probe.Attempts,
+			Error:       sanitizeResetProbeError(probe.Error),
+		})
+	}
+	return statuses
+}
+
+func sanitizeResetProbeError(message string) string {
+	if message == "" {
+		return ""
+	}
+	redacted := strings.ReplaceAll(redactSecrets(message), chatGPTQuotaEndpoint, "[redacted]")
+	lower := strings.ToLower(redacted)
+	for _, forbidden := range []string{"access_token", "refresh_token", "id_token", "bearer", "authorization", "cookie"} {
+		if strings.Contains(lower, forbidden) {
+			return "redacted reset probe error"
+		}
+	}
+	return redacted
+}
+
 func cloneIntPtr(value *int) *int {
 	if value == nil {
 		return nil
@@ -731,6 +791,11 @@ func handlePublicStatusDataRequest(store *PluginState, now time.Time) pluginapi.
 func sanitizePublicStatusPayload(payload StatusPayload) StatusPayload {
 	payload.Shell = false
 	payload.Settings.QuotaEndpoint = ""
+	for i := range payload.Accounts {
+		for j := range payload.Accounts[i].ResetProbes {
+			payload.Accounts[i].ResetProbes[j].Error = sanitizeResetProbeError(payload.Accounts[i].ResetProbes[j].Error)
+		}
+	}
 	return payload
 }
 
@@ -977,6 +1042,7 @@ var statusTemplateV2 = template.Must(template.New("status-v2").Funcs(template.Fu
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Codex 额度调度器</title>
 <style>
+.warning{margin-top:14px;border:1px solid #fbbf24;background:#fffbeb;color:#78350f;border-radius:7px;padding:10px 11px;font-size:12px;line-height:1.45}.warning strong{display:block;color:#92400e;font-size:13px;margin-bottom:3px}
 *{box-sizing:border-box}body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;color:#1f2937;background:#f6f7f9}button,input,select,textarea{font:inherit}button{border:0;border-radius:7px;padding:9px 12px;background:#2563eb;color:#fff;cursor:pointer;font-weight:650}button.secondary{background:#eef2ff;color:#1e40af}button.ghost{background:#f3f4f6;color:#374151}button:disabled{opacity:.55;cursor:not-allowed}code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}.shell{display:grid;grid-template-columns:310px minmax(0,1fr);min-height:100vh}.sidebar{background:#fff;border-right:1px solid #e5e7eb;padding:18px;position:sticky;top:0;height:100vh;overflow:auto}.main{padding:20px 22px 32px;overflow:auto}.brand{display:grid;gap:5px;margin-bottom:18px}.brand h1{font-size:20px;line-height:1.2;margin:0;color:#111827}.brand p{font-size:12px;line-height:1.45;color:#6b7280;margin:0}.section{border-top:1px solid #eef0f3;padding-top:16px;margin-top:16px}.section h2{font-size:14px;margin:0 0 12px;color:#111827}.collapsible summary{cursor:pointer;list-style:none;display:flex;align-items:flex-start;gap:8px}.collapsible summary::-webkit-details-marker{display:none}.summary-toggle{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:999px;background:#eef2ff;color:#1e40af;font-weight:750;line-height:1;transition:transform .16s ease}.collapsible[open] .summary-toggle{transform:rotate(90deg)}.summary-text{display:grid;gap:3px}.summary-title{font-size:14px;font-weight:750;color:#111827}.summary-subtitle{font-size:12px;line-height:1.35;color:#6b7280}.collapsible-body{padding-top:14px}.primary-actions{margin-top:12px}.field{display:grid;gap:6px;margin-bottom:12px}.field span{font-size:12px;color:#4b5563;font-weight:650}.field input,.field select,.field textarea{width:100%;border:1px solid #d1d5db;border-radius:7px;background:#fff;color:#111827;padding:8px 10px}.field textarea{min-height:84px;resize:vertical}.toggle{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}.toggle span{font-size:13px;font-weight:650}.actions{display:flex;gap:8px;flex-wrap:wrap}.notice{margin-top:12px;border-radius:7px;padding:10px 11px;background:#ecfdf5;color:#065f46;font-size:12px;line-height:1.45}.notice.error{background:#fef2f2;color:#991b1b}.toolbar{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:18px}.toolbar h2{font-size:22px;margin:0;color:#111827}.toolbar p{font-size:13px;color:#6b7280;margin:5px 0 0}.metrics{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.metric{border:1px solid #e5e7eb;background:#fff;border-radius:7px;padding:8px 10px;font-size:12px;color:#374151}.queue{display:grid;grid-template-columns:repeat(auto-fill,minmax(310px,1fr));gap:12px}.card{background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:14px;display:grid;gap:12px;box-shadow:0 1px 2px rgba(15,23,42,.04)}.card.next{border-color:#2563eb;box-shadow:0 0 0 1px rgba(37,99,235,.18),0 8px 24px rgba(37,99,235,.08)}.cardTop{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}.rank{display:inline-flex;align-items:center;justify-content:center;min-width:30px;height:30px;border-radius:7px;background:#111827;color:#fff;font-weight:750;font-size:13px}.identity{min-width:0;display:grid;gap:5px}.titleLine{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.title{font-weight:750;color:#111827;overflow-wrap:anywhere}.groupPill{border-radius:999px;background:#f0fdf4;color:#166534;padding:3px 7px;font-size:11px}.sub{font-size:12px;color:#6b7280;overflow-wrap:anywhere}.badges{display:flex;gap:6px;flex-wrap:wrap}.badge{border-radius:999px;background:#f3f4f6;color:#374151;padding:4px 8px;font-size:12px}.badge.ok{background:#dcfce7;color:#166534}.badge.no{background:#fee2e2;color:#991b1b}.badge.next{background:#dbeafe;color:#1d4ed8}.kv{display:grid;grid-template-columns:88px minmax(0,1fr);gap:6px 10px;font-size:12px}.kv span:nth-child(odd){color:#6b7280}.kv span:nth-child(even){color:#111827;overflow-wrap:anywhere}.chips{display:flex;gap:6px;flex-wrap:wrap;min-height:24px}.chip{border-radius:999px;background:#eef2ff;color:#3730a3;padding:4px 8px;font-size:12px}.quotaList{display:grid;gap:10px}.quota-row{display:grid;gap:5px}.quota-head{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;font-size:12px;color:#374151}.quota-title{font-weight:650;color:#111827}.quota-reset{grid-column:1/-1;color:#6b7280}.localTime{color:#374151}.quota-bar{height:8px;border-radius:999px;background:#e5e7eb;overflow:hidden}.quota-fill{height:100%;border-radius:999px;background:#2f7d5f}.quota-fill.warn{background:#b7791f}.quota-fill.danger{background:#dc2626}.metaLine{display:flex;gap:6px;flex-wrap:wrap}.noteBlock{font-size:12px;line-height:1.45;color:#4b5563;background:#f9fafb;border-radius:7px;padding:8px 9px;display:grid;gap:3px}.cardActions{display:flex;justify-content:flex-end}.empty{background:#fff;border:1px dashed #d1d5db;border-radius:8px;padding:28px;text-align:center;color:#6b7280}.logs{margin-top:20px;background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:14px}.logsHeader{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:10px}.logsHeader h2{font-size:16px;margin:0}.logList{display:grid;gap:8px;max-height:260px;overflow:auto}.logItem{border-left:3px solid #d1d5db;padding:7px 9px;background:#f9fafb;border-radius:0 7px 7px 0}.logItem.info{border-left-color:#2563eb}.logItem.warn{border-left-color:#b7791f}.logItem.error{border-left-color:#dc2626}.logMeta{font-size:11px;color:#6b7280;margin-bottom:3px}.logMsg{font-size:12px;color:#111827;line-height:1.45}dialog{border:0;border-radius:8px;padding:0;width:min(560px,calc(100vw - 28px));box-shadow:0 24px 64px rgba(15,23,42,.28)}dialog::backdrop{background:rgba(15,23,42,.38)}.dialogBody{padding:18px}.dialogHead{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:14px}.dialogHead h2{font-size:18px;margin:0;color:#111827}.dialogHead p{font-size:12px;color:#6b7280;margin:4px 0 0}.dialogGrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.dialogGrid .wide{grid-column:1/-1}.dialogActions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}@media(max-width:860px){.shell{grid-template-columns:1fr}.sidebar{height:auto;position:relative;border-right:0;border-bottom:1px solid #e5e7eb}.toolbar{display:grid}.metrics{justify-content:flex-start}.dialogGrid{grid-template-columns:1fr}}
 </style>
 </head>
@@ -987,9 +1053,11 @@ var statusTemplateV2 = template.Must(template.New("status-v2").Funcs(template.Fu
 <label class="field"><span data-i18n="app.language">界面语言</span><select id="localeSelect"><option value="zh-CN">中文</option><option value="en">English</option></select></label>
 <label class="field"><span data-i18n="connection.managementKey">CPA 管理密钥</span><input id="managementKey" type="password" autocomplete="off" spellcheck="false"></label>
 <div class="actions primary-actions"><button id="refreshQuota" type="button" class="secondary" data-i18n="actions.refreshQuota">刷新额度</button></div>
+<div class="warning" id="resetProbeWarning"><strong data-i18n="resetProbe.warningTitle">自动 reset probe 默认关闭</strong><span data-i18n="resetProbe.warningBody">只有勾选后，调度器才会在 reset 看起来 lazy 时发送一个极小 Codex 请求来启动下一个额度窗口。</span></div>
 <details class="section collapsible" id="settingsPanel"><summary><span class="summary-toggle" aria-hidden="true">&gt;</span><span class="summary-text"><span class="summary-title" data-i18n="settings.title">调度设置</span><span class="summary-subtitle" data-i18n="settings.summary">默认配置已经都设置好了，正常情况下不需要手动设置。</span></span></summary><div class="collapsible-body">
 <label class="toggle"><span data-i18n="settings.handleEnabled">启用调度接管</span><input id="handleEnabled" type="checkbox"></label>
 <label class="toggle"><span data-i18n="settings.usageFeedback">失败反馈标记额度耗尽</span><input id="usageFeedback" type="checkbox"></label>
+<label class="toggle"><span data-i18n="settings.enableResetProbe">启用自动 reset probe</span><input id="enableResetProbe" name="enable_reset_probe" type="checkbox"></label>
 <label class="field"><span data-i18n="settings.monthlyMode">Monthly 模式</span><select id="monthlyMode"><option value="expiry_order" data-i18n="settings.expiryOrder">按到期时间排序</option><option value="priority" data-i18n="settings.monthlyPriority">优先使用 Monthly</option></select></label>
 <label class="field"><span data-i18n="settings.refreshInterval">额度刷新间隔</span><input id="refreshInterval" spellcheck="false"></label>
 <label class="field"><span data-i18n="settings.staleAfter">缓存过期判定</span><input id="staleAfter" spellcheck="false"></label>
@@ -1029,7 +1097,8 @@ const LOCALE_STORAGE_KEY='codex-quota-scheduler-locale-v1';
 const TRANSLATIONS={
   en:{
     'app.title':'Codex Quota Scheduler','app.subtitle':'Optimized Fill First scheduling. Configuration, aliases, groups, tags, and notes are saved in the plugin state file.','app.language':'Language','connection.managementKey':'CPA management key',
-    'settings.title':'Scheduler Settings','settings.summary':'Default configuration is ready; normally no manual changes are needed.','settings.handleEnabled':'Enable scheduler takeover','settings.usageFeedback':'Mark quota exhausted from failure feedback','settings.monthlyMode':'Monthly mode','settings.expiryOrder':'Sort by expiry time','settings.monthlyPriority':'Prefer Monthly','settings.refreshInterval':'Quota refresh interval','settings.staleAfter':'Stale cache threshold','settings.refreshActiveWindow':'Refresh active window','settings.refreshAfterResetDelay':'Refresh after reset delay','settings.refreshRetryDelays':'Refresh retry delays','settings.refreshOnStartup':'Refresh on startup','settings.maxConcurrency':'Max refresh concurrency','settings.circuitFailureThreshold':'Circuit failure threshold','settings.circuitOpenDuration':'Circuit open duration','settings.circuitHalfOpenSuccessThreshold':'Half-open recovery successes','settings.maxLogEntries':'Max log entries','settings.logRetention':'Log retention',
+    'resetProbe.warningTitle':'Automatic reset probe is off by default','resetProbe.warningBody':'Only after you check the box will the scheduler send one tiny Codex request when a reset looks lazy, nudging the next quota window to start.',
+    'settings.title':'Scheduler Settings','settings.summary':'Default configuration is ready; normally no manual changes are needed.','settings.handleEnabled':'Enable scheduler takeover','settings.usageFeedback':'Mark quota exhausted from failure feedback','settings.enableResetProbe':'Enable automatic reset probe','settings.monthlyMode':'Monthly mode','settings.expiryOrder':'Sort by expiry time','settings.monthlyPriority':'Prefer Monthly','settings.refreshInterval':'Quota refresh interval','settings.staleAfter':'Stale cache threshold','settings.refreshActiveWindow':'Refresh active window','settings.refreshAfterResetDelay':'Refresh after reset delay','settings.refreshRetryDelays':'Refresh retry delays','settings.refreshOnStartup':'Refresh on startup','settings.maxConcurrency':'Max refresh concurrency','settings.circuitFailureThreshold':'Circuit failure threshold','settings.circuitOpenDuration':'Circuit open duration','settings.circuitHalfOpenSuccessThreshold':'Half-open recovery successes','settings.maxLogEntries':'Max log entries','settings.logRetention':'Log retention',
     'actions.saveSettings':'Save Settings','actions.refreshQuota':'Refresh Quota','actions.exportConfig':'Export Config','actions.importConfig':'Import Config','actions.refreshLogs':'Refresh Logs','actions.exportLogs':'Export Logs','actions.close':'Close','actions.saveAccount':'Save Account','actions.cancel':'Cancel',
     'queue.title':'Account Queue','queue.description':'Account cards are sorted by the current scheduler priority. The first available account is preferred for the next Codex request.','metrics.nextAccount':'Next account','metrics.scheduler':'Scheduler','metrics.lastSelected':'Last selected',
     'logs.title':'Scheduler Logs','logs.empty':'No logs yet. Send a request or refresh quota manually to show records here.',
@@ -1039,7 +1108,8 @@ const TRANSLATIONS={
   },
   'zh-CN':{
     'app.title':'Codex 额度调度器','app.subtitle':'优化版 Fill First。配置、别名、分组、标签和备注由插件内部状态文件保存。','app.language':'界面语言','connection.managementKey':'CPA 管理密钥',
-    'settings.title':'调度设置','settings.summary':'默认配置已经都设置好了，正常情况下不需要手动设置。','settings.handleEnabled':'启用调度接管','settings.usageFeedback':'失败反馈标记额度耗尽','settings.monthlyMode':'Monthly 模式','settings.expiryOrder':'按到期时间排序','settings.monthlyPriority':'优先使用 Monthly','settings.refreshInterval':'额度刷新间隔','settings.staleAfter':'缓存过期判定','settings.refreshActiveWindow':'活跃刷新窗口','settings.refreshAfterResetDelay':'重置后刷新延迟','settings.refreshRetryDelays':'刷新失败重试间隔','settings.refreshOnStartup':'启动时刷新额度','settings.maxConcurrency':'最大并发刷新','settings.circuitFailureThreshold':'熔断失败阈值','settings.circuitOpenDuration':'熔断等待时间','settings.circuitHalfOpenSuccessThreshold':'半开恢复成功次数','settings.maxLogEntries':'最大日志条数','settings.logRetention':'日志保留时间',
+    'resetProbe.warningTitle':'自动 reset probe 默认关闭','resetProbe.warningBody':'只有勾选后，调度器才会在 reset 看起来 lazy 时发送一个极小 Codex 请求来启动下一个额度窗口。',
+    'settings.title':'调度设置','settings.summary':'默认配置已经都设置好了，正常情况下不需要手动设置。','settings.handleEnabled':'启用调度接管','settings.usageFeedback':'失败反馈标记额度耗尽','settings.enableResetProbe':'启用自动 reset probe','settings.monthlyMode':'Monthly 模式','settings.expiryOrder':'按到期时间排序','settings.monthlyPriority':'优先使用 Monthly','settings.refreshInterval':'额度刷新间隔','settings.staleAfter':'缓存过期判定','settings.refreshActiveWindow':'活跃刷新窗口','settings.refreshAfterResetDelay':'重置后刷新延迟','settings.refreshRetryDelays':'刷新失败重试间隔','settings.refreshOnStartup':'启动时刷新额度','settings.maxConcurrency':'最大并发刷新','settings.circuitFailureThreshold':'熔断失败阈值','settings.circuitOpenDuration':'熔断等待时间','settings.circuitHalfOpenSuccessThreshold':'半开恢复成功次数','settings.maxLogEntries':'最大日志条数','settings.logRetention':'日志保留时间',
     'actions.saveSettings':'保存设置','actions.refreshQuota':'刷新额度','actions.exportConfig':'导出配置','actions.importConfig':'导入配置','actions.refreshLogs':'刷新日志','actions.exportLogs':'导出日志','actions.close':'关闭','actions.saveAccount':'保存账号','actions.cancel':'取消',
     'queue.title':'账号队列','queue.description':'账号卡片按当前调度优先级排序。第一个可用账号就是下一次 Codex 请求会优先选择的账号。','metrics.nextAccount':'下一账号','metrics.scheduler':'调度','metrics.lastSelected':'最近选择',
     'logs.title':'调度日志','logs.empty':'暂无日志。发起请求或手动刷新额度后，这里会显示记录。',
@@ -1106,7 +1176,7 @@ function settingsFocusedOrDirty(){const panel=document.getElementById('settingsP
 function applyStatus(data,options){STATUS=data;statusLoaded=true;rebuildDerivedState();const shouldFillSettings=(options&&options.fillSettings)||!settingsInitialized||!settingsFocusedOrDirty();if(shouldFillSettings){fillSettings();settingsInitialized=true}renderMetrics();renderAccounts(STATUS.accounts||[]);renderLogs(STATUS.logs||[]);applyLocale()}
 async function refreshStatus(options){const opts=options||{};const data=(opts.management||hasManagementKey())?await requestManagement('/status',{query:{format:'json'}}):await requestPublicStatus();applyStatus(data,opts)}
 async function pollStatus(times,delayMs){for(let i=0;i<times;i++){await new Promise((resolve)=>window.setTimeout(resolve,delayMs));await refreshStatus()}}
-function collectSettingsPayload(){return{handle_enabled:document.getElementById('handleEnabled').checked,enable_usage_feedback:document.getElementById('usageFeedback').checked,monthly_mode:document.getElementById('monthlyMode').value,quota_refresh_interval:document.getElementById('refreshInterval').value.trim(),stale_after:document.getElementById('staleAfter').value.trim(),refresh_active_window:document.getElementById('refreshActiveWindow').value.trim(),refresh_after_reset_delay:document.getElementById('refreshAfterResetDelay').value.trim(),refresh_retry_delays:document.getElementById('refreshRetryDelays').value.trim(),refresh_on_startup:document.getElementById('refreshOnStartup').checked,max_refresh_concurrency:Number.parseInt(document.getElementById('maxConcurrency').value,10)||1,circuit_failure_threshold:Number.parseInt(document.getElementById('circuitFailureThreshold').value,10)||5,circuit_open_duration:document.getElementById('circuitOpenDuration').value.trim(),circuit_half_open_success_threshold:Number.parseInt(document.getElementById('circuitHalfOpenSuccessThreshold').value,10)||2,max_log_entries:Number.parseInt(document.getElementById('maxLogEntries').value,10)||200,log_retention:document.getElementById('logRetention').value.trim()}}
+function collectSettingsPayload(){return{handle_enabled:document.getElementById('handleEnabled').checked,enable_usage_feedback:document.getElementById('usageFeedback').checked,enable_reset_probe:document.getElementById('enableResetProbe').checked,monthly_mode:document.getElementById('monthlyMode').value,quota_refresh_interval:document.getElementById('refreshInterval').value.trim(),stale_after:document.getElementById('staleAfter').value.trim(),refresh_active_window:document.getElementById('refreshActiveWindow').value.trim(),refresh_after_reset_delay:document.getElementById('refreshAfterResetDelay').value.trim(),refresh_retry_delays:document.getElementById('refreshRetryDelays').value.trim(),refresh_on_startup:document.getElementById('refreshOnStartup').checked,max_refresh_concurrency:Number.parseInt(document.getElementById('maxConcurrency').value,10)||1,circuit_failure_threshold:Number.parseInt(document.getElementById('circuitFailureThreshold').value,10)||5,circuit_open_duration:document.getElementById('circuitOpenDuration').value.trim(),circuit_half_open_success_threshold:Number.parseInt(document.getElementById('circuitHalfOpenSuccessThreshold').value,10)||2,max_log_entries:Number.parseInt(document.getElementById('maxLogEntries').value,10)||200,log_retention:document.getElementById('logRetention').value.trim()}}
 function node(tag,className,text){const item=document.createElement(tag);if(className)item.className=className;if(text!==undefined)item.textContent=text;return item}
 function addKV(parent,key,value){parent.append(node('span','',key),node('span','',value||'暂无'))}
 function addBadge(text,className){return node('span','badge '+(className||''),text)}
@@ -1119,7 +1189,7 @@ function renderAccounts(accounts){const queue=document.querySelector('section.qu
 async function readJSON(resp){const text=await resp.text();if(!text)return{};try{return JSON.parse(text)}catch{return{error:text}}}
 function authHeaders(){const input=document.getElementById('managementKey');const key=(input&&input.value||'').trim();if(!key)throw new Error(t('error.managementKeyRequired'));const name='Author'+'ization';const scheme='Bea'+'rer ';const headers={};headers[name]=key.toLowerCase().startsWith(scheme.toLowerCase())?key:scheme+key;return headers}
 async function requestManagement(path,options){const opts=options||{};const headers=authHeaders();let url=MANAGEMENT_BASE+path;if(opts.query){const params=new URLSearchParams(opts.query);url+='?'+params.toString()}const init={method:opts.method||'GET',headers};if(Object.prototype.hasOwnProperty.call(opts,'body')){headers['Content-Type']=opts.contentType||'application/json';init.body=typeof opts.body==='string'?opts.body:JSON.stringify(opts.body)}const resp=await fetch(url,init);const data=await readJSON(resp);if(!resp.ok)throw new Error(data.error||data.message||t('error.requestFailed',{status:resp.status}));return data}
-function fillSettings(){const s=STATUS.settings||{};document.getElementById('handleEnabled').checked=s.handle_enabled!==false;document.getElementById('usageFeedback').checked=s.enable_usage_feedback!==false;document.getElementById('monthlyMode').value=s.monthly_mode||'expiry_order';document.getElementById('refreshInterval').value=s.quota_refresh_interval||'30m0s';document.getElementById('staleAfter').value=s.stale_after||'5h0m0s';document.getElementById('refreshActiveWindow').value=s.refresh_active_window||'1h0m0s';document.getElementById('refreshAfterResetDelay').value=s.refresh_after_reset_delay||'1m0s';document.getElementById('refreshRetryDelays').value=s.refresh_retry_delays||'1m0s,5m0s,15m0s';document.getElementById('refreshOnStartup').checked=s.refresh_on_startup===true;document.getElementById('maxConcurrency').value=s.max_refresh_concurrency||1;document.getElementById('circuitFailureThreshold').value=s.circuit_failure_threshold||5;document.getElementById('circuitOpenDuration').value=s.circuit_open_duration||'30m0s';document.getElementById('circuitHalfOpenSuccessThreshold').value=s.circuit_half_open_success_threshold||2;document.getElementById('maxLogEntries').value=s.max_log_entries||200;document.getElementById('logRetention').value=s.log_retention||'24h0m0s'}
+function fillSettings(){const s=STATUS.settings||{};document.getElementById('handleEnabled').checked=s.handle_enabled!==false;document.getElementById('usageFeedback').checked=s.enable_usage_feedback!==false;document.getElementById('enableResetProbe').checked=s.enable_reset_probe===true;document.getElementById('monthlyMode').value=s.monthly_mode||'expiry_order';document.getElementById('refreshInterval').value=s.quota_refresh_interval||'30m0s';document.getElementById('staleAfter').value=s.stale_after||'5h0m0s';document.getElementById('refreshActiveWindow').value=s.refresh_active_window||'1h0m0s';document.getElementById('refreshAfterResetDelay').value=s.refresh_after_reset_delay||'1m0s';document.getElementById('refreshRetryDelays').value=s.refresh_retry_delays||'1m0s,5m0s,15m0s';document.getElementById('refreshOnStartup').checked=s.refresh_on_startup===true;document.getElementById('maxConcurrency').value=s.max_refresh_concurrency||1;document.getElementById('circuitFailureThreshold').value=s.circuit_failure_threshold||5;document.getElementById('circuitOpenDuration').value=s.circuit_open_duration||'30m0s';document.getElementById('circuitHalfOpenSuccessThreshold').value=s.circuit_half_open_success_threshold||2;document.getElementById('maxLogEntries').value=s.max_log_entries||200;document.getElementById('logRetention').value=s.log_retention||'24h0m0s'}
 async function saveSettings(){try{if(!statusLoaded){await refreshStatus({fillSettings:true});showNotice(t('notice.statusLoaded'),false);return}await requestManagement('/settings',{method:'PUT',body:collectSettingsPayload()});settingsDirty=false;showNotice(t('notice.settingsSaved'),false);await refreshStatus({management:true,fillSettings:true})}catch(error){showNotice(error.message||String(error),true)}}
 async function refreshQuota(){try{await requestManagement('/refresh',{method:'POST'});showNotice(t('notice.refreshRequested'),false);await refreshStatus();pollStatus(3,1200)}catch(error){showNotice(error.message||String(error),true)}}
 function splitTags(text){return text.split(',').map((item)=>item.trim()).filter(Boolean)}
