@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -147,6 +149,45 @@ func TestScheduleResetProbePreservesExistingState(t *testing.T) {
 	}
 	if _, ok := next[WindowWeekly]; !ok {
 		t.Fatal("weekly probe was dropped")
+	}
+}
+
+func TestResetProbeRetryRedactsCredentialsAndEventuallyFails(t *testing.T) {
+	now := time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC)
+	cfg := DefaultConfig()
+	cfg.RefreshRetryDelays = []time.Duration{time.Minute}
+	credentials := CodexCredentials{
+		AccessToken: "access-1",
+		IDToken:     "id-1",
+	}
+	probe := ResetProbeState{
+		WindowKind: WindowFiveHour,
+		ResetAt:    now.Add(-10 * time.Minute),
+		Status:     ResetProbeStatusPending,
+	}
+
+	first := markResetProbeRetry(probe, now, errors.New("upstream echoed access-1 and id-1"), credentials, cfg)
+	if first.Status != ResetProbeStatusPending {
+		t.Fatalf("first retry Status = %q, want pending", first.Status)
+	}
+	if !first.NextCheckAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("first retry NextCheckAt = %s, want %s", first.NextCheckAt, now.Add(time.Minute))
+	}
+	if first.Error == "" {
+		t.Fatal("first retry Error empty, want redacted error")
+	}
+	for _, leaked := range []string{"access-1", "id-1"} {
+		if strings.Contains(first.Error, leaked) {
+			t.Fatalf("first retry Error leaked %q: %q", leaked, first.Error)
+		}
+	}
+
+	second := markResetProbeRetry(first, now.Add(time.Minute), errors.New("still failed"), credentials, cfg)
+	if second.Status != ResetProbeStatusFailed {
+		t.Fatalf("second retry Status = %q, want failed", second.Status)
+	}
+	if !second.NextCheckAt.IsZero() {
+		t.Fatalf("second retry NextCheckAt = %s, want zero", second.NextCheckAt)
 	}
 }
 
