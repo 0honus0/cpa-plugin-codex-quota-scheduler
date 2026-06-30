@@ -365,3 +365,50 @@ func TestPluginStateDueAccountsAnnotatesReason(t *testing.T) {
 		t.Fatalf("due account = %#v, want stale with reason", due[0])
 	}
 }
+
+func TestResetProbeConstantsAvoidEarlyMisclassification(t *testing.T) {
+	if resetProbeAfterResetDelay <= resetProbeCloseThreshold {
+		t.Fatalf("resetProbeAfterResetDelay = %s must be greater than resetProbeCloseThreshold = %s", resetProbeAfterResetDelay, resetProbeCloseThreshold)
+	}
+	if resetProbeAfterResetDelay != 10*time.Minute {
+		t.Fatalf("resetProbeAfterResetDelay = %s, want 10m", resetProbeAfterResetDelay)
+	}
+	if resetProbeCloseThreshold != 3*time.Minute {
+		t.Fatalf("resetProbeCloseThreshold = %s, want 3m", resetProbeCloseThreshold)
+	}
+}
+
+func TestLooksLikeLazyReset(t *testing.T) {
+	now := time.Date(2026, 6, 30, 10, 10, 0, 0, time.UTC)
+	seconds := int64(fiveHourSeconds)
+	lazy := QuotaWindow{Kind: WindowFiveHour, LimitWindowSeconds: &seconds, ResetAt: now.Add(5 * time.Hour)}
+	if !looksLikeLazyReset(now, lazy, seconds) {
+		t.Fatal("lazy reset was not detected")
+	}
+	active := QuotaWindow{Kind: WindowFiveHour, LimitWindowSeconds: &seconds, ResetAt: now.Add(5*time.Hour - 10*time.Minute)}
+	if looksLikeLazyReset(now, active, seconds) {
+		t.Fatal("active reset was misclassified as lazy")
+	}
+}
+
+func TestMonthlyProbeRequiresWindowSeconds(t *testing.T) {
+	monthly := QuotaWindow{Kind: WindowMonthly, ResetAt: time.Now().Add(30 * 24 * time.Hour)}
+	if _, ok := probeWindowDuration(monthly); ok {
+		t.Fatal("monthly window without limit_window_seconds returned duration, want none")
+	}
+	seconds := int64(2592000)
+	monthly.LimitWindowSeconds = &seconds
+	d, ok := probeWindowDuration(monthly)
+	if !ok || d != 30*24*time.Hour {
+		t.Fatalf("probeWindowDuration = %s, %v; want 720h,true", d, ok)
+	}
+}
+
+func TestResetProbeUsageEvidence(t *testing.T) {
+	if !resetProbeUsageEvidence([]byte(`{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`)) {
+		t.Fatal("usage evidence not detected")
+	}
+	if resetProbeUsageEvidence([]byte(`{"id":"probe","usage":{}}`)) {
+		t.Fatal("empty usage was accepted")
+	}
+}

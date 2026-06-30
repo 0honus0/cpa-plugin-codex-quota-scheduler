@@ -84,6 +84,28 @@ type AccountRefreshState struct {
 	LastFailureAt   time.Time
 }
 
+type ResetProbeStatus string
+
+const (
+	ResetProbeStatusNone            ResetProbeStatus = ""
+	ResetProbeStatusPending         ResetProbeStatus = "pending"
+	ResetProbeStatusConfirmedActive ResetProbeStatus = "confirmed_active"
+	ResetProbeStatusVerified        ResetProbeStatus = "verified"
+	ResetProbeStatusFailed          ResetProbeStatus = "failed"
+)
+
+type ResetProbeState struct {
+	WindowKind    WindowKind
+	WindowSeconds int64
+	ResetAt       time.Time
+	NextCheckAt   time.Time
+	LastProbeAt   time.Time
+	VerifiedAt    time.Time
+	Attempts      int
+	Status        ResetProbeStatus
+	Error         string
+}
+
 type AccountAnnotation struct {
 	Alias   string   `json:"alias,omitempty" yaml:"alias,omitempty"`
 	Notes   string   `json:"notes,omitempty" yaml:"notes,omitempty"`
@@ -121,6 +143,7 @@ type AccountState struct {
 	TemporaryResetAt   time.Time
 	Circuit            CircuitBreakerState
 	Refresh            AccountRefreshState
+	ResetProbes        map[WindowKind]ResetProbeState
 	Annotation         AccountAnnotation
 }
 
