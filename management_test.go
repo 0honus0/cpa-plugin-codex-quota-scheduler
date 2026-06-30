@@ -1116,6 +1116,7 @@ func TestResourceStatusDataPublishesSanitizedCacheWithoutManagementKey(t *testin
 		},
 	})
 	account := weeklyAccount("auth-1", 5, now.Add(24*time.Hour), false)
+	account.LastError = "transport failed with access_token Authorization Bearer cookie at " + chatGPTQuotaEndpoint + " and " + codexResetProbeEndpoint
 	count := 1
 	account.Quota.ResetCreditsAvailableCount = &count
 	account.Quota.ResetCredits = []ResetCredit{{ExpiresAt: now.Add(30 * 24 * time.Hour), Status: "available"}}
@@ -1177,6 +1178,15 @@ func TestResourceStatusDataPublishesSanitizedCacheWithoutManagementKey(t *testin
 	}
 	if body.Accounts[0].AuthID != "auth-1" || body.Accounts[0].Alias == "" || len(body.Accounts[0].ResetCredits) != 1 {
 		t.Fatalf("account body = %#v, want cached queue and quota data", body.Accounts[0])
+	}
+	if body.Accounts[0].LastError == "" {
+		t.Fatal("public account last_error empty, want sanitized error")
+	}
+	lastError := strings.ToLower(body.Accounts[0].LastError)
+	for _, forbidden := range []string{"access_token", "bearer", "authorization", "cookie", chatGPTQuotaEndpoint, codexResetProbeEndpoint} {
+		if strings.Contains(lastError, strings.ToLower(forbidden)) {
+			t.Fatalf("public account last_error leaked sensitive marker %q: %q", forbidden, body.Accounts[0].LastError)
+		}
 	}
 	if body.Logs[0].Event != "scheduler.selected" {
 		t.Fatalf("logs = %#v, want cached scheduler logs", body.Logs)

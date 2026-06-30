@@ -800,6 +800,7 @@ func sanitizePublicStatusPayload(payload StatusPayload) StatusPayload {
 	payload.Shell = false
 	payload.Settings.QuotaEndpoint = ""
 	for i := range payload.Accounts {
+		payload.Accounts[i].LastError = sanitizeResetProbeError(payload.Accounts[i].LastError)
 		for j := range payload.Accounts[i].ResetProbes {
 			payload.Accounts[i].ResetProbes[j].Error = sanitizeResetProbeError(payload.Accounts[i].ResetProbes[j].Error)
 		}
