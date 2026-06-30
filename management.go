@@ -707,12 +707,20 @@ func sanitizeResetProbeError(message string) string {
 	if message == "" {
 		return ""
 	}
-	redacted := strings.ReplaceAll(redactSecrets(message), chatGPTQuotaEndpoint, "[redacted]")
+	redacted := redactPublicStatusString(message)
 	lower := strings.ToLower(redacted)
 	for _, forbidden := range []string{"access_token", "refresh_token", "id_token", "bearer", "authorization", "cookie"} {
 		if strings.Contains(lower, forbidden) {
 			return "redacted reset probe error"
 		}
+	}
+	return redacted
+}
+
+func redactPublicStatusString(message string) string {
+	redacted := redactSecrets(message)
+	for _, endpoint := range []string{chatGPTQuotaEndpoint, codexResetProbeEndpoint} {
+		redacted = strings.ReplaceAll(redacted, endpoint, "[redacted]")
 	}
 	return redacted
 }
@@ -794,6 +802,20 @@ func sanitizePublicStatusPayload(payload StatusPayload) StatusPayload {
 	for i := range payload.Accounts {
 		for j := range payload.Accounts[i].ResetProbes {
 			payload.Accounts[i].ResetProbes[j].Error = sanitizeResetProbeError(payload.Accounts[i].ResetProbes[j].Error)
+		}
+	}
+	for i := range payload.Logs {
+		payload.Logs[i].Message = redactPublicStatusString(payload.Logs[i].Message)
+		for key, value := range payload.Logs[i].Fields {
+			text, ok := value.(string)
+			if !ok {
+				continue
+			}
+			if key == "error" {
+				payload.Logs[i].Fields[key] = sanitizeResetProbeError(text)
+				continue
+			}
+			payload.Logs[i].Fields[key] = redactPublicStatusString(text)
 		}
 	}
 	return payload

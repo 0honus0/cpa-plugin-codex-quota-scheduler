@@ -1127,7 +1127,7 @@ func TestResourceStatusDataPublishesSanitizedCacheWithoutManagementKey(t *testin
 			NextCheckAt: now.Add(6 * time.Hour),
 			LastProbeAt: now.Add(-time.Minute),
 			Attempts:    1,
-			Error:       "redacted access_token bearer authorization cookie " + chatGPTQuotaEndpoint,
+			Error:       "redacted access_token bearer authorization cookie " + chatGPTQuotaEndpoint + " " + codexResetProbeEndpoint,
 		},
 	}
 	store.UpsertQuota(account)
@@ -1144,6 +1144,7 @@ func TestResourceStatusDataPublishesSanitizedCacheWithoutManagementKey(t *testin
 		managementRefreshOneSoon = previousRefreshOneSoon
 	})
 
+	store.RecordLog("warn", "quota.reset_probe_failed", "Codex reset probe failed", map[string]any{"error": "probe failed at " + codexResetProbeEndpoint}, now)
 	resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
 		Method: http.MethodGet,
 		Path:   "/v0/resource/plugins/codex-quota-scheduler/status-data",
@@ -1156,7 +1157,7 @@ func TestResourceStatusDataPublishesSanitizedCacheWithoutManagementKey(t *testin
 		t.Fatalf("public status data triggered refreshes = %d, refreshOne = %q; want none", refreshes, refreshOne)
 	}
 	bodyText := strings.ToLower(string(resp.Body))
-	for _, forbidden := range []string{"access_token", "refresh_token", "id_token", "bearer ", "authorization", "cookie", chatGPTQuotaEndpoint} {
+	for _, forbidden := range []string{"access_token", "refresh_token", "id_token", "bearer ", "authorization", "cookie", chatGPTQuotaEndpoint, codexResetProbeEndpoint} {
 		if strings.Contains(bodyText, forbidden) {
 			t.Fatalf("public status data leaked sensitive marker %q: %s", forbidden, resp.Body)
 		}
@@ -1168,7 +1169,7 @@ func TestResourceStatusDataPublishesSanitizedCacheWithoutManagementKey(t *testin
 	if err := json.Unmarshal(resp.Body, &body); err != nil {
 		t.Fatalf("json.Unmarshal returned error: %v; body=%s", err, resp.Body)
 	}
-	if body.Shell || len(body.Accounts) != 1 || len(body.Logs) != 1 {
+	if body.Shell || len(body.Accounts) != 1 || len(body.Logs) != 2 {
 		t.Fatalf("body shell/accounts/logs = %v/%d/%d; want public cached status payload", body.Shell, len(body.Accounts), len(body.Logs))
 	}
 	if body.Settings.QuotaEndpoint != "" {
