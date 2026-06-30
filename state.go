@@ -326,6 +326,13 @@ func (s *PluginState) NextRefreshDueAt(now time.Time) time.Time {
 			consider(now)
 			continue
 		}
+		if cfg.EnableResetProbe {
+			for _, probe := range account.ResetProbes {
+				if probe.Status == ResetProbeStatusPending && !probe.NextCheckAt.IsZero() {
+					consider(probe.NextCheckAt)
+				}
+			}
+		}
 		consider(account.LastSuccessAt.Add(cfg.StaleAfter))
 		if account.Quota.FiveHour != nil && !account.Quota.FiveHour.ResetAt.IsZero() {
 			consider(account.Quota.FiveHour.ResetAt.Add(cfg.RefreshAfterResetDelay))
@@ -385,6 +392,9 @@ func accountRefreshDue(account AccountState, cfg Config, now time.Time) (bool, s
 	}
 	if now.Sub(account.LastSuccessAt) > cfg.StaleAfter {
 		return true, "stale"
+	}
+	if cfg.EnableResetProbe && resetProbeDueAny(account.ResetProbes, now) {
+		return true, "reset_probe_check_due"
 	}
 	if resetDue(account.Quota.FiveHour, cfg.RefreshAfterResetDelay, now) {
 		return true, "five_hour_reset_due"

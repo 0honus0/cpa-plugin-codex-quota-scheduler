@@ -64,6 +64,79 @@ func TestPluginStateClonesResetProbes(t *testing.T) {
 	}
 }
 
+func TestScheduleResetProbeFromMaturedPreviousReset(t *testing.T) {
+	resetAt := time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC)
+	now := resetAt.Add(time.Minute)
+	seconds := int64(fiveHourSeconds)
+	previous := AccountState{
+		AuthID: "auth-1",
+		Quota: ParsedQuota{
+			FiveHour: &QuotaWindow{Kind: WindowFiveHour, LimitWindowSeconds: &seconds, ResetAt: resetAt},
+		},
+	}
+	next := scheduleResetProbesFromPrevious(previous, nil, now)
+	probe, ok := next[WindowFiveHour]
+	if !ok {
+		t.Fatal("five-hour reset probe was not scheduled")
+	}
+	if probe.Status != ResetProbeStatusPending {
+		t.Fatalf("Status = %q, want pending", probe.Status)
+	}
+	if !probe.ResetAt.Equal(resetAt) {
+		t.Fatalf("ResetAt = %s, want %s", probe.ResetAt, resetAt)
+	}
+	if !probe.NextCheckAt.Equal(resetAt.Add(10 * time.Minute)) {
+		t.Fatalf("NextCheckAt = %s, want %s", probe.NextCheckAt, resetAt.Add(10*time.Minute))
+	}
+}
+
+func TestScheduleResetProbeKeepsSeparateWindowBaselines(t *testing.T) {
+	fiveReset := time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC)
+	weeklyReset := fiveReset.Add(2 * time.Minute)
+	now := weeklyReset.Add(time.Minute)
+	fiveSeconds := int64(fiveHourSeconds)
+	weeklySeconds := int64(7 * 24 * 60 * 60)
+	previous := AccountState{
+		AuthID: "auth-1",
+		Quota: ParsedQuota{
+			FiveHour:   &QuotaWindow{Kind: WindowFiveHour, LimitWindowSeconds: &fiveSeconds, ResetAt: fiveReset},
+			LongWindow: &QuotaWindow{Kind: WindowWeekly, LimitWindowSeconds: &weeklySeconds, ResetAt: weeklyReset},
+		},
+	}
+	next := scheduleResetProbesFromPrevious(previous, nil, now)
+	if !next[WindowFiveHour].ResetAt.Equal(fiveReset) {
+		t.Fatalf("five-hour ResetAt = %s, want %s", next[WindowFiveHour].ResetAt, fiveReset)
+	}
+	if !next[WindowWeekly].ResetAt.Equal(weeklyReset) {
+		t.Fatalf("weekly ResetAt = %s, want %s", next[WindowWeekly].ResetAt, weeklyReset)
+	}
+}
+
+func TestNextRefreshDueAtIncludesPendingResetProbe(t *testing.T) {
+	resetAt := time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC)
+	now := resetAt.Add(2 * time.Minute)
+	cfg := DefaultConfig()
+	cfg.EnableResetProbe = true
+	store := NewPluginState(cfg)
+	store.RecordCodexActivity(now)
+	store.UpsertQuota(AccountState{
+		AuthID: "auth-1",
+		ResetProbes: map[WindowKind]ResetProbeState{
+			WindowFiveHour: {
+				WindowKind:  WindowFiveHour,
+				Status:      ResetProbeStatusPending,
+				ResetAt:     resetAt,
+				NextCheckAt: resetAt.Add(10 * time.Minute),
+			},
+		},
+		LastSuccessAt: now,
+	})
+	next := store.NextRefreshDueAt(now)
+	if !next.Equal(resetAt.Add(10 * time.Minute)) {
+		t.Fatalf("NextRefreshDueAt = %s, want %s", next, resetAt.Add(10*time.Minute))
+	}
+}
+
 func TestPluginStateNormalizesConfigAtBoundaries(t *testing.T) {
 	store := NewPluginState(Config{})
 	if store.Config().MaxLogEntries != DefaultConfig().MaxLogEntries || store.Config().LogRetention != DefaultConfig().LogRetention {
