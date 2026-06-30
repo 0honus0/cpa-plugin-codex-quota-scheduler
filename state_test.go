@@ -112,6 +112,44 @@ func TestScheduleResetProbeKeepsSeparateWindowBaselines(t *testing.T) {
 	}
 }
 
+func TestScheduleResetProbePreservesExistingState(t *testing.T) {
+	resetAt := time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC)
+	now := resetAt.Add(time.Minute)
+	retryAt := resetAt.Add(30 * time.Minute)
+	seconds := int64(fiveHourSeconds)
+	previous := AccountState{
+		AuthID: "auth-1",
+		Quota: ParsedQuota{
+			FiveHour: &QuotaWindow{Kind: WindowFiveHour, LimitWindowSeconds: &seconds, ResetAt: resetAt},
+		},
+	}
+	current := map[WindowKind]ResetProbeState{
+		WindowFiveHour: {
+			WindowKind:  WindowFiveHour,
+			Status:      ResetProbeStatusFailed,
+			ResetAt:     resetAt,
+			NextCheckAt: retryAt,
+			Attempts:    2,
+			Error:       "kept",
+		},
+		WindowWeekly: {
+			WindowKind:  WindowWeekly,
+			Status:      ResetProbeStatusPending,
+			ResetAt:     resetAt.Add(time.Hour),
+			NextCheckAt: retryAt.Add(time.Hour),
+		},
+	}
+
+	next := scheduleResetProbesFromPrevious(previous, current, now)
+	five := next[WindowFiveHour]
+	if five.Status != ResetProbeStatusFailed || five.Attempts != 2 || five.Error != "kept" || !five.NextCheckAt.Equal(retryAt) {
+		t.Fatalf("five-hour probe = %#v, want preserved failed probe", five)
+	}
+	if _, ok := next[WindowWeekly]; !ok {
+		t.Fatal("weekly probe was dropped")
+	}
+}
+
 func TestNextRefreshDueAtIncludesPendingResetProbe(t *testing.T) {
 	resetAt := time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC)
 	now := resetAt.Add(2 * time.Minute)
@@ -134,6 +172,60 @@ func TestNextRefreshDueAtIncludesPendingResetProbe(t *testing.T) {
 	next := store.NextRefreshDueAt(now)
 	if !next.Equal(resetAt.Add(10 * time.Minute)) {
 		t.Fatalf("NextRefreshDueAt = %s, want %s", next, resetAt.Add(10*time.Minute))
+	}
+}
+
+func TestResetProbeDueIgnoredWhenDisabled(t *testing.T) {
+	now := time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC)
+	cfg := DefaultConfig()
+	cfg.EnableResetProbe = false
+	account := AccountState{
+		AuthID:        "auth-1",
+		LastSuccessAt: now,
+		ResetProbes: map[WindowKind]ResetProbeState{
+			WindowFiveHour: {
+				WindowKind:  WindowFiveHour,
+				Status:      ResetProbeStatusPending,
+				ResetAt:     now.Add(-10 * time.Minute),
+				NextCheckAt: now,
+			},
+		},
+	}
+
+	due, reason := accountRefreshDue(account, cfg, now)
+	if due || reason != "" {
+		t.Fatalf("accountRefreshDue = %t, %q; want false with empty reason", due, reason)
+	}
+
+	store := NewPluginState(cfg)
+	store.RecordCodexActivity(now)
+	store.UpsertQuota(account)
+	next := store.NextRefreshDueAt(now)
+	if next.Equal(now) {
+		t.Fatalf("NextRefreshDueAt = %s, want reset probe time ignored when disabled", next)
+	}
+}
+
+func TestAccountRefreshDueReturnsResetProbeCheckDue(t *testing.T) {
+	now := time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC)
+	cfg := DefaultConfig()
+	cfg.EnableResetProbe = true
+	account := AccountState{
+		AuthID:        "auth-1",
+		LastSuccessAt: now,
+		ResetProbes: map[WindowKind]ResetProbeState{
+			WindowFiveHour: {
+				WindowKind:  WindowFiveHour,
+				Status:      ResetProbeStatusPending,
+				ResetAt:     now.Add(-10 * time.Minute),
+				NextCheckAt: now,
+			},
+		},
+	}
+
+	due, reason := accountRefreshDue(account, cfg, now)
+	if !due || reason != "reset_probe_check_due" {
+		t.Fatalf("accountRefreshDue = %t, %q; want true reset_probe_check_due", due, reason)
 	}
 }
 
