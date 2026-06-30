@@ -68,19 +68,28 @@ new reset time should be about `now + window_length - 10m`, which is outside the
 3-minute lazy-reset threshold. If the window has not started, the returned reset
 time should remain close to `now + window_length`.
 
+There is one boundary case: if some other real Codex request starts the window
+within roughly 3 minutes before the probe check, the returned reset can still be
+close to `now + window_length`. The feature may send one extra tiny probe in
+that case. The important guarantee is no tight loop and no repeated probe for
+the same account/window/reset cycle after the state is verified or exhausted.
+
 The existing `refresh_after_reset_delay` keeps its current meaning for normal
 quota refresh. It must not be reused for probe classification.
 
 ## State Model
 
-Extend `AccountState` with a probe state value:
+Extend `AccountState` with per-window probe state, keyed by `WindowKind`. A
+single account can have both `five_hour` and `weekly`/`monthly` resets mature at
+the same time, so one account-level probe state is not enough.
 
 - window kind (`five_hour`, `weekly`, or `monthly`)
-- window seconds from `limit_window_seconds`
+- window seconds captured when the pending probe is created
 - the original cached reset time that matured
-- next probe check time, normally `original_reset_at + 10m`
+- next probe check time, initially `original_reset_at + 10m`, later a retry time
 - last probe attempt time
 - verified time
+- attempt count
 - status (`pending`, `confirmed_active`, `verified`, or `failed`)
 - sanitized error text
 
@@ -88,6 +97,11 @@ The original reset time matters. A normal quota refresh at
 `reset_at + refresh_after_reset_delay` may receive a lazy reset and overwrite the
 visible quota reset. The plugin must still remember that the old reset matured
 and should be checked at `old_reset_at + 10m`.
+
+For monthly windows, the pending state may only be created when the old cached
+window included a positive `limit_window_seconds`. Once created, later lazy-reset
+classification uses the stored window seconds instead of re-deriving duration
+from the refreshed quota response.
 
 ## Detection Flow
 
@@ -100,26 +114,36 @@ When an account is refreshed:
 5. If reset probe is enabled, inspect the previous cached windows.
 6. For each previous window whose reset time has passed, create or preserve a
    pending probe check for `previous_reset_at + 10m`.
-7. If the pending check is not due yet, store quota and wake the refresh loop at
-   the pending check time.
-8. If the pending check is due, compare the newly returned matching window with
-   `now + window_duration`.
+7. If no pending check is due yet, store quota and wake the refresh loop at the
+   earliest pending check time.
+8. For each due pending window, compare the newly returned matching window with
+   `now + stored_window_duration`.
 9. If the absolute difference is greater than 3 minutes, mark the probe as
    `confirmed_active` and do not send a probe.
-10. If the absolute difference is less than or equal to 3 minutes, send a compact
-    probe for that account.
-11. If the probe succeeds and includes token usage evidence, mark the probe as
-    `verified`, refresh `/wham/usage` again, and store the post-probe quota.
-12. If the probe fails, mark `failed`, store the sanitized error, and do not
-    immediately retry in a tight loop.
+10. If one or more due windows are within 3 minutes of `now + stored_duration`,
+    send at most one compact probe for that account. One real Codex request
+    should start all lazy windows for the account.
+11. A successful compact probe requires positive usage evidence. Once usage is
+    present, mark the affected lazy windows `verified` for this reset cycle and
+    do not send another probe for those windows.
+12. After a verified probe, refresh `/wham/usage` again and store the
+    post-probe quota when that refresh succeeds. If that follow-up refresh
+    fails, log/store only a sanitized warning and keep the probe verified; a
+    second compact probe would spend extra tokens even though the first probe
+    already started the window.
+13. If the probe request fails or usage evidence is missing, keep the affected
+    window pending and schedule a backoff retry. After the retry budget is
+    exhausted, mark it `failed`. Do not retry in a tight loop.
 
 Window duration is resolved this way:
 
 - Prefer `QuotaWindow.LimitWindowSeconds`.
 - Fallback to 5 hours for `WindowFiveHour`.
 - Fallback to 7 days for `WindowWeekly`.
-- Do not fallback for monthly windows. Monthly probing requires server-provided
-  `limit_window_seconds`.
+- Do not fallback for monthly windows when creating pending state. Monthly
+  probing requires server-provided `limit_window_seconds`.
+- Detection uses `ResetProbeState.WindowSeconds`, not the refreshed window's
+  current `limit_window_seconds`, so monthly windows stay conservative.
 
 ## Probe Request
 
@@ -196,6 +220,9 @@ probe time, verified time, and sanitized probe error when present.
 - Never log access tokens, ID tokens, refresh tokens, cookies, authorization
   headers, raw credential JSON, or full upstream response bodies.
 - Store only sanitized probe errors.
+- Sanitize probe errors with the existing credential-aware redaction path so
+  access tokens, ID tokens, bearer headers, cookies, and raw credential values
+  cannot leak through host errors or response summaries.
 - Keep probe request bodies fixed and tiny.
 - Do not expose the CPA Management key or Codex credentials in resource HTML or
   JSON.
@@ -213,9 +240,16 @@ Unit tests should cover:
   `now + window - 10m` does not send a probe;
 - at `old_reset_at + 10m`, a lazy window whose returned reset is within 3
   minutes of `now + window` sends one probe;
+- simultaneous five-hour and long-window resets preserve separate original reset
+  baselines while sending at most one probe request for the account;
 - successful probe requires usage evidence;
-- successful probe triggers a post-probe quota refresh;
-- failed probe stores sanitized error and does not tight-loop;
+- successful probe requires usage evidence, then triggers a post-probe quota
+  refresh attempt;
+- a post-probe quota refresh failure is sanitized and recorded without sending a
+  duplicate compact probe;
+- failed probe stores a credential-redacted error, schedules a backoff retry, and
+  does not tight-loop;
+- retry exhaustion marks the window failed for that reset cycle;
 - monthly windows without `limit_window_seconds` are not probed;
 - monthly windows with `limit_window_seconds` use that exact duration;
 - `NextRefreshDueAt` includes pending probe checks;
@@ -235,6 +269,6 @@ Unit tests should cover:
   `now + limit_window_seconds`.
 - Probe requests are sent through `host.http.do` per account.
 - A successful probe is verified by usage evidence and followed by a quota
-  refresh.
+  refresh attempt.
 - Monthly behavior relies on server-provided `limit_window_seconds`; no 30-day
   or calendar-month guess is used.
