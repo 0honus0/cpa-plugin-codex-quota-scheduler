@@ -190,6 +190,139 @@ func accountByAuthID(t *testing.T, snapshot StateSnapshot, authID string) Accoun
 	return AccountState{}
 }
 
+func TestRefreshDueRunsResetProbeForLazyWindow(t *testing.T) {
+	resetAt := time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC)
+	now := resetAt.Add(10 * time.Minute)
+	seconds := int64(fiveHourSeconds)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{ID: "auth-1", AuthIndex: "idx-1", Provider: "codex"}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"access-1","id_token":"` + idToken + `"}`),
+		},
+		responseByURL: map[string]pluginapi.HTTPResponse{
+			chatGPTQuotaEndpoint: {
+				StatusCode: http.StatusOK,
+				Headers:    http.Header{},
+				Body:       []byte(`{"rate_limit":{"primary_window":{"used_percent":1,"limit_window_seconds":18000,"reset_after_seconds":18000}}}`),
+			},
+			resetCreditsEndpoint: {
+				StatusCode: http.StatusOK,
+				Headers:    http.Header{},
+				Body:       []byte(`{"available_count":0}`),
+			},
+			codexResetProbeEndpoint: {
+				StatusCode: http.StatusOK,
+				Headers:    http.Header{},
+				Body:       []byte(`{"id":"probe","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`),
+			},
+		},
+	}
+	cfg := DefaultConfig()
+	cfg.EnableResetProbe = true
+	store := NewPluginState(cfg)
+	store.RecordCodexActivity(now)
+	store.UpsertQuota(AccountState{
+		AuthID:    "auth-1",
+		AuthIndex: "idx-1",
+		Provider:  "codex",
+		Quota: ParsedQuota{
+			FiveHour: &QuotaWindow{Kind: WindowFiveHour, LimitWindowSeconds: &seconds, ResetAt: resetAt},
+		},
+		ResetProbes: map[WindowKind]ResetProbeState{
+			WindowFiveHour: {
+				WindowKind:    WindowFiveHour,
+				WindowSeconds: fiveHourSeconds,
+				ResetAt:       resetAt,
+				NextCheckAt:   resetAt.Add(10 * time.Minute),
+				Status:        ResetProbeStatusPending,
+			},
+		},
+		LastSuccessAt: resetAt.Add(-time.Hour),
+	})
+
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	if err := refresher.RefreshDueOnce(); err != nil {
+		t.Fatalf("RefreshDueOnce returned error: %v", err)
+	}
+	urls := strings.Join(host.requestedURLs(), "\n")
+	if !strings.Contains(urls, codexResetProbeEndpoint) {
+		t.Fatalf("probe endpoint was not requested; urls:\n%s", urls)
+	}
+	if strings.Count(urls, chatGPTQuotaEndpoint) < 2 {
+		t.Fatalf("post-probe quota refresh did not run; urls:\n%s", urls)
+	}
+	account := accountByAuthID(t, store.Snapshot(now), "auth-1")
+	probe := account.ResetProbes[WindowFiveHour]
+	if probe.Status != ResetProbeStatusVerified {
+		t.Fatalf("probe status = %q, want verified; error=%q", probe.Status, probe.Error)
+	}
+	if probe.VerifiedAt.IsZero() {
+		t.Fatal("VerifiedAt is zero, want set")
+	}
+}
+
+func TestRefreshDueDoesNotProbeActiveWindow(t *testing.T) {
+	resetAt := time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC)
+	now := resetAt.Add(10 * time.Minute)
+	seconds := int64(fiveHourSeconds)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{ID: "auth-1", AuthIndex: "idx-1", Provider: "codex"}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"access-1","id_token":"` + idToken + `"}`),
+		},
+		responseByURL: map[string]pluginapi.HTTPResponse{
+			chatGPTQuotaEndpoint: {
+				StatusCode: http.StatusOK,
+				Headers:    http.Header{},
+				Body:       []byte(`{"rate_limit":{"primary_window":{"used_percent":1,"limit_window_seconds":18000,"reset_after_seconds":17400}}}`),
+			},
+			resetCreditsEndpoint: {
+				StatusCode: http.StatusOK,
+				Headers:    http.Header{},
+				Body:       []byte(`{"available_count":0}`),
+			},
+		},
+	}
+	cfg := DefaultConfig()
+	cfg.EnableResetProbe = true
+	store := NewPluginState(cfg)
+	store.RecordCodexActivity(now)
+	store.UpsertQuota(AccountState{
+		AuthID:    "auth-1",
+		AuthIndex: "idx-1",
+		Provider:  "codex",
+		Quota: ParsedQuota{
+			FiveHour: &QuotaWindow{Kind: WindowFiveHour, LimitWindowSeconds: &seconds, ResetAt: resetAt},
+		},
+		ResetProbes: map[WindowKind]ResetProbeState{
+			WindowFiveHour: {
+				WindowKind:    WindowFiveHour,
+				WindowSeconds: fiveHourSeconds,
+				ResetAt:       resetAt,
+				NextCheckAt:   resetAt.Add(10 * time.Minute),
+				Status:        ResetProbeStatusPending,
+			},
+		},
+		LastSuccessAt: resetAt.Add(-time.Hour),
+	})
+
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	if err := refresher.RefreshDueOnce(); err != nil {
+		t.Fatalf("RefreshDueOnce returned error: %v", err)
+	}
+	urls := strings.Join(host.requestedURLs(), "\n")
+	if strings.Contains(urls, codexResetProbeEndpoint) {
+		t.Fatalf("probe endpoint was requested for active window; urls:\n%s", urls)
+	}
+	account := accountByAuthID(t, store.Snapshot(now), "auth-1")
+	probe := account.ResetProbes[WindowFiveHour]
+	if probe.Status != ResetProbeStatusConfirmedActive {
+		t.Fatalf("probe status = %q, want confirmed_active", probe.Status)
+	}
+}
+
 func TestRefreshDueOnceSkipsFreshAccountsAndRefreshesOnlyDueAccounts(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	staleToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-stale"})

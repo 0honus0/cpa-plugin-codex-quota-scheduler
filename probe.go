@@ -75,6 +75,48 @@ func resetProbeDueAny(probes map[WindowKind]ResetProbeState, now time.Time) bool
 	return false
 }
 
+func matchingProbeWindow(quota ParsedQuota, probe ResetProbeState) (QuotaWindow, bool) {
+	for _, window := range resetProbeCandidateWindows(quota) {
+		if probe.WindowKind != "" && window.Kind != probe.WindowKind {
+			continue
+		}
+		return window, true
+	}
+	return QuotaWindow{}, false
+}
+
+func markResetProbeConfirmedActive(probe ResetProbeState) ResetProbeState {
+	probe.Status = ResetProbeStatusConfirmedActive
+	probe.Error = ""
+	return probe
+}
+
+func markResetProbeVerified(probe ResetProbeState, now time.Time) ResetProbeState {
+	probe.Status = ResetProbeStatusVerified
+	probe.LastProbeAt = now
+	probe.VerifiedAt = now
+	probe.Error = ""
+	return probe
+}
+
+func markResetProbeRetry(probe ResetProbeState, now time.Time, err error, credentials CodexCredentials, cfg Config) ResetProbeState {
+	probe.LastProbeAt = now
+	probe.Attempts++
+	probe.Error = ""
+	if err != nil {
+		probe.Error = redactWithCredentials(err.Error(), credentials)
+	}
+	retryDelays := NormalizeConfig(cfg).RefreshRetryDelays
+	if len(retryDelays) == 0 || probe.Attempts > len(retryDelays) {
+		probe.Status = ResetProbeStatusFailed
+		probe.NextCheckAt = time.Time{}
+		return probe
+	}
+	probe.Status = ResetProbeStatusPending
+	probe.NextCheckAt = now.Add(retryDelays[probe.Attempts-1])
+	return probe
+}
+
 func looksLikeLazyReset(now time.Time, window QuotaWindow, windowSeconds int64) bool {
 	if windowSeconds <= 0 || window.ResetAt.IsZero() {
 		return false

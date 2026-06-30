@@ -516,7 +516,76 @@ func (r *QuotaRefresher) refreshAuth(auth pluginapi.HostAuthFileEntry) {
 	}
 	account = r.mergeExistingAccount(account)
 	account.ChatGPTAccountID = credentials.ChatGPTAccountID
+	previous := account
 
+	cfg := r.state.Config()
+	quota, err := r.fetchQuota(credentials)
+	if err != nil {
+		kind := RefreshFailureTransient
+		var statusErr quotaStatusError
+		if errors.As(err, &statusErr) {
+			kind = refreshFailureKind(statusErr.status)
+		}
+		r.upsertRefreshFailure(account, redactWithCredentials(err.Error(), credentials), kind)
+		return
+	}
+	if resetCredits, err := r.refreshResetCredits(credentials); err != nil {
+		r.state.RecordLog("warn", "quota.reset_credits_failed", "主动重置次数刷新失败", map[string]any{"auth_id": account.AuthID, "error": redactWithCredentials(err.Error(), credentials)}, r.now())
+	} else {
+		mergeResetCredits(&quota, resetCredits)
+	}
+	if cfg.EnableResetProbe {
+		account.ResetProbes = scheduleResetProbesFromPrevious(previous, previous.ResetProbes, r.now())
+		lazyKinds := make([]WindowKind, 0, len(account.ResetProbes))
+		for kind, probe := range account.ResetProbes {
+			if !resetProbeDue(probe, r.now()) {
+				continue
+			}
+			window, ok := matchingProbeWindow(quota, probe)
+			if !ok || window.ResetAt.IsZero() {
+				account.ResetProbes[kind] = markResetProbeRetry(probe, r.now(), errors.New("matching quota window missing"), credentials, cfg)
+				continue
+			}
+			if looksLikeLazyReset(r.now(), window, probe.WindowSeconds) {
+				lazyKinds = append(lazyKinds, kind)
+				continue
+			}
+			account.ResetProbes[kind] = markResetProbeConfirmedActive(probe)
+		}
+		if len(lazyKinds) > 0 {
+			if err := r.runResetProbe(credentials); err != nil {
+				for _, kind := range lazyKinds {
+					account.ResetProbes[kind] = markResetProbeRetry(account.ResetProbes[kind], r.now(), err, credentials, cfg)
+				}
+				r.state.RecordLog("warn", "quota.reset_probe_failed", "Codex reset probe failed", map[string]any{"auth_id": account.AuthID, "error": redactWithCredentials(err.Error(), credentials)}, r.now())
+			} else {
+				for _, kind := range lazyKinds {
+					account.ResetProbes[kind] = markResetProbeVerified(account.ResetProbes[kind], r.now())
+				}
+				r.state.RecordLog("info", "quota.reset_probe_verified", "Codex reset probe verified", map[string]any{"auth_id": account.AuthID}, r.now())
+				if refreshedQuota, err := r.fetchQuota(credentials); err != nil {
+					r.state.RecordLog("warn", "quota.reset_probe_post_refresh_failed", "Post-probe quota refresh failed", map[string]any{"auth_id": account.AuthID, "error": redactWithCredentials(err.Error(), credentials)}, r.now())
+				} else {
+					quota = refreshedQuota
+					if resetCredits, err := r.refreshResetCredits(credentials); err != nil {
+						r.state.RecordLog("warn", "quota.reset_credits_failed", "主动重置次数刷新失败", map[string]any{"auth_id": account.AuthID, "error": redactWithCredentials(err.Error(), credentials)}, r.now())
+					} else {
+						mergeResetCredits(&quota, resetCredits)
+					}
+				}
+			}
+		}
+	}
+	account.Quota = quota
+	account.Family = quota.Family
+	account.LastError = ""
+	account.LastSuccessAt = r.now()
+	r.state.UpsertQuota(account)
+	r.state.RecordAccountSuccess(account.AuthID, account.AuthIndex, r.now())
+	r.state.RecordLog("info", "quota.refresh_success", "账号额度刷新成功", map[string]any{"auth_id": account.AuthID}, r.now())
+}
+
+func (r *QuotaRefresher) fetchQuota(credentials CodexCredentials) (ParsedQuota, error) {
 	cfg := r.state.Config()
 	req := pluginapi.HTTPRequest{
 		Method: http.MethodGet,
@@ -530,32 +599,51 @@ func (r *QuotaRefresher) refreshAuth(auth pluginapi.HostAuthFileEntry) {
 	}
 	resp, err := r.host.Do(req)
 	if err != nil {
-		r.upsertRefreshFailure(account, redactWithCredentials(fmt.Sprintf("quota request: %v", err), credentials), RefreshFailureTransient)
-		return
+		return ParsedQuota{}, fmt.Errorf("quota request: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		message := fmt.Sprintf("quota request returned status %d: response body: %s", resp.StatusCode, sanitizedBodySummary(resp.Body))
-		r.upsertRefreshFailure(account, redactWithCredentials(message, credentials), refreshFailureKind(resp.StatusCode))
-		return
+		return ParsedQuota{}, quotaStatusError{status: resp.StatusCode, body: resp.Body}
 	}
-
 	quota, err := ParseCodexUsagePayload(resp.Body, r.now())
 	if err != nil {
-		r.upsertRefreshFailure(account, redactWithCredentials(fmt.Sprintf("parse quota: %v", err), credentials), RefreshFailureTransient)
-		return
+		return ParsedQuota{}, fmt.Errorf("parse quota: %w", err)
 	}
-	if resetCredits, err := r.refreshResetCredits(credentials); err != nil {
-		r.state.RecordLog("warn", "quota.reset_credits_failed", "主动重置次数刷新失败", map[string]any{"auth_id": account.AuthID, "error": redactWithCredentials(err.Error(), credentials)}, r.now())
-	} else {
-		mergeResetCredits(&quota, resetCredits)
+	return quota, nil
+}
+
+type quotaStatusError struct {
+	status int
+	body   []byte
+}
+
+func (e quotaStatusError) Error() string {
+	return fmt.Sprintf("quota request returned status %d: response body: %s", e.status, sanitizedBodySummary(e.body))
+}
+
+func (r *QuotaRefresher) runResetProbe(credentials CodexCredentials) error {
+	req := pluginapi.HTTPRequest{
+		Method: http.MethodPost,
+		URL:    codexResetProbeEndpoint,
+		Headers: http.Header{
+			"Authorization":      []string{"Bearer " + credentials.AccessToken},
+			"Chatgpt-Account-Id": []string{credentials.ChatGPTAccountID},
+			"Accept":             []string{"application/json"},
+			"Content-Type":       []string{"application/json"},
+			"User-Agent":         []string{quotaUserAgent},
+		},
+		Body: resetProbePayloadBytes(),
 	}
-	account.Quota = quota
-	account.Family = quota.Family
-	account.LastError = ""
-	account.LastSuccessAt = r.now()
-	r.state.UpsertQuota(account)
-	r.state.RecordAccountSuccess(account.AuthID, account.AuthIndex, r.now())
-	r.state.RecordLog("info", "quota.refresh_success", "账号额度刷新成功", map[string]any{"auth_id": account.AuthID}, r.now())
+	resp, err := r.host.Do(req)
+	if err != nil {
+		return fmt.Errorf("reset probe request: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("reset probe returned status %d: response body: %s", resp.StatusCode, sanitizedBodySummary(resp.Body))
+	}
+	if !resetProbeUsageEvidence(resp.Body) {
+		return errors.New("reset probe response did not include usage evidence")
+	}
+	return nil
 }
 
 func (r *QuotaRefresher) refreshAndSaveCredentials(authResp pluginapi.HostAuthGetResponse, current CodexCredentials) (CodexCredentials, error) {
