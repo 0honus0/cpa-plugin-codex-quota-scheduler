@@ -294,17 +294,23 @@ func (r *QuotaRefresher) RefreshOneAuthID(authID string) error {
 
 func (r *QuotaRefresher) RefreshOneSoon(authID string) {
 	r.mu.Lock()
-	if r.stopping {
+	if r.refreshing || r.stopping {
 		r.mu.Unlock()
 		return
 	}
+	r.refreshing = true
 	r.wg.Add(1)
 	previousDue := r.state.NextRefreshDueAt(r.now())
 	r.mu.Unlock()
 
 	go func() {
-		defer r.wg.Done()
-		defer r.wakeRefreshLoopIfDueAdvanced(previousDue)
+		defer func() {
+			r.mu.Lock()
+			r.refreshing = false
+			r.mu.Unlock()
+			r.wg.Done()
+			r.wakeRefreshLoopIfDueAdvanced(previousDue)
+		}()
 		if err := r.RefreshOneAuthID(authID); err != nil {
 			r.host.Log("error", "quota refresh failed", map[string]any{"auth_id": authID, "error": redactSecrets(err.Error())})
 			if r.state != nil {

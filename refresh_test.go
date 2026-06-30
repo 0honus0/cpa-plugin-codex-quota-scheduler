@@ -1424,6 +1424,54 @@ func TestRefreshSoonDoesNotOverlapRefreshes(t *testing.T) {
 	host.assertNoHeaderErrors(t)
 }
 
+func TestRefreshOneSoonDoesNotOverlapRefreshes(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{
+			ID: "auth-1", AuthIndex: "idx-1", Provider: "codex",
+		}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"access-1","id_token":"` + idToken + `"}`),
+		},
+		httpBody:   []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+		doStarted:  make(chan struct{}, 1),
+		releaseDo:  make(chan struct{}),
+		httpStatus: http.StatusOK,
+	}
+	store := NewPluginState(DefaultConfig())
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+
+	refresher.RefreshOneSoon("auth-1")
+	select {
+	case <-host.doStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first refresh to start")
+	}
+	released := false
+	defer func() {
+		if !released {
+			close(host.releaseDo)
+		}
+	}()
+	for i := 0; i < 10; i++ {
+		refresher.RefreshOneSoon("auth-1")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := host.httpCallCount(); got != 1 {
+		t.Fatalf("http calls = %d, want 1 while refresh is active", got)
+	}
+	if got := host.maxActiveHTTP(); got != 1 {
+		t.Fatalf("max active HTTP = %d, want 1 while refresh is active", got)
+	}
+	close(host.releaseDo)
+	released = true
+	if !waitUntil(time.Second, func() bool { return host.activeHTTPCount() == 0 }) {
+		t.Fatalf("active HTTP = %d, want 0 after releasing request", host.activeHTTPCount())
+	}
+	host.assertNoHeaderErrors(t)
+}
+
 func TestStopWaitsForActiveRefreshSoon(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
