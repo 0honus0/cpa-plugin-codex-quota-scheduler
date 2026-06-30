@@ -31,6 +31,39 @@ func TestPluginStateUpsertsAndSnapshotsAccounts(t *testing.T) {
 	}
 }
 
+func TestPluginStateClonesResetProbes(t *testing.T) {
+	store := NewPluginState(DefaultConfig())
+	now := time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC)
+	account := AccountState{
+		AuthID: "auth-1",
+		ResetProbes: map[WindowKind]ResetProbeState{
+			WindowFiveHour: {
+				WindowKind: WindowFiveHour,
+				Status:     ResetProbeStatusPending,
+			},
+		},
+	}
+
+	store.UpsertQuota(account)
+	probe := account.ResetProbes[WindowFiveHour]
+	probe.Status = ResetProbeStatusFailed
+	account.ResetProbes[WindowFiveHour] = probe
+
+	snapshot := store.Snapshot(now)
+	if got := snapshot.Accounts[0].ResetProbes[WindowFiveHour].Status; got != ResetProbeStatusPending {
+		t.Fatalf("stored reset probe status after source mutation = %q, want %q", got, ResetProbeStatusPending)
+	}
+
+	probe = snapshot.Accounts[0].ResetProbes[WindowFiveHour]
+	probe.Status = ResetProbeStatusVerified
+	snapshot.Accounts[0].ResetProbes[WindowFiveHour] = probe
+
+	second := store.Snapshot(now)
+	if got := second.Accounts[0].ResetProbes[WindowFiveHour].Status; got != ResetProbeStatusPending {
+		t.Fatalf("stored reset probe status after snapshot mutation = %q, want %q", got, ResetProbeStatusPending)
+	}
+}
+
 func TestPluginStateNormalizesConfigAtBoundaries(t *testing.T) {
 	store := NewPluginState(Config{})
 	if store.Config().MaxLogEntries != DefaultConfig().MaxLogEntries || store.Config().LogRetention != DefaultConfig().LogRetention {

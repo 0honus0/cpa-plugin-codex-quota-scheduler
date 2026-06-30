@@ -527,8 +527,20 @@ func cloneGroupAnnotation(annotation GroupAnnotation) GroupAnnotation {
 
 func cloneAccountState(account AccountState) AccountState {
 	account.Quota = cloneParsedQuota(account.Quota)
+	account.ResetProbes = cloneResetProbes(account.ResetProbes)
 	account.Annotation = cloneAccountAnnotation(account.Annotation)
 	return account
+}
+
+func cloneResetProbes(probes map[WindowKind]ResetProbeState) map[WindowKind]ResetProbeState {
+	if len(probes) == 0 {
+		return nil
+	}
+	cloned := make(map[WindowKind]ResetProbeState, len(probes))
+	for kind, probe := range probes {
+		cloned[kind] = probe
+	}
+	return cloned
 }
 
 func cloneParsedQuota(quota ParsedQuota) ParsedQuota {
