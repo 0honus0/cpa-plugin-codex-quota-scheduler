@@ -665,6 +665,24 @@ func TestSettingsPayloadIncludesAdaptiveRefresh(t *testing.T) {
 	}
 }
 
+func TestSettingsPayloadIncludesResetProbeFlag(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.EnableResetProbe = true
+	payload := SettingsFromConfig(cfg)
+	if !payload.EnableResetProbe {
+		t.Fatal("EnableResetProbe = false, want true")
+	}
+
+	payload.EnableResetProbe = true
+	roundTrip, err := ConfigFromSettings(DefaultConfig(), payload)
+	if err != nil {
+		t.Fatalf("ConfigFromSettings returned error: %v", err)
+	}
+	if !roundTrip.EnableResetProbe {
+		t.Fatal("roundTrip EnableResetProbe = false, want true")
+	}
+}
+
 func TestStatusPayloadIncludesRefreshFailureVisibility(t *testing.T) {
 	now := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
 	store := NewPluginState(DefaultConfig())

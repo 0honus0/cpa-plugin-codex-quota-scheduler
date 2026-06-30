@@ -50,6 +50,7 @@ type SettingsPayload struct {
 	QuotaRefreshInterval            string      `json:"quota_refresh_interval"`
 	StaleAfter                      string      `json:"stale_after"`
 	EnableUsageFeedback             bool        `json:"enable_usage_feedback"`
+	EnableResetProbe                bool        `json:"enable_reset_probe"`
 	MaxRefreshConcurrency           int         `json:"max_refresh_concurrency"`
 	QuotaEndpoint                   string      `json:"quota_endpoint"`
 	RefreshActiveWindow             string      `json:"refresh_active_window"`
@@ -224,6 +225,7 @@ func SettingsFromConfig(cfg Config) SettingsPayload {
 		QuotaRefreshInterval:            cfg.QuotaRefreshInterval.String(),
 		StaleAfter:                      cfg.StaleAfter.String(),
 		EnableUsageFeedback:             cfg.EnableUsageFeedback,
+		EnableResetProbe:                cfg.EnableResetProbe,
 		MaxRefreshConcurrency:           cfg.MaxRefreshConcurrency,
 		QuotaEndpoint:                   cfg.QuotaEndpoint,
 		RefreshActiveWindow:             cfg.RefreshActiveWindow.String(),
@@ -262,6 +264,7 @@ func ConfigFromSettings(base Config, payload SettingsPayload) (Config, error) {
 	}
 	cfg.HandleEnabled = payload.HandleEnabled
 	cfg.EnableUsageFeedback = payload.EnableUsageFeedback
+	cfg.EnableResetProbe = payload.EnableResetProbe
 	if payload.MaxRefreshConcurrency <= 0 {
 		return Config{}, jsonError("max_refresh_concurrency must be positive")
 	}

@@ -67,6 +67,23 @@ func TestDefaultConfigAdaptiveRefreshDefaults(t *testing.T) {
 	}
 }
 
+func TestDefaultConfigDisablesResetProbe(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.EnableResetProbe {
+		t.Fatal("EnableResetProbe = true, want false")
+	}
+}
+
+func TestDecodeConfigEnableResetProbe(t *testing.T) {
+	cfg, err := DecodeConfig([]byte("enable_reset_probe: true\n"))
+	if err != nil {
+		t.Fatalf("DecodeConfig returned error: %v", err)
+	}
+	if !cfg.EnableResetProbe {
+		t.Fatal("EnableResetProbe = false, want true")
+	}
+}
+
 func TestDecodeConfigAdaptiveRefreshOverrides(t *testing.T) {
 	cfg, err := DecodeConfig([]byte(`
 refresh_active_window: 2h
