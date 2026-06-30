@@ -1123,6 +1123,17 @@ func TestStatusPageShowsResetProbeWarningOutsideSettingsPanel(t *testing.T) {
 }
 ```
 
+Update the existing resource-boundary tests in `management_test.go`:
+
+- In the legacy resource action settings payload, include
+  `"enable_reset_probe":true`.
+- Assert `store.Config().EnableResetProbe` remains `false` after all
+  `/v0/resource/plugins/codex-quota-scheduler/status?action=...` requests.
+- Keep the `/status-data?action=refresh` assertion that no refresh callback is
+  triggered.
+- Keep forbidden marker checks for `status?action`, `requestPlugin(action`,
+  bearer/authorization/cookie text, and `chatGPTQuotaEndpoint`.
+
 If `renderStatusPageForTest` is not present, add the same helper used by
 existing management rendering tests.
 
@@ -1200,7 +1211,7 @@ and stable ordering by `WindowKind`.
 Run:
 
 ```powershell
-go test ./... -run "TestStatusPageShowsResetProbeWarningOutsideSettingsPanel|TestSettingsPayloadIncludesResetProbeFlag"
+go test ./... -run "TestStatusPageShowsResetProbeWarningOutsideSettingsPanel|TestSettingsPayloadIncludesResetProbeFlag|TestResourceStatusQueryActionsDoNotMutateState|TestResourceStatusDataPublishesSanitizedCacheWithoutManagementKey|TestManagementSettingsAndImportRejectNonChatGPTQuotaEndpoint"
 ```
 
 Expected: PASS.

@@ -226,6 +226,14 @@ probe time, verified time, and sanitized probe error when present.
 - Keep probe request bodies fixed and tiny.
 - Do not expose the CPA Management key or Codex credentials in resource HTML or
   JSON.
+- Do not add any state-changing or privileged operation under
+  `/v0/resource/plugins/codex-quota-scheduler`. Resource routes may serve the UI
+  shell and sanitized read-only status data only. Settings updates, imports,
+  annotation writes, manual refresh, per-account refresh, and any future reset
+  probe trigger must stay behind Management API routes protected by the CPA
+  Management key.
+- Keep `quota_endpoint` restricted to the fixed ChatGPT usage endpoint so Codex
+  bearer credentials cannot be redirected to a user-controlled host.
 
 ## Testing
 
@@ -253,7 +261,11 @@ Unit tests should cover:
 - monthly windows without `limit_window_seconds` are not probed;
 - monthly windows with `limit_window_seconds` use that exact duration;
 - `NextRefreshDueAt` includes pending probe checks;
-- management UI renders the warning outside the collapsed settings panel.
+- management UI renders the warning outside the collapsed settings panel;
+- legacy resource action queries cannot toggle `enable_reset_probe`, refresh
+  quota, import configuration, or write annotations;
+- public resource status data does not expose `quota_endpoint`, credential
+  markers, management keys, or raw probe error details.
 
 ## Acceptance Criteria
 
