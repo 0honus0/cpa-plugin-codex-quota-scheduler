@@ -26,11 +26,8 @@ func TestManagementRegisterExposesStatusResourceAndRoutes(t *testing.T) {
 	if resources["/status"].Menu == "" {
 		t.Fatalf("status resource Menu is empty: %#v", resources["/status"])
 	}
-	if _, ok := resources["/status-data"]; !ok {
-		t.Fatalf("missing status-data resource in %#v", resp.Resources)
-	}
-	if resources["/status-data"].Menu != "" {
-		t.Fatalf("status-data resource Menu = %q, want hidden read-only resource", resources["/status-data"].Menu)
+	if _, ok := resources["/status-data"]; ok {
+		t.Fatalf("status-data resource is still registered: %#v", resp.Resources)
 	}
 	if len(resources) != len(resp.Resources) {
 		t.Fatalf("resources = %#v", resp.Resources)
@@ -404,12 +401,12 @@ func TestStatusHTMLUsesManagementAPIActionsModalProgressAndLogs(t *testing.T) {
 	}
 	html := string(resp.Body)
 	lower := strings.ToLower(html)
-	for _, want := range []string{"quota-bar", "editDialog", "logList", "openEdit", "exportLogs", "codex-quota-scheduler-logs.json", "maxLogEntries", "logRetention", "refreshOneQuota", "refreshStatus", "renderAccounts", "renderMetrics", "metricNextAuthID", "metricMonthlyMode", "metricSchedulerState", "metricLastSelected", "managementKey", "MANAGEMENT_BASE", "/v0/management/plugins/codex-quota-scheduler", "authHeaders()", "localeSelect", "TRANSLATIONS", "codex-quota-scheduler-locale-v1", "Scheduler Settings", "Account Queue", "INLINE_TRANSLATIONS", "Reset credits", "Refresh Quota"} {
+	for _, want := range []string{"quota-bar", "editDialog", "logList", "openEdit", "exportLogs", "codex-quota-scheduler-logs.json", "maxLogEntries", "logRetention", "refreshOneQuota", "refreshStatus", "renderAccounts", "renderMetrics", "metricNextAuthID", "metricMonthlyMode", "metricLastSelected", "managementKey", "loadStatus", "MANAGEMENT_BASE", "/v0/management/plugins/codex-quota-scheduler", "authHeaders()", "localeSelect", "TRANSLATIONS", "codex-quota-scheduler-locale-v1", "Scheduler Settings", "Account Queue", "INLINE_TRANSLATIONS", "Reset credits", "Refresh Quota"} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("html missing marker %q: %s", want, html)
 		}
 	}
-	for _, forbidden := range []string{"RESOURCE_ENDPOINT", "/v0/resource/plugins/codex-quota-scheduler/status?action", "requestPlugin(action,options)", "details class=\"editor\"", "action_token"} {
+	for _, forbidden := range []string{"RESOURCE_ENDPOINT", "PUBLIC_STATUS_BASE", "requestPublicStatus", "metricSchedulerState", "metrics.scheduler", "/v0/resource/plugins/codex-quota-scheduler/status?action", "requestPlugin(action,options)", "details class=\"editor\"", "action_token"} {
 		if strings.Contains(html, forbidden) {
 			t.Fatalf("html still contains removed marker %q: %s", forbidden, html)
 		}
@@ -424,8 +421,8 @@ func TestStatusHTMLUsesManagementAPIActionsModalProgressAndLogs(t *testing.T) {
 func TestStatusPageUsesCollapsedSettingsAndNoHardReload(t *testing.T) {
 	store := NewPluginState(DefaultConfig())
 	page := renderStatusPageForTest(t, store)
-	if !strings.Contains(page, `<details class="section collapsible" id="settingsPanel">`) &&
-		!strings.Contains(page, `<details class="panel collapsible" id="settingsPanel">`) {
+	if !strings.Contains(page, `<details class="section collapsible" id="settingsPanel" hidden>`) &&
+		!strings.Contains(page, `<details class="panel collapsible" id="settingsPanel" hidden>`) {
 		t.Fatalf("page does not render settings as collapsed details")
 	}
 	if strings.Contains(page, `id="settingsPanel" open`) {
@@ -440,11 +437,10 @@ func TestStatusPageUsesCollapsedSettingsAndNoHardReload(t *testing.T) {
 	for _, want := range []string{
 		`summary-toggle`,
 		`hasManagementKey`,
-		`PUBLIC_STATUS_BASE`,
-		`requestPublicStatus`,
 		`requestManagement('/status'`,
 		`refreshStatus`,
-		`window.setInterval`,
+		`loadStatus`,
+		`startStatusPolling`,
 		`默认配置已经都设置好了，正常情况下不需要手动设置。`,
 		`活跃刷新窗口`,
 		`重置后刷新延迟`,
@@ -463,9 +459,15 @@ func TestStatusPageUsesCollapsedSettingsAndNoHardReload(t *testing.T) {
 	if refreshStart > settingsStart {
 		t.Fatalf("refresh quota button is still inside or after the settings panel")
 	}
+	if strings.Contains(page, "requestPublicStatus") || strings.Contains(page, "PUBLIC_STATUS_BASE") {
+		t.Fatalf("page still contains public status fallback")
+	}
+	if strings.Contains(page, `refreshStatus({fillSettings:true}).catch`) {
+		t.Fatalf("page still auto-loads protected status on startup")
+	}
 }
 
-func TestStatusPageShowsResetProbeWarningOutsideSettingsPanel(t *testing.T) {
+func TestStatusPageShowsResetProbeWarningOnlyAfterProtectedLoadWhenDisabled(t *testing.T) {
 	store := NewPluginState(DefaultConfig())
 	page := renderStatusPageForTest(t, store)
 	warningStart := strings.Index(page, `id="resetProbeWarning"`)
@@ -480,6 +482,9 @@ func TestStatusPageShowsResetProbeWarningOutsideSettingsPanel(t *testing.T) {
 		t.Fatalf("reset probe warning renders after settings panel")
 	}
 	for _, want := range []string{
+		`id="resetProbeWarning" hidden`,
+		`updateResetProbeWarning`,
+		`statusLoaded&&STATUS.settings&&STATUS.settings.enable_reset_probe!==true`,
 		`data-i18n="resetProbe.warningTitle"`,
 		`data-i18n="resetProbe.warningBody"`,
 		`name="enable_reset_probe"`,
@@ -494,7 +499,7 @@ func TestStatusPageShowsResetProbeWarningOutsideSettingsPanel(t *testing.T) {
 	}
 }
 
-func TestStatusPageDoesNotClobberDirtySettingsOnPublicPoll(t *testing.T) {
+func TestStatusPageDoesNotClobberDirtySettingsOnProtectedPoll(t *testing.T) {
 	store := NewPluginState(DefaultConfig())
 	page := renderStatusPageForTest(t, store)
 	for _, want := range []string{
@@ -569,22 +574,24 @@ func TestDynamicAccountRenderingHasBilingualStatusLabels(t *testing.T) {
 	}
 }
 
-func TestStatusPageUsesPublicStatusForReadOnlyCacheAndKeyForEdit(t *testing.T) {
+func TestStatusPageUsesProtectedLoadForStatusAndKeyForEdit(t *testing.T) {
 	store := NewPluginState(DefaultConfig())
 	page := renderStatusPageForTest(t, store)
 	for _, want := range []string{
-		"PUBLIC_STATUS_BASE",
-		"requestPublicStatus",
-		"await requestPublicStatus()",
+		"loadStatus",
+		"startStatusPolling",
+		"await refreshStatus({management:true,fillSettings:true})",
 		"function openEdit(authID){if(!hasManagementKey())",
 		"logs:STATUS.logs||[]",
 	} {
 		if !strings.Contains(page, want) {
-			t.Fatalf("page missing public read-only/key-gated edit marker %q", want)
+			t.Fatalf("page missing protected load/key-gated edit marker %q", want)
 		}
 	}
-	if strings.Contains(page, "requestManagement('/logs'") {
-		t.Fatalf("exportLogs still requires management logs endpoint")
+	for _, forbidden := range []string{"PUBLIC_STATUS_BASE", "requestPublicStatus", "await requestPublicStatus()"} {
+		if strings.Contains(page, forbidden) {
+			t.Fatalf("page still contains public status marker %q", forbidden)
+		}
 	}
 }
 
@@ -1100,14 +1107,14 @@ func TestResourceStatusRendersUsablePluginPage(t *testing.T) {
 			t.Fatalf("resource status leaked privileged status marker %q: %s", forbidden, body)
 		}
 	}
-	for _, want := range []string{"logList", "managementKey", "MANAGEMENT_BASE", "/v0/management/plugins/codex-quota-scheduler", "authHeaders()", "let STATUS=", `"shell":true`, "statusLoaded=!STATUS.shell", "notice.statusLoaded", "refreshStatus"} {
+	for _, want := range []string{"logList", "managementKey", "loadStatus", "MANAGEMENT_BASE", "/v0/management/plugins/codex-quota-scheduler", "authHeaders()", "let STATUS=", `"shell":true`, "statusLoaded=!STATUS.shell", "notice.statusLoaded", "refreshStatus", "只要调度器启动了，它就会在后台自动运行，无需保持页面开启"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("resource status missing usable plugin page marker %q: %s", want, body)
 		}
 	}
 }
 
-func TestResourceStatusDataPublishesSanitizedCacheWithoutManagementKey(t *testing.T) {
+func TestResourceStatusDataIsNotPublicWithoutManagementKey(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	store := NewPluginState(DefaultConfig())
 	store.SetAnnotations(AnnotationState{
@@ -1151,45 +1158,17 @@ func TestResourceStatusDataPublishesSanitizedCacheWithoutManagementKey(t *testin
 		Path:   "/v0/resource/plugins/codex-quota-scheduler/status-data",
 		Query:  url.Values{"action": []string{"refresh"}, "payload": []string{"{}"}},
 	}, now)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, resp.Body)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusNotFound, resp.Body)
 	}
 	if refreshes != 0 || refreshOne != "" {
 		t.Fatalf("public status data triggered refreshes = %d, refreshOne = %q; want none", refreshes, refreshOne)
 	}
 	bodyText := strings.ToLower(string(resp.Body))
-	for _, forbidden := range []string{"access_token", "refresh_token", "id_token", "bearer ", "authorization", "cookie", chatGPTQuotaEndpoint, codexResetProbeEndpoint} {
+	for _, forbidden := range []string{"auth-1", "public", "private", "scheduler.selected", "reset_probes", "access_token", "refresh_token", "id_token", "bearer ", "authorization", "cookie", chatGPTQuotaEndpoint, codexResetProbeEndpoint} {
 		if strings.Contains(bodyText, forbidden) {
 			t.Fatalf("public status data leaked sensitive marker %q: %s", forbidden, resp.Body)
 		}
-	}
-	if !strings.Contains(bodyText, `"reset_probes"`) {
-		t.Fatalf("public status data missing reset probe status: %s", resp.Body)
-	}
-	var body StatusPayload
-	if err := json.Unmarshal(resp.Body, &body); err != nil {
-		t.Fatalf("json.Unmarshal returned error: %v; body=%s", err, resp.Body)
-	}
-	if body.Shell || len(body.Accounts) != 1 || len(body.Logs) != 2 {
-		t.Fatalf("body shell/accounts/logs = %v/%d/%d; want public cached status payload", body.Shell, len(body.Accounts), len(body.Logs))
-	}
-	if body.Settings.QuotaEndpoint != "" {
-		t.Fatalf("public settings quota_endpoint = %q, want redacted", body.Settings.QuotaEndpoint)
-	}
-	if body.Accounts[0].AuthID != "auth-1" || body.Accounts[0].Alias == "" || len(body.Accounts[0].ResetCredits) != 1 {
-		t.Fatalf("account body = %#v, want cached queue and quota data", body.Accounts[0])
-	}
-	if body.Accounts[0].LastError == "" {
-		t.Fatal("public account last_error empty, want sanitized error")
-	}
-	lastError := strings.ToLower(body.Accounts[0].LastError)
-	for _, forbidden := range []string{"access_token", "bearer", "authorization", "cookie", chatGPTQuotaEndpoint, codexResetProbeEndpoint} {
-		if strings.Contains(lastError, strings.ToLower(forbidden)) {
-			t.Fatalf("public account last_error leaked sensitive marker %q: %q", forbidden, body.Accounts[0].LastError)
-		}
-	}
-	if body.Logs[0].Event != "scheduler.selected" {
-		t.Fatalf("logs = %#v, want cached scheduler logs", body.Logs)
 	}
 }
 

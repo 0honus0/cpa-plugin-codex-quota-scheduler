@@ -175,13 +175,13 @@ make build
 Build and package the release zip:
 
 ```bash
-make package VERSION=0.1.3
+make package VERSION=0.1.4
 ```
 
 Generate an aggregate checksum file for local release assets:
 
 ```bash
-make checksums VERSION=0.1.3
+make checksums VERSION=0.1.4
 ```
 
 Windows users can also use the PowerShell helper:
@@ -195,8 +195,9 @@ compiler such as MinGW-w64 on `PATH`.
 
 ## GitHub Releases
 
-Version `0.1.3` adds the opt-in automatic reset probe for lazy Codex quota
-windows. Version `0.1.2` adds adaptive refresh scheduling and a dynamically
+Version `0.1.4` keeps account cards, logs, refresh actions, scheduler status,
+and reset-probe notices behind the CPA Management key. Version `0.1.3` adds the
+opt-in automatic reset probe for lazy Codex quota windows. Version `0.1.2` adds adaptive refresh scheduling and a dynamically
 updating bilingual UI. Version `0.1.1` moves all state-changing and privileged operations
 behind CPA Management API routes and restricts `quota_endpoint` to the expected
 ChatGPT quota endpoint. Version `0.1.0` was the first public release version for
@@ -204,8 +205,8 @@ this repository. GitHub Actions builds release assets when a tag matching `v*`
 is pushed. Use a dotted numeric version tag such as:
 
 ```bash
-git tag v0.1.3
-git push origin v0.1.3
+git tag v0.1.4
+git push origin v0.1.4
 ```
 
 The `Build` workflow runs tests and creates the release automatically. Release
@@ -216,21 +217,21 @@ codex-quota-scheduler_<version>_<goos>_<goarch>.zip
 checksums.txt
 ```
 
-For `v0.1.3`, the expected platform assets are:
+For `v0.1.4`, the expected platform assets are:
 
-- `codex-quota-scheduler_0.1.3_darwin_amd64.zip`
-- `codex-quota-scheduler_0.1.3_darwin_arm64.zip`
-- `codex-quota-scheduler_0.1.3_freebsd_amd64.zip`
-- `codex-quota-scheduler_0.1.3_linux_amd64.zip`
-- `codex-quota-scheduler_0.1.3_linux_arm64.zip`
-- `codex-quota-scheduler_0.1.3_windows_amd64.zip`
-- `codex-quota-scheduler_0.1.3_windows_arm64.zip`
+- `codex-quota-scheduler_0.1.4_darwin_amd64.zip`
+- `codex-quota-scheduler_0.1.4_darwin_arm64.zip`
+- `codex-quota-scheduler_0.1.4_freebsd_amd64.zip`
+- `codex-quota-scheduler_0.1.4_linux_amd64.zip`
+- `codex-quota-scheduler_0.1.4_linux_arm64.zip`
+- `codex-quota-scheduler_0.1.4_windows_amd64.zip`
+- `codex-quota-scheduler_0.1.4_windows_arm64.zip`
 - `checksums.txt`
 
 `checksums.txt` uses sha256sum format:
 
 ```text
-<sha256>  codex-quota-scheduler_0.1.3_darwin_arm64.zip
+<sha256>  codex-quota-scheduler_0.1.4_darwin_arm64.zip
 ```
 
 ## Management API
