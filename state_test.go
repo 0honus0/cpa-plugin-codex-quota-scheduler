@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -28,6 +30,243 @@ func TestPluginStateUpsertsAndSnapshotsAccounts(t *testing.T) {
 	}
 	if snapshot.Accounts[0].AuthID != "auth-1" {
 		t.Fatalf("account = %#v", snapshot.Accounts[0])
+	}
+}
+
+func TestPluginStateClonesResetProbes(t *testing.T) {
+	store := NewPluginState(DefaultConfig())
+	now := time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC)
+	account := AccountState{
+		AuthID: "auth-1",
+		ResetProbes: map[WindowKind]ResetProbeState{
+			WindowFiveHour: {
+				WindowKind: WindowFiveHour,
+				Status:     ResetProbeStatusPending,
+			},
+		},
+	}
+
+	store.UpsertQuota(account)
+	probe := account.ResetProbes[WindowFiveHour]
+	probe.Status = ResetProbeStatusFailed
+	account.ResetProbes[WindowFiveHour] = probe
+
+	snapshot := store.Snapshot(now)
+	if got := snapshot.Accounts[0].ResetProbes[WindowFiveHour].Status; got != ResetProbeStatusPending {
+		t.Fatalf("stored reset probe status after source mutation = %q, want %q", got, ResetProbeStatusPending)
+	}
+
+	probe = snapshot.Accounts[0].ResetProbes[WindowFiveHour]
+	probe.Status = ResetProbeStatusVerified
+	snapshot.Accounts[0].ResetProbes[WindowFiveHour] = probe
+
+	second := store.Snapshot(now)
+	if got := second.Accounts[0].ResetProbes[WindowFiveHour].Status; got != ResetProbeStatusPending {
+		t.Fatalf("stored reset probe status after snapshot mutation = %q, want %q", got, ResetProbeStatusPending)
+	}
+}
+
+func TestScheduleResetProbeFromMaturedPreviousReset(t *testing.T) {
+	resetAt := time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC)
+	now := resetAt.Add(time.Minute)
+	seconds := int64(fiveHourSeconds)
+	previous := AccountState{
+		AuthID: "auth-1",
+		Quota: ParsedQuota{
+			FiveHour: &QuotaWindow{Kind: WindowFiveHour, LimitWindowSeconds: &seconds, ResetAt: resetAt},
+		},
+	}
+	next := scheduleResetProbesFromPrevious(previous, nil, now)
+	probe, ok := next[WindowFiveHour]
+	if !ok {
+		t.Fatal("five-hour reset probe was not scheduled")
+	}
+	if probe.Status != ResetProbeStatusPending {
+		t.Fatalf("Status = %q, want pending", probe.Status)
+	}
+	if !probe.ResetAt.Equal(resetAt) {
+		t.Fatalf("ResetAt = %s, want %s", probe.ResetAt, resetAt)
+	}
+	if !probe.NextCheckAt.Equal(resetAt.Add(10 * time.Minute)) {
+		t.Fatalf("NextCheckAt = %s, want %s", probe.NextCheckAt, resetAt.Add(10*time.Minute))
+	}
+}
+
+func TestScheduleResetProbeKeepsSeparateWindowBaselines(t *testing.T) {
+	fiveReset := time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC)
+	weeklyReset := fiveReset.Add(2 * time.Minute)
+	now := weeklyReset.Add(time.Minute)
+	fiveSeconds := int64(fiveHourSeconds)
+	weeklySeconds := int64(7 * 24 * 60 * 60)
+	previous := AccountState{
+		AuthID: "auth-1",
+		Quota: ParsedQuota{
+			FiveHour:   &QuotaWindow{Kind: WindowFiveHour, LimitWindowSeconds: &fiveSeconds, ResetAt: fiveReset},
+			LongWindow: &QuotaWindow{Kind: WindowWeekly, LimitWindowSeconds: &weeklySeconds, ResetAt: weeklyReset},
+		},
+	}
+	next := scheduleResetProbesFromPrevious(previous, nil, now)
+	if !next[WindowFiveHour].ResetAt.Equal(fiveReset) {
+		t.Fatalf("five-hour ResetAt = %s, want %s", next[WindowFiveHour].ResetAt, fiveReset)
+	}
+	if !next[WindowWeekly].ResetAt.Equal(weeklyReset) {
+		t.Fatalf("weekly ResetAt = %s, want %s", next[WindowWeekly].ResetAt, weeklyReset)
+	}
+}
+
+func TestScheduleResetProbePreservesExistingState(t *testing.T) {
+	resetAt := time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC)
+	now := resetAt.Add(time.Minute)
+	retryAt := resetAt.Add(30 * time.Minute)
+	seconds := int64(fiveHourSeconds)
+	previous := AccountState{
+		AuthID: "auth-1",
+		Quota: ParsedQuota{
+			FiveHour: &QuotaWindow{Kind: WindowFiveHour, LimitWindowSeconds: &seconds, ResetAt: resetAt},
+		},
+	}
+	current := map[WindowKind]ResetProbeState{
+		WindowFiveHour: {
+			WindowKind:  WindowFiveHour,
+			Status:      ResetProbeStatusFailed,
+			ResetAt:     resetAt,
+			NextCheckAt: retryAt,
+			Attempts:    2,
+			Error:       "kept",
+		},
+		WindowWeekly: {
+			WindowKind:  WindowWeekly,
+			Status:      ResetProbeStatusPending,
+			ResetAt:     resetAt.Add(time.Hour),
+			NextCheckAt: retryAt.Add(time.Hour),
+		},
+	}
+
+	next := scheduleResetProbesFromPrevious(previous, current, now)
+	five := next[WindowFiveHour]
+	if five.Status != ResetProbeStatusFailed || five.Attempts != 2 || five.Error != "kept" || !five.NextCheckAt.Equal(retryAt) {
+		t.Fatalf("five-hour probe = %#v, want preserved failed probe", five)
+	}
+	if _, ok := next[WindowWeekly]; !ok {
+		t.Fatal("weekly probe was dropped")
+	}
+}
+
+func TestResetProbeRetryRedactsCredentialsAndEventuallyFails(t *testing.T) {
+	now := time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC)
+	cfg := DefaultConfig()
+	cfg.RefreshRetryDelays = []time.Duration{time.Minute}
+	credentials := CodexCredentials{
+		AccessToken: "access-1",
+		IDToken:     "id-1",
+	}
+	probe := ResetProbeState{
+		WindowKind: WindowFiveHour,
+		ResetAt:    now.Add(-10 * time.Minute),
+		Status:     ResetProbeStatusPending,
+	}
+
+	first := markResetProbeRetry(probe, now, errors.New("upstream echoed access-1 and id-1"), credentials, cfg)
+	if first.Status != ResetProbeStatusPending {
+		t.Fatalf("first retry Status = %q, want pending", first.Status)
+	}
+	if !first.NextCheckAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("first retry NextCheckAt = %s, want %s", first.NextCheckAt, now.Add(time.Minute))
+	}
+	if first.Error == "" {
+		t.Fatal("first retry Error empty, want redacted error")
+	}
+	for _, leaked := range []string{"access-1", "id-1"} {
+		if strings.Contains(first.Error, leaked) {
+			t.Fatalf("first retry Error leaked %q: %q", leaked, first.Error)
+		}
+	}
+
+	second := markResetProbeRetry(first, now.Add(time.Minute), errors.New("still failed"), credentials, cfg)
+	if second.Status != ResetProbeStatusFailed {
+		t.Fatalf("second retry Status = %q, want failed", second.Status)
+	}
+	if !second.NextCheckAt.IsZero() {
+		t.Fatalf("second retry NextCheckAt = %s, want zero", second.NextCheckAt)
+	}
+}
+
+func TestNextRefreshDueAtIncludesPendingResetProbe(t *testing.T) {
+	resetAt := time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC)
+	now := resetAt.Add(2 * time.Minute)
+	cfg := DefaultConfig()
+	cfg.EnableResetProbe = true
+	store := NewPluginState(cfg)
+	store.RecordCodexActivity(now)
+	store.UpsertQuota(AccountState{
+		AuthID: "auth-1",
+		ResetProbes: map[WindowKind]ResetProbeState{
+			WindowFiveHour: {
+				WindowKind:  WindowFiveHour,
+				Status:      ResetProbeStatusPending,
+				ResetAt:     resetAt,
+				NextCheckAt: resetAt.Add(10 * time.Minute),
+			},
+		},
+		LastSuccessAt: now,
+	})
+	next := store.NextRefreshDueAt(now)
+	if !next.Equal(resetAt.Add(10 * time.Minute)) {
+		t.Fatalf("NextRefreshDueAt = %s, want %s", next, resetAt.Add(10*time.Minute))
+	}
+}
+
+func TestResetProbeDueIgnoredWhenDisabled(t *testing.T) {
+	now := time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC)
+	cfg := DefaultConfig()
+	cfg.EnableResetProbe = false
+	account := AccountState{
+		AuthID:        "auth-1",
+		LastSuccessAt: now,
+		ResetProbes: map[WindowKind]ResetProbeState{
+			WindowFiveHour: {
+				WindowKind:  WindowFiveHour,
+				Status:      ResetProbeStatusPending,
+				ResetAt:     now.Add(-10 * time.Minute),
+				NextCheckAt: now,
+			},
+		},
+	}
+
+	due, reason := accountRefreshDue(account, cfg, now)
+	if due || reason != "" {
+		t.Fatalf("accountRefreshDue = %t, %q; want false with empty reason", due, reason)
+	}
+
+	store := NewPluginState(cfg)
+	store.RecordCodexActivity(now)
+	store.UpsertQuota(account)
+	next := store.NextRefreshDueAt(now)
+	if next.Equal(now) {
+		t.Fatalf("NextRefreshDueAt = %s, want reset probe time ignored when disabled", next)
+	}
+}
+
+func TestAccountRefreshDueReturnsResetProbeCheckDue(t *testing.T) {
+	now := time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC)
+	cfg := DefaultConfig()
+	cfg.EnableResetProbe = true
+	account := AccountState{
+		AuthID:        "auth-1",
+		LastSuccessAt: now,
+		ResetProbes: map[WindowKind]ResetProbeState{
+			WindowFiveHour: {
+				WindowKind:  WindowFiveHour,
+				Status:      ResetProbeStatusPending,
+				ResetAt:     now.Add(-10 * time.Minute),
+				NextCheckAt: now,
+			},
+		},
+	}
+
+	due, reason := accountRefreshDue(account, cfg, now)
+	if !due || reason != "reset_probe_check_due" {
+		t.Fatalf("accountRefreshDue = %t, %q; want true reset_probe_check_due", due, reason)
 	}
 }
 
@@ -363,5 +602,52 @@ func TestPluginStateDueAccountsAnnotatesReason(t *testing.T) {
 	}
 	if due[0].AuthID != "stale" || due[0].Refresh.DueReason != "stale" {
 		t.Fatalf("due account = %#v, want stale with reason", due[0])
+	}
+}
+
+func TestResetProbeConstantsAvoidEarlyMisclassification(t *testing.T) {
+	if resetProbeAfterResetDelay <= resetProbeCloseThreshold {
+		t.Fatalf("resetProbeAfterResetDelay = %s must be greater than resetProbeCloseThreshold = %s", resetProbeAfterResetDelay, resetProbeCloseThreshold)
+	}
+	if resetProbeAfterResetDelay != 10*time.Minute {
+		t.Fatalf("resetProbeAfterResetDelay = %s, want 10m", resetProbeAfterResetDelay)
+	}
+	if resetProbeCloseThreshold != 3*time.Minute {
+		t.Fatalf("resetProbeCloseThreshold = %s, want 3m", resetProbeCloseThreshold)
+	}
+}
+
+func TestLooksLikeLazyReset(t *testing.T) {
+	now := time.Date(2026, 6, 30, 10, 10, 0, 0, time.UTC)
+	seconds := int64(fiveHourSeconds)
+	lazy := QuotaWindow{Kind: WindowFiveHour, LimitWindowSeconds: &seconds, ResetAt: now.Add(5 * time.Hour)}
+	if !looksLikeLazyReset(now, lazy, seconds) {
+		t.Fatal("lazy reset was not detected")
+	}
+	active := QuotaWindow{Kind: WindowFiveHour, LimitWindowSeconds: &seconds, ResetAt: now.Add(5*time.Hour - 10*time.Minute)}
+	if looksLikeLazyReset(now, active, seconds) {
+		t.Fatal("active reset was misclassified as lazy")
+	}
+}
+
+func TestMonthlyProbeRequiresWindowSeconds(t *testing.T) {
+	monthly := QuotaWindow{Kind: WindowMonthly, ResetAt: time.Now().Add(30 * 24 * time.Hour)}
+	if _, ok := probeWindowDuration(monthly); ok {
+		t.Fatal("monthly window without limit_window_seconds returned duration, want none")
+	}
+	seconds := int64(2592000)
+	monthly.LimitWindowSeconds = &seconds
+	d, ok := probeWindowDuration(monthly)
+	if !ok || d != 30*24*time.Hour {
+		t.Fatalf("probeWindowDuration = %s, %v; want 720h,true", d, ok)
+	}
+}
+
+func TestResetProbeUsageEvidence(t *testing.T) {
+	if !resetProbeUsageEvidence([]byte(`{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`)) {
+		t.Fatal("usage evidence not detected")
+	}
+	if resetProbeUsageEvidence([]byte(`{"id":"probe","usage":{}}`)) {
+		t.Fatal("empty usage was accepted")
 	}
 }

@@ -21,7 +21,7 @@ const (
 	FallbackFillFirst FallbackMode = "fill-first"
 )
 
-var pluginVersion = "0.1.1"
+var pluginVersion = "0.1.3"
 
 type MonthlyMode string
 
@@ -34,6 +34,7 @@ type Config struct {
 	MonthlyMode                     MonthlyMode
 	Fallback                        FallbackMode
 	EnableUsageFeedback             bool
+	EnableResetProbe                bool
 	MaxRefreshConcurrency           int
 	QuotaEndpoint                   string
 	RefreshActiveWindow             time.Duration
@@ -66,6 +67,7 @@ type rawConfig struct {
 	MonthlyMode                     string `yaml:"monthly_mode"`
 	Fallback                        string `yaml:"fallback"`
 	EnableUsageFeedback             *bool  `yaml:"enable_usage_feedback"`
+	EnableResetProbe                *bool  `yaml:"enable_reset_probe"`
 	MaxRefreshConcurrency           *int   `yaml:"max_refresh_concurrency"`
 	QuotaEndpoint                   string `yaml:"quota_endpoint"`
 	RefreshActiveWindow             string `yaml:"refresh_active_window"`
@@ -87,6 +89,7 @@ func DefaultConfig() Config {
 		MonthlyMode:                     MonthlyModeExpiryOrder,
 		Fallback:                        FallbackFillFirst,
 		EnableUsageFeedback:             true,
+		EnableResetProbe:                false,
 		MaxRefreshConcurrency:           1,
 		QuotaEndpoint:                   chatGPTQuotaEndpoint,
 		RefreshActiveWindow:             time.Hour,
@@ -193,6 +196,9 @@ func DecodeConfig(raw []byte) (Config, error) {
 	}
 	if decoded.EnableUsageFeedback != nil {
 		cfg.EnableUsageFeedback = *decoded.EnableUsageFeedback
+	}
+	if decoded.EnableResetProbe != nil {
+		cfg.EnableResetProbe = *decoded.EnableResetProbe
 	}
 	if decoded.MaxRefreshConcurrency != nil {
 		if *decoded.MaxRefreshConcurrency <= 0 {

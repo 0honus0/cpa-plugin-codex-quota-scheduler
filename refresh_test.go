@@ -190,6 +190,218 @@ func accountByAuthID(t *testing.T, snapshot StateSnapshot, authID string) Accoun
 	return AccountState{}
 }
 
+func TestRefreshDueRunsResetProbeForLazyWindow(t *testing.T) {
+	resetAt := time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC)
+	now := resetAt.Add(10 * time.Minute)
+	seconds := int64(fiveHourSeconds)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{ID: "auth-1", AuthIndex: "idx-1", Provider: "codex"}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"access-1","id_token":"` + idToken + `"}`),
+		},
+		responseByURL: map[string]pluginapi.HTTPResponse{
+			chatGPTQuotaEndpoint: {
+				StatusCode: http.StatusOK,
+				Headers:    http.Header{},
+				Body:       []byte(`{"rate_limit":{"primary_window":{"used_percent":1,"limit_window_seconds":18000,"reset_after_seconds":18000}}}`),
+			},
+			resetCreditsEndpoint: {
+				StatusCode: http.StatusOK,
+				Headers:    http.Header{},
+				Body:       []byte(`{"available_count":0}`),
+			},
+			codexResetProbeEndpoint: {
+				StatusCode: http.StatusOK,
+				Headers:    http.Header{},
+				Body:       []byte(`{"id":"probe","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`),
+			},
+		},
+	}
+	cfg := DefaultConfig()
+	cfg.EnableResetProbe = true
+	store := NewPluginState(cfg)
+	store.RecordCodexActivity(now)
+	store.UpsertQuota(AccountState{
+		AuthID:    "auth-1",
+		AuthIndex: "idx-1",
+		Provider:  "codex",
+		Quota: ParsedQuota{
+			FiveHour: &QuotaWindow{Kind: WindowFiveHour, LimitWindowSeconds: &seconds, ResetAt: resetAt},
+		},
+		ResetProbes: map[WindowKind]ResetProbeState{
+			WindowFiveHour: {
+				WindowKind:    WindowFiveHour,
+				WindowSeconds: fiveHourSeconds,
+				ResetAt:       resetAt,
+				NextCheckAt:   resetAt.Add(10 * time.Minute),
+				Status:        ResetProbeStatusPending,
+			},
+		},
+		LastSuccessAt: resetAt.Add(-time.Hour),
+	})
+
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	if err := refresher.RefreshDueOnce(); err != nil {
+		t.Fatalf("RefreshDueOnce returned error: %v", err)
+	}
+	urls := strings.Join(host.requestedURLs(), "\n")
+	if !strings.Contains(urls, codexResetProbeEndpoint) {
+		t.Fatalf("probe endpoint was not requested; urls:\n%s", urls)
+	}
+	if strings.Count(urls, chatGPTQuotaEndpoint) < 2 {
+		t.Fatalf("post-probe quota refresh did not run; urls:\n%s", urls)
+	}
+	account := accountByAuthID(t, store.Snapshot(now), "auth-1")
+	probe := account.ResetProbes[WindowFiveHour]
+	if probe.Status != ResetProbeStatusVerified {
+		t.Fatalf("probe status = %q, want verified; error=%q", probe.Status, probe.Error)
+	}
+	if probe.VerifiedAt.IsZero() {
+		t.Fatal("VerifiedAt is zero, want set")
+	}
+}
+
+func TestRefreshDueFailedResetProbeBacksOff(t *testing.T) {
+	resetAt := time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC)
+	now := resetAt.Add(10 * time.Minute)
+	seconds := int64(fiveHourSeconds)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{ID: "auth-1", AuthIndex: "idx-1", Provider: "codex"}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"access-1","id_token":"` + idToken + `"}`),
+		},
+		responseByURL: map[string]pluginapi.HTTPResponse{
+			chatGPTQuotaEndpoint: {
+				StatusCode: http.StatusOK,
+				Headers:    http.Header{},
+				Body:       []byte(`{"rate_limit":{"primary_window":{"used_percent":1,"limit_window_seconds":18000,"reset_after_seconds":18000}}}`),
+			},
+			resetCreditsEndpoint: {
+				StatusCode: http.StatusOK,
+				Headers:    http.Header{},
+				Body:       []byte(`{"available_count":0}`),
+			},
+			codexResetProbeEndpoint: {
+				StatusCode: http.StatusOK,
+				Headers:    http.Header{},
+				Body:       []byte(`{"id":"probe","usage":{}}`),
+			},
+		},
+	}
+	cfg := DefaultConfig()
+	cfg.EnableResetProbe = true
+	store := NewPluginState(cfg)
+	store.RecordCodexActivity(now)
+	store.UpsertQuota(AccountState{
+		AuthID:    "auth-1",
+		AuthIndex: "idx-1",
+		Provider:  "codex",
+		Quota: ParsedQuota{
+			FiveHour: &QuotaWindow{Kind: WindowFiveHour, LimitWindowSeconds: &seconds, ResetAt: resetAt},
+		},
+		ResetProbes: map[WindowKind]ResetProbeState{
+			WindowFiveHour: {
+				WindowKind:    WindowFiveHour,
+				WindowSeconds: fiveHourSeconds,
+				ResetAt:       resetAt,
+				NextCheckAt:   now,
+				Status:        ResetProbeStatusPending,
+			},
+		},
+		LastSuccessAt: now.Add(-time.Hour),
+	})
+
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	if err := refresher.RefreshDueOnce(); err != nil {
+		t.Fatalf("RefreshDueOnce returned error: %v", err)
+	}
+	account := accountByAuthID(t, store.Snapshot(now), "auth-1")
+	probe := account.ResetProbes[WindowFiveHour]
+	if probe.Status != ResetProbeStatusPending {
+		t.Fatalf("probe status = %q, want pending; error=%q", probe.Status, probe.Error)
+	}
+	if probe.Error == "" {
+		t.Fatal("probe Error empty, want retry error")
+	}
+	for _, leaked := range []string{"access-1", idToken} {
+		if strings.Contains(probe.Error, leaked) {
+			t.Fatalf("probe Error leaked credential %q: %q", leaked, probe.Error)
+		}
+	}
+	if !probe.NextCheckAt.After(now) {
+		t.Fatalf("NextCheckAt = %s, want after %s", probe.NextCheckAt, now)
+	}
+	if due, reason := accountRefreshDue(account, cfg, now.Add(time.Second)); due || reason == "reset_probe_check_due" {
+		t.Fatalf("accountRefreshDue one second later = %t, %q; want no reset_probe_check_due", due, reason)
+	}
+	if due, reason := accountRefreshDue(account, cfg, probe.NextCheckAt); !due || reason != "reset_probe_check_due" {
+		t.Fatalf("accountRefreshDue at retry time = %t, %q; want true reset_probe_check_due", due, reason)
+	}
+}
+
+func TestRefreshDueDoesNotProbeActiveWindow(t *testing.T) {
+	resetAt := time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC)
+	now := resetAt.Add(10 * time.Minute)
+	seconds := int64(fiveHourSeconds)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{ID: "auth-1", AuthIndex: "idx-1", Provider: "codex"}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"access-1","id_token":"` + idToken + `"}`),
+		},
+		responseByURL: map[string]pluginapi.HTTPResponse{
+			chatGPTQuotaEndpoint: {
+				StatusCode: http.StatusOK,
+				Headers:    http.Header{},
+				Body:       []byte(`{"rate_limit":{"primary_window":{"used_percent":1,"limit_window_seconds":18000,"reset_after_seconds":17400}}}`),
+			},
+			resetCreditsEndpoint: {
+				StatusCode: http.StatusOK,
+				Headers:    http.Header{},
+				Body:       []byte(`{"available_count":0}`),
+			},
+		},
+	}
+	cfg := DefaultConfig()
+	cfg.EnableResetProbe = true
+	store := NewPluginState(cfg)
+	store.RecordCodexActivity(now)
+	store.UpsertQuota(AccountState{
+		AuthID:    "auth-1",
+		AuthIndex: "idx-1",
+		Provider:  "codex",
+		Quota: ParsedQuota{
+			FiveHour: &QuotaWindow{Kind: WindowFiveHour, LimitWindowSeconds: &seconds, ResetAt: resetAt},
+		},
+		ResetProbes: map[WindowKind]ResetProbeState{
+			WindowFiveHour: {
+				WindowKind:    WindowFiveHour,
+				WindowSeconds: fiveHourSeconds,
+				ResetAt:       resetAt,
+				NextCheckAt:   resetAt.Add(10 * time.Minute),
+				Status:        ResetProbeStatusPending,
+			},
+		},
+		LastSuccessAt: resetAt.Add(-time.Hour),
+	})
+
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	if err := refresher.RefreshDueOnce(); err != nil {
+		t.Fatalf("RefreshDueOnce returned error: %v", err)
+	}
+	urls := strings.Join(host.requestedURLs(), "\n")
+	if strings.Contains(urls, codexResetProbeEndpoint) {
+		t.Fatalf("probe endpoint was requested for active window; urls:\n%s", urls)
+	}
+	account := accountByAuthID(t, store.Snapshot(now), "auth-1")
+	probe := account.ResetProbes[WindowFiveHour]
+	if probe.Status != ResetProbeStatusConfirmedActive {
+		t.Fatalf("probe status = %q, want confirmed_active", probe.Status)
+	}
+}
+
 func TestRefreshDueOnceSkipsFreshAccountsAndRefreshesOnlyDueAccounts(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	staleToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-stale"})
@@ -1287,6 +1499,54 @@ func TestRefreshSoonDoesNotOverlapRefreshes(t *testing.T) {
 	}
 	if host.maxActiveHTTP() != 1 {
 		t.Fatalf("max active HTTP = %d, want 1", host.maxActiveHTTP())
+	}
+	host.assertNoHeaderErrors(t)
+}
+
+func TestRefreshOneSoonDoesNotOverlapRefreshes(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{
+			ID: "auth-1", AuthIndex: "idx-1", Provider: "codex",
+		}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"access-1","id_token":"` + idToken + `"}`),
+		},
+		httpBody:   []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+		doStarted:  make(chan struct{}, 1),
+		releaseDo:  make(chan struct{}),
+		httpStatus: http.StatusOK,
+	}
+	store := NewPluginState(DefaultConfig())
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+
+	refresher.RefreshOneSoon("auth-1")
+	select {
+	case <-host.doStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first refresh to start")
+	}
+	released := false
+	defer func() {
+		if !released {
+			close(host.releaseDo)
+		}
+	}()
+	for i := 0; i < 10; i++ {
+		refresher.RefreshOneSoon("auth-1")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := host.httpCallCount(); got != 1 {
+		t.Fatalf("http calls = %d, want 1 while refresh is active", got)
+	}
+	if got := host.maxActiveHTTP(); got != 1 {
+		t.Fatalf("max active HTTP = %d, want 1 while refresh is active", got)
+	}
+	close(host.releaseDo)
+	released = true
+	if !waitUntil(time.Second, func() bool { return host.activeHTTPCount() == 0 }) {
+		t.Fatalf("active HTTP = %d, want 0 after releasing request", host.activeHTTPCount())
 	}
 	host.assertNoHeaderErrors(t)
 }
