@@ -49,15 +49,16 @@ type QuotaRefresher struct {
 	state *PluginState
 	now   func() time.Time
 
-	mu         sync.Mutex
-	running    bool
-	refreshing bool
-	stopping   bool
-	stop       chan struct{}
-	done       chan struct{}
-	wake       chan struct{}
-	pendingDue func() error
-	wg         sync.WaitGroup
+	mu                sync.Mutex
+	running           bool
+	refreshing        bool
+	stopping          bool
+	stop              chan struct{}
+	done              chan struct{}
+	wake              chan struct{}
+	pendingDue        func() error
+	pendingDueVersion uint64
+	wg                sync.WaitGroup
 }
 
 func NewQuotaRefresher(host HostClient, state *PluginState, now func() time.Time) *QuotaRefresher {
@@ -72,12 +73,20 @@ func NewQuotaRefresher(host HostClient, state *PluginState, now func() time.Time
 }
 
 func (r *QuotaRefresher) RefreshOnce() error {
-	admission, version := r.state.CPAAdmissionVersioned()
-	if !admission.Observed {
+	_, version := r.state.CPAAdmissionVersioned()
+	return r.refreshOnce(version)
+}
+
+func (r *QuotaRefresher) refreshOnce(version uint64) error {
+	admission, currentVersion := r.state.CPAAdmissionVersioned()
+	if !admission.Observed || currentVersion != version {
 		return nil
 	}
-	auths, err := r.host.ListAuths()
+	auths, err := r.listAuthsWithAdmissionPermit(version)
 	if err != nil {
+		if errors.Is(err, errCPAAdmissionChanged) || !r.state.CPAAdmissionVersionCurrent(version) {
+			return nil
+		}
 		return fmt.Errorf("list auths: %w", err)
 	}
 	if !r.state.CPAAdmissionVersionCurrent(version) {
@@ -94,8 +103,13 @@ func (r *QuotaRefresher) RefreshOnce() error {
 }
 
 func (r *QuotaRefresher) RefreshDueOnce() error {
-	admission, version := r.state.CPAAdmissionVersioned()
-	if !admission.Observed {
+	_, version := r.state.CPAAdmissionVersioned()
+	return r.refreshDueOnce(version)
+}
+
+func (r *QuotaRefresher) refreshDueOnce(version uint64) error {
+	admission, currentVersion := r.state.CPAAdmissionVersioned()
+	if !admission.Observed || currentVersion != version {
 		return nil
 	}
 	now := r.now()
@@ -114,8 +128,11 @@ func (r *QuotaRefresher) RefreshDueOnce() error {
 		return nil
 	}
 
-	auths, err := r.host.ListAuths()
+	auths, err := r.listAuthsWithAdmissionPermit(version)
 	if err != nil {
+		if errors.Is(err, errCPAAdmissionChanged) || !r.state.CPAAdmissionVersionCurrent(version) {
+			return nil
+		}
 		return fmt.Errorf("list auths: %w", err)
 	}
 	if !r.state.CPAAdmissionVersionCurrent(version) {
@@ -141,16 +158,11 @@ func (r *QuotaRefresher) RefreshDueOnce() error {
 }
 
 func (r *QuotaRefresher) RefreshDueCandidatesOnce(req pluginapi.SchedulerPickRequest) error {
-	_, version := r.observeCandidateAdmission(req)
-	return r.refreshDueCandidatesOnce(version)
-}
-
-func (r *QuotaRefresher) observeCandidateAdmission(req pluginapi.SchedulerPickRequest) (CPAAdmissionState, uint64) {
+	_, version := r.state.CPAAdmissionVersioned()
 	if admission, ok := HighestPriorityCodexAdmission(req); ok {
-		version := r.state.ReplaceCPAAdmission(admission)
-		return admission, version
+		version = r.state.ReplaceCPAAdmission(admission)
 	}
-	return r.state.CPAAdmissionVersioned()
+	return r.refreshDueCandidatesOnce(version)
 }
 
 func (r *QuotaRefresher) refreshDueCandidatesOnce(version uint64) error {
@@ -177,8 +189,11 @@ func (r *QuotaRefresher) refreshDueCandidatesOnce(version uint64) error {
 	if len(dueAuthIDs) == 0 && !hasUnknownCandidate(candidateIDs, knownAuthIDs) {
 		return nil
 	}
-	auths, err := r.host.ListAuths()
+	auths, err := r.listAuthsWithAdmissionPermit(version)
 	if err != nil {
+		if errors.Is(err, errCPAAdmissionChanged) || !r.state.CPAAdmissionVersionCurrent(version) {
+			return nil
+		}
 		return fmt.Errorf("list auths: %w", err)
 	}
 	if !r.state.CPAAdmissionVersionCurrent(version) {
@@ -279,9 +294,22 @@ func (r *QuotaRefresher) RefreshOneAuthID(authID string) error {
 	if !admitted {
 		return fmt.Errorf("auth %s is outside the active CPA priority tier", authID)
 	}
+	return r.refreshOneAuthIDVersioned(authID, version)
+}
+
+func (r *QuotaRefresher) refreshOneAuthIDVersioned(authID string, version uint64) error {
+	if !r.state.BeginCPAAdmissionCall(authID, version) {
+		return errCPAAdmissionChanged
+	}
 	auths, err := r.host.ListAuths()
 	if err != nil {
+		if !r.state.CPAAdmissionVersionCurrent(version) {
+			return errCPAAdmissionChanged
+		}
 		return fmt.Errorf("list auths: %w", err)
+	}
+	if !r.state.BeginCPAAdmissionCall(authID, version) {
+		return errCPAAdmissionChanged
 	}
 	for _, auth := range auths {
 		if auth.ID != authID {
@@ -292,6 +320,9 @@ func (r *QuotaRefresher) RefreshOneAuthID(authID string) error {
 		}
 		r.refreshAuthVersioned(auth, version)
 		return nil
+	}
+	if !r.state.BeginCPAAdmissionCall(authID, version) {
+		return errCPAAdmissionChanged
 	}
 	return fmt.Errorf("auth %s not found", authID)
 }
@@ -310,7 +341,10 @@ func (r *QuotaRefresher) RefreshOneSoon(authID string) {
 
 	go func() {
 		defer r.finishRefresh(previousDue)
-		if err := r.RefreshOneAuthID(authID); err != nil {
+		if err := r.refreshOneAuthIDVersioned(strings.TrimSpace(authID), version); err != nil {
+			if errors.Is(err, errCPAAdmissionChanged) || !r.state.BeginCPAAdmissionCall(strings.TrimSpace(authID), version) {
+				return
+			}
 			r.host.Log("error", "quota refresh failed", map[string]any{"auth_id": authID, "error": redactSecrets(err.Error())})
 			if r.state != nil {
 				r.recordAdmissionLog(authID, version, "warn", "quota.refresh_one_failed", "账号额度刷新失败", map[string]any{"auth_id": authID, "error": redactSecrets(err.Error())})
@@ -449,33 +483,40 @@ func (r *QuotaRefresher) RefreshSoon() {
 
 	go func() {
 		defer r.finishRefresh(previousDue)
-		if err := r.RefreshOnce(); err != nil {
-			r.host.Log("error", "quota refresh failed", map[string]any{"error": redactSecrets(err.Error())})
+		_, version := r.state.CPAAdmissionVersioned()
+		if err := r.refreshOnce(version); err != nil {
+			if r.state.CPAAdmissionVersionCurrent(version) {
+				r.host.Log("error", "quota refresh failed", map[string]any{"error": redactSecrets(err.Error())})
+			}
 		}
 	}()
 }
 
 func (r *QuotaRefresher) RefreshDueSoon() {
-	r.refreshDueSoon(func() error {
-		return r.RefreshDueOnce()
+	_, version := r.state.CPAAdmissionVersioned()
+	r.refreshDueSoon(version, func() error {
+		return r.refreshDueOnce(version)
 	})
 }
 
-func (r *QuotaRefresher) RefreshDueCandidatesSoon(req pluginapi.SchedulerPickRequest) {
-	_, version := r.observeCandidateAdmission(req)
-	r.refreshDueSoon(func() error {
+func (r *QuotaRefresher) RefreshDueCandidatesSoon(req pluginapi.SchedulerPickRequest, version uint64) {
+	_ = req
+	r.refreshDueSoon(version, func() error {
 		return r.refreshDueCandidatesOnce(version)
 	})
 }
 
-func (r *QuotaRefresher) refreshDueSoon(refresh func() error) {
+func (r *QuotaRefresher) refreshDueSoon(version uint64, refresh func() error) {
 	r.mu.Lock()
 	if r.stopping {
 		r.mu.Unlock()
 		return
 	}
 	if r.refreshing {
-		r.pendingDue = refresh
+		if r.pendingDue == nil || version >= r.pendingDueVersion {
+			r.pendingDue = refresh
+			r.pendingDueVersion = version
+		}
 		r.mu.Unlock()
 		return
 	}
@@ -487,7 +528,9 @@ func (r *QuotaRefresher) refreshDueSoon(refresh func() error) {
 	go func() {
 		defer r.finishRefresh(previousDue)
 		if err := refresh(); err != nil {
-			r.host.Log("error", "quota due refresh failed", map[string]any{"error": redactSecrets(err.Error())})
+			if r.state.CPAAdmissionVersionCurrent(version) {
+				r.host.Log("error", "quota due refresh failed", map[string]any{"error": redactSecrets(err.Error())})
+			}
 		}
 	}()
 }
@@ -495,8 +538,10 @@ func (r *QuotaRefresher) refreshDueSoon(refresh func() error) {
 func (r *QuotaRefresher) finishRefresh(previousDue time.Time) {
 	r.mu.Lock()
 	pending := r.pendingDue
+	pendingVersion := r.pendingDueVersion
 	if r.stopping || pending == nil {
 		r.pendingDue = nil
+		r.pendingDueVersion = 0
 		r.refreshing = false
 		r.mu.Unlock()
 		r.wg.Done()
@@ -504,12 +549,15 @@ func (r *QuotaRefresher) finishRefresh(previousDue time.Time) {
 		return
 	}
 	r.pendingDue = nil
+	r.pendingDueVersion = 0
 	r.mu.Unlock()
 	r.wakeRefreshLoopIfDueAdvanced(previousDue)
 	go func() {
 		defer r.finishRefresh(previousDue)
 		if err := pending(); err != nil {
-			r.host.Log("error", "quota due refresh failed", map[string]any{"error": redactSecrets(err.Error())})
+			if r.state.CPAAdmissionVersionCurrent(pendingVersion) {
+				r.host.Log("error", "quota due refresh failed", map[string]any{"error": redactSecrets(err.Error())})
+			}
 		}
 	}()
 }
@@ -529,7 +577,7 @@ func (r *QuotaRefresher) refreshAuthVersioned(auth pluginapi.HostAuthFileEntry, 
 	account := accountStateFromAuth(auth, r.now())
 	account.Priority = priority
 
-	authResp, err := r.getAuthWithAdmissionLease(account.AuthID, version, auth.AuthIndex)
+	authResp, err := r.getAuthWithAdmissionPermit(account.AuthID, version, auth.AuthIndex)
 	if err != nil {
 		if errors.Is(err, errCPAAdmissionChanged) {
 			return
@@ -643,30 +691,31 @@ func (r *QuotaRefresher) recordAdmissionLog(authID string, version uint64, level
 	r.state.RecordLogIfAdmissionCurrent(authID, version, level, event, message, fields, r.now())
 }
 
-func (r *QuotaRefresher) getAuthWithAdmissionLease(authID string, version uint64, authIndex string) (pluginapi.HostAuthGetResponse, error) {
-	lease, ok := r.state.AcquireCPAAdmissionLease(authID, version)
-	if !ok {
+func (r *QuotaRefresher) listAuthsWithAdmissionPermit(version uint64) ([]pluginapi.HostAuthFileEntry, error) {
+	if !r.state.BeginCPAAdmissionVersionCall(version) {
+		return nil, errCPAAdmissionChanged
+	}
+	return r.host.ListAuths()
+}
+
+func (r *QuotaRefresher) getAuthWithAdmissionPermit(authID string, version uint64, authIndex string) (pluginapi.HostAuthGetResponse, error) {
+	if !r.state.BeginCPAAdmissionCall(authID, version) {
 		return pluginapi.HostAuthGetResponse{}, errCPAAdmissionChanged
 	}
-	defer lease.Release()
 	return r.host.GetAuth(authIndex)
 }
 
-func (r *QuotaRefresher) doWithAdmissionLease(authID string, version uint64, req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
-	lease, ok := r.state.AcquireCPAAdmissionLease(authID, version)
-	if !ok {
+func (r *QuotaRefresher) doWithAdmissionPermit(authID string, version uint64, req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
+	if !r.state.BeginCPAAdmissionCall(authID, version) {
 		return pluginapi.HTTPResponse{}, errCPAAdmissionChanged
 	}
-	defer lease.Release()
 	return r.host.Do(req)
 }
 
-func (r *QuotaRefresher) saveAuthWithAdmissionLease(authID string, version uint64, name string, raw json.RawMessage) error {
-	lease, ok := r.state.AcquireCPAAdmissionLease(authID, version)
-	if !ok {
+func (r *QuotaRefresher) saveAuthWithAdmissionPermit(authID string, version uint64, name string, raw json.RawMessage) error {
+	if !r.state.BeginCPAAdmissionCall(authID, version) {
 		return errCPAAdmissionChanged
 	}
-	defer lease.Release()
 	return r.host.SaveAuth(name, raw)
 }
 
@@ -682,7 +731,7 @@ func (r *QuotaRefresher) fetchQuota(credentials CodexCredentials, authID string,
 			"User-Agent":         []string{quotaUserAgent},
 		},
 	}
-	resp, err := r.doWithAdmissionLease(authID, version, req)
+	resp, err := r.doWithAdmissionPermit(authID, version, req)
 	if err != nil {
 		return ParsedQuota{}, fmt.Errorf("quota request: %w", err)
 	}
@@ -718,7 +767,7 @@ func (r *QuotaRefresher) runResetProbe(credentials CodexCredentials, authID stri
 		},
 		Body: resetProbePayloadBytes(),
 	}
-	resp, err := r.doWithAdmissionLease(authID, version, req)
+	resp, err := r.doWithAdmissionPermit(authID, version, req)
 	if err != nil {
 		return fmt.Errorf("reset probe request: %w", err)
 	}
@@ -760,7 +809,7 @@ func (r *QuotaRefresher) refreshAndSaveCredentials(authResp pluginapi.HostAuthGe
 	if name == "" {
 		return CodexCredentials{}, errors.New("auth file name is required to save refreshed token")
 	}
-	if err := r.saveAuthWithAdmissionLease(authID, version, name, updated); err != nil {
+	if err := r.saveAuthWithAdmissionPermit(authID, version, name, updated); err != nil {
 		return CodexCredentials{}, err
 	}
 	r.recordAdmissionLog(authID, version, "info", "quota.token_refreshed", "Codex access token refreshed and saved", map[string]any{"auth_file": name})
@@ -783,7 +832,7 @@ func (r *QuotaRefresher) refreshCodexAccessToken(refreshToken, authID string, ve
 		},
 		Body: []byte(form.Encode()),
 	}
-	resp, err := r.doWithAdmissionLease(authID, version, req)
+	resp, err := r.doWithAdmissionPermit(authID, version, req)
 	if err != nil {
 		return CodexCredentials{}, fmt.Errorf("token refresh request: %w", err)
 	}
@@ -878,7 +927,7 @@ func (r *QuotaRefresher) refreshResetCredits(credentials CodexCredentials, authI
 			"User-Agent":         []string{quotaUserAgent},
 		},
 	}
-	resp, err := r.doWithAdmissionLease(authID, version, req)
+	resp, err := r.doWithAdmissionPermit(authID, version, req)
 	if err != nil {
 		return ParsedQuota{}, fmt.Errorf("reset credits request: %w", err)
 	}

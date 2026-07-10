@@ -86,8 +86,9 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 		}
 	}
 	now := time.Now()
+	_, admissionVersion := globalState.CPAAdmissionVersioned()
 	if admission, ok := HighestPriorityCodexAdmission(req); ok {
-		globalState.ReplaceCPAAdmission(admission)
+		admissionVersion = globalState.ReplaceCPAAdmission(admission)
 		globalState.RecordLog("info", "scheduler.cpa_admission_updated", "CPA priority admission updated", map[string]any{
 			"cpa_priority":   admission.Priority,
 			"admitted_count": len(admission.AuthIDs),
@@ -96,7 +97,7 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 	}
 	if requestIncludesCodex(req) {
 		globalState.RecordCodexActivity(now)
-		refreshGlobalRefresherDueSoon(req)
+		refreshGlobalRefresherDueSoon(req, admissionVersion)
 	}
 	decision := PickCodexAccount(req, globalState.Snapshot(now), now)
 	if decision.AuthID != "" {
@@ -238,11 +239,11 @@ func refreshGlobalRefresherOneSoon(authID string) {
 	}
 }
 
-func refreshGlobalRefresherDueSoon(req pluginapi.SchedulerPickRequest) {
+func refreshGlobalRefresherDueSoon(req pluginapi.SchedulerPickRequest, admissionVersion uint64) {
 	refresherMu.Lock()
 	refresher := globalRefresher
 	refresherMu.Unlock()
 	if refresher != nil {
-		refresher.RefreshDueCandidatesSoon(req)
+		refresher.RefreshDueCandidatesSoon(req, admissionVersion)
 	}
 }

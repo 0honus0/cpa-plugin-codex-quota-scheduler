@@ -106,7 +106,11 @@ func TestPluginRegisterRefreshesOnStartupWhenConfigured(t *testing.T) {
 	if _, err := handleSchedulerPick(raw); err != nil {
 		t.Fatal(err)
 	}
-	<-host.doStarted
+	select {
+	case <-host.doStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for older host call")
+	}
 	close(host.releaseDo)
 	refresher.wg.Wait()
 	snapshot := store.Snapshot(time.Now())
@@ -156,6 +160,116 @@ func TestSchedulerAdmissionLogDeduplicatesCandidateCounts(t *testing.T) {
 	t.Fatal("scheduler.cpa_admission_updated log not found")
 }
 
+func TestSchedulerPickPublishesAdmissionOnlyOnce(t *testing.T) {
+	store := NewPluginState(DefaultConfig())
+	refresher := NewQuotaRefresher(&fakeHostClient{}, store, time.Now)
+	withGlobalRefresherForTest(t, store, refresher)
+
+	requestA := pluginapi.SchedulerPickRequest{Provider: "codex", Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "a", Provider: "codex", Priority: 1}}}
+	requestB := pluginapi.SchedulerPickRequest{Provider: "codex", Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "b", Provider: "codex", Priority: 2}}}
+	rawA, _ := json.Marshal(requestA)
+
+	refresherMu.Lock()
+	locked := true
+	t.Cleanup(func() {
+		if locked {
+			refresherMu.Unlock()
+		}
+	})
+	aDone := make(chan error, 1)
+	go func() {
+		_, err := handleSchedulerPick(rawA)
+		aDone <- err
+	}()
+	if !waitForCondition(t, time.Second, func() bool { return store.IsAuthAdmitted("a") }) {
+		t.Fatal("request A did not publish admission")
+	}
+	admissionB, ok := HighestPriorityCodexAdmission(requestB)
+	if !ok {
+		t.Fatal("request B admission missing")
+	}
+	store.ReplaceCPAAdmission(admissionB)
+	refresherMu.Unlock()
+	locked = false
+	if err := <-aDone; err != nil {
+		t.Fatal(err)
+	}
+	refresher.wg.Wait()
+	if !store.IsAuthAdmitted("b") || store.IsAuthAdmitted("a") {
+		t.Fatalf("admission = %#v, want newer request B", store.CPAAdmission())
+	}
+}
+
+func TestSchedulerPickPublishesWhileOlderHostCallIsBlocked(t *testing.T) {
+	now := time.Date(2026, 7, 10, 9, 0, 0, 0, time.UTC)
+	aToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-a"})
+	bToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-b"})
+	store := NewPluginState(DefaultConfig())
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{
+			{ID: "a", AuthIndex: "idx-a", Provider: "codex"},
+			{ID: "b", AuthIndex: "idx-b", Provider: "codex"},
+		},
+		authJSON: map[string]json.RawMessage{
+			"idx-a": json.RawMessage(`{"access_token":"access-a","id_token":"` + aToken + `"}`),
+			"idx-b": json.RawMessage(`{"access_token":"access-b","id_token":"` + bToken + `"}`),
+		},
+		httpBody:  []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+		doStarted: make(chan struct{}, 2),
+		releaseDo: make(chan struct{}),
+	}
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	withGlobalRefresherForTest(t, store, refresher)
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(host.releaseDo)
+		}
+	})
+
+	request := func(authID string, priority int) error {
+		raw, _ := json.Marshal(pluginapi.SchedulerPickRequest{Provider: "codex", Candidates: []pluginapi.SchedulerAuthCandidate{{ID: authID, Provider: "codex", Priority: priority}}})
+		_, err := handleSchedulerPick(raw)
+		return err
+	}
+	if err := request("a", 1); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-host.doStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for older host call")
+	}
+	bStarted := make(chan struct{})
+	bDone := make(chan error, 1)
+	go func() {
+		close(bStarted)
+		bDone <- request("b", 2)
+	}()
+	<-bStarted
+	select {
+	case err := <-bDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		close(host.releaseDo)
+		released = true
+		<-bDone
+		t.Fatal("scheduler pick B blocked behind older host call")
+	}
+	if !store.IsAuthAdmitted("b") || store.IsAuthAdmitted("a") {
+		t.Fatalf("admission = %#v, want B published while A call remains blocked", store.CPAAdmission())
+	}
+	close(host.releaseDo)
+	released = true
+	refresher.wg.Wait()
+	snapshot := store.Snapshot(now)
+	if len(snapshot.Accounts) != 1 || snapshot.Accounts[0].AuthID != "b" {
+		t.Fatalf("accounts = %#v, want only B after stale A call finishes", snapshot.Accounts)
+	}
+}
+
 func TestConcurrentSchedulerPicksCoalesceLatestAdmission(t *testing.T) {
 	now := time.Date(2026, 7, 10, 9, 0, 0, 0, time.UTC)
 	aToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-a"})
@@ -191,20 +305,9 @@ func TestConcurrentSchedulerPicksCoalesceLatestAdmission(t *testing.T) {
 	}
 	request("a", 1)
 	<-host.doStarted
-	requestBDone := make(chan error, 1)
-	go func() {
-		raw, _ := json.Marshal(pluginapi.SchedulerPickRequest{Provider: "codex", Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "b", Provider: "codex", Priority: 2}}})
-		_, err := handleSchedulerPick(raw)
-		requestBDone <- err
-	}()
-	if !waitForCondition(t, time.Second, func() bool { return store.cpaAdmissionIntent.Load() > 0 }) {
-		t.Fatal("latest scheduler admission did not become pending")
-	}
+	request("b", 2)
 	close(host.releaseDo)
 	released = true
-	if err := <-requestBDone; err != nil {
-		t.Fatal(err)
-	}
 	select {
 	case <-host.doStarted:
 	case <-time.After(time.Second):

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -17,6 +18,7 @@ type fakeHostClient struct {
 	authJSON map[string]json.RawMessage
 	httpBody []byte
 	saved    map[string]json.RawMessage
+	listErr  error
 
 	expectedAuthByAccount map[string]string
 	responseByAccount     map[string]pluginapi.HTTPResponse
@@ -33,6 +35,7 @@ type fakeHostClient struct {
 
 	mu           sync.Mutex
 	listCalls    int
+	logCalls     int
 	httpCalls    int
 	activeHTTP   int
 	maxActive    int
@@ -53,7 +56,7 @@ func (f *fakeHostClient) ListAuths() ([]pluginapi.HostAuthFileEntry, error) {
 	if f.releaseList != nil {
 		<-f.releaseList
 	}
-	return f.authList, nil
+	return f.authList, f.listErr
 }
 
 func (f *fakeHostClient) GetAuth(authIndex string) (pluginapi.HostAuthGetResponse, error) {
@@ -166,7 +169,11 @@ func (f *fakeHostClient) Do(req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, 
 	return pluginapi.HTTPResponse{StatusCode: status, Headers: http.Header{}, Body: f.httpBody}, nil
 }
 
-func (f *fakeHostClient) Log(level, message string, fields map[string]any) {}
+func (f *fakeHostClient) Log(level, message string, fields map[string]any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.logCalls++
+}
 
 func (f *fakeHostClient) recordHeaderError(message string) {
 	f.mu.Lock()
@@ -199,6 +206,12 @@ func (f *fakeHostClient) listCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.listCalls
+}
+
+func (f *fakeHostClient) logCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.logCalls
 }
 
 func (f *fakeHostClient) requestedURLs() []string {
@@ -252,13 +265,6 @@ func replaceAdmissionAsync(store *PluginState, admission CPAAdmissionState) <-ch
 		close(done)
 	}()
 	return done
-}
-
-func waitForAdmissionReplacementPending(t *testing.T, store *PluginState) {
-	t.Helper()
-	if !waitUntil(time.Second, func() bool { return store.cpaAdmissionIntent.Load() > 0 }) {
-		t.Fatal("admission replacement did not become pending")
-	}
 }
 
 func accountByAuthID(t *testing.T, snapshot StateSnapshot, authID string) AccountState {
@@ -808,7 +814,11 @@ func TestRefreshOnceDoesNotCrossAdmissionGenerationDuringList(t *testing.T) {
 	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
 	done := make(chan error, 1)
 	go func() { done <- refresher.RefreshOnce() }()
-	<-host.listStarted
+	select {
+	case <-host.listStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for stale ListAuths call")
+	}
 	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 2, AuthIDs: map[string]struct{}{"b": {}}})
 	close(host.releaseList)
 	if err := <-done; err != nil {
@@ -842,7 +852,11 @@ func TestRefreshDueOnceDoesNotCrossAdmissionGenerationDuringList(t *testing.T) {
 	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
 	done := make(chan error, 1)
 	go func() { done <- refresher.RefreshDueOnce() }()
-	<-host.listStarted
+	select {
+	case <-host.listStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for active refresh ListAuths call")
+	}
 	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 2, AuthIDs: map[string]struct{}{"b": {}}})
 	close(host.releaseList)
 	if err := <-done; err != nil {
@@ -850,6 +864,38 @@ func TestRefreshDueOnceDoesNotCrossAdmissionGenerationDuringList(t *testing.T) {
 	}
 	if got := host.httpCallCount(); got != 0 {
 		t.Fatalf("HTTP calls = %d, want 0 after admission generation changed", got)
+	}
+}
+
+func TestAdmissionChangeDuringListFailureDoesNotLogStaleRefresh(t *testing.T) {
+	host := &fakeHostClient{
+		listErr:     errors.New("list failed"),
+		listStarted: make(chan struct{}, 1),
+		releaseList: make(chan struct{}),
+	}
+	store := NewPluginState(DefaultConfig())
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 1, AuthIDs: map[string]struct{}{"a": {}}})
+	refresher := NewQuotaRefresher(host, store, time.Now)
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(host.releaseList)
+		}
+	})
+
+	refresher.RefreshSoon()
+	select {
+	case <-host.listStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for stale ListAuths call")
+	}
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 2, AuthIDs: map[string]struct{}{"b": {}}})
+	close(host.releaseList)
+	released = true
+	refresher.wg.Wait()
+
+	if got := host.logCallCount(); got != 0 {
+		t.Fatalf("host log calls = %d, want no stale refresh log", got)
 	}
 }
 
@@ -923,9 +969,8 @@ func TestRefreshAuthDiscardsInFlightSuccessAfterPriorityGenerationChange(t *test
 	go func() { done <- refresher.RefreshOnce() }()
 	<-host.doStarted
 	replaceDone := replaceAdmissionAsync(store, CPAAdmissionState{Observed: true, Priority: 9, AuthIDs: map[string]struct{}{"a": {}}})
-	waitForAdmissionReplacementPending(t, store)
-	close(host.releaseDo)
 	<-replaceDone
+	close(host.releaseDo)
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
@@ -959,9 +1004,8 @@ func TestRefreshAuthDiscardsInFlightFailureAfterExclusion(t *testing.T) {
 	go func() { done <- refresher.RefreshOnce() }()
 	<-host.doStarted
 	replaceDone := replaceAdmissionAsync(store, CPAAdmissionState{Observed: true, Priority: 2, AuthIDs: map[string]struct{}{"b": {}}})
-	waitForAdmissionReplacementPending(t, store)
-	close(host.releaseDo)
 	<-replaceDone
+	close(host.releaseDo)
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
@@ -997,9 +1041,8 @@ func TestAdmissionChangeAfterQuotaPreventsResetCreditsRequest(t *testing.T) {
 	go func() { refreshDone <- refresher.RefreshOnce() }()
 	waitForStartedURL(t, host.startedByURL, chatGPTQuotaEndpoint)
 	replaceDone := replaceAdmissionAsync(store, CPAAdmissionState{Observed: true, Priority: 2, AuthIDs: map[string]struct{}{"b": {}}})
-	waitForAdmissionReplacementPending(t, store)
-	close(quotaRelease)
 	<-replaceDone
+	close(quotaRelease)
 	if err := <-refreshDone; err != nil {
 		t.Fatal(err)
 	}
@@ -1039,9 +1082,8 @@ func TestAdmissionChangeAfterResetCreditsPreventsProbeRequest(t *testing.T) {
 	go func() { refreshDone <- refresher.RefreshOnce() }()
 	waitForStartedURL(t, host.startedByURL, resetCreditsEndpoint)
 	replaceDone := replaceAdmissionAsync(store, CPAAdmissionState{Observed: true, Priority: 2, AuthIDs: map[string]struct{}{"b": {}}})
-	waitForAdmissionReplacementPending(t, store)
-	close(resetRelease)
 	<-replaceDone
+	close(resetRelease)
 	if err := <-refreshDone; err != nil {
 		t.Fatal(err)
 	}
@@ -1081,9 +1123,8 @@ func TestAdmissionChangeAfterProbePreventsPostProbeQuotaRequest(t *testing.T) {
 	go func() { refreshDone <- refresher.RefreshOnce() }()
 	waitForStartedURL(t, host.startedByURL, codexResetProbeEndpoint)
 	replaceDone := replaceAdmissionAsync(store, CPAAdmissionState{Observed: true, Priority: 2, AuthIDs: map[string]struct{}{"b": {}}})
-	waitForAdmissionReplacementPending(t, store)
-	close(probeRelease)
 	<-replaceDone
+	close(probeRelease)
 	if err := <-refreshDone; err != nil {
 		t.Fatal(err)
 	}
@@ -1112,9 +1153,8 @@ func TestAdmissionChangeDuringTokenRefreshPreventsSaveAuth(t *testing.T) {
 	go func() { refreshDone <- refresher.RefreshOnce() }()
 	waitForStartedURL(t, host.startedByURL, codexTokenEndpoint)
 	replaceDone := replaceAdmissionAsync(store, CPAAdmissionState{Observed: true, Priority: 2, AuthIDs: map[string]struct{}{"b": {}}})
-	waitForAdmissionReplacementPending(t, store)
-	close(tokenRelease)
 	<-replaceDone
+	close(tokenRelease)
 	if err := <-refreshDone; err != nil {
 		t.Fatal(err)
 	}
@@ -1128,7 +1168,7 @@ func TestAdmissionChangeDuringTokenRefreshPreventsSaveAuth(t *testing.T) {
 	}
 }
 
-func TestSaveAuthLeaseSerializesAdmissionReplacement(t *testing.T) {
+func TestSaveAuthInProgressDoesNotBlockAdmissionReplacement(t *testing.T) {
 	now := time.Date(2026, 7, 10, 9, 0, 0, 0, time.UTC)
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-a"})
 	host := &fakeHostClient{
@@ -1144,21 +1184,13 @@ func TestSaveAuthLeaseSerializesAdmissionReplacement(t *testing.T) {
 	refreshDone := make(chan error, 1)
 	go func() { refreshDone <- refresher.RefreshOnce() }()
 	<-host.saveStarted
-	replaceStarted := make(chan struct{})
-	replaceDone := make(chan struct{})
-	go func() {
-		close(replaceStarted)
-		store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 2, AuthIDs: map[string]struct{}{"b": {}}})
-		close(replaceDone)
-	}()
-	<-replaceStarted
-	waitForAdmissionReplacementPending(t, store)
+	replaceDone := replaceAdmissionAsync(store, CPAAdmissionState{Observed: true, Priority: 2, AuthIDs: map[string]struct{}{"b": {}}})
 	select {
 	case <-replaceDone:
+	case <-time.After(time.Second):
 		close(host.releaseSave)
 		<-refreshDone
-		t.Fatal("admission replacement completed while SaveAuth was blocked")
-	default:
+		t.Fatal("admission replacement blocked behind SaveAuth")
 	}
 	close(host.releaseSave)
 	if err := <-refreshDone; err != nil {
@@ -1251,9 +1283,15 @@ func TestStartRecomputesDelayAfterAsyncRefreshSchedulesRetry(t *testing.T) {
 		t.Fatalf("ListAuths calls = %d, want loop sleeping on quota_refresh_interval before async refresh", got)
 	}
 
-	refresher.RefreshDueCandidatesSoon(pluginapi.SchedulerPickRequest{
+	req := pluginapi.SchedulerPickRequest{
 		Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "auth-1", Provider: "codex", Priority: 10}},
-	})
+	}
+	admission, ok := HighestPriorityCodexAdmission(req)
+	if !ok {
+		t.Fatal("candidate admission missing")
+	}
+	version := store.ReplaceCPAAdmission(admission)
+	refresher.RefreshDueCandidatesSoon(req, version)
 	if !waitUntil(700*time.Millisecond, func() bool { return host.listCallCount() >= 2 }) {
 		t.Fatalf("ListAuths calls = %d, want async refresh to wake loop for scheduled retry", host.listCallCount())
 	}
@@ -2066,6 +2104,55 @@ func TestRefreshSoonDoesNotOverlapRefreshes(t *testing.T) {
 		t.Fatalf("max active HTTP = %d, want 1", host.maxActiveHTTP())
 	}
 	host.assertNoHeaderErrors(t)
+}
+
+func TestRefreshDueCandidatesSoonKeepsNewestAdmissionWhenOlderCallbackArrivesLast(t *testing.T) {
+	now := time.Date(2026, 7, 10, 9, 0, 0, 0, time.UTC)
+	bToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-b"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{ID: "b", AuthIndex: "idx-b", Provider: "codex"}},
+		authJSON: map[string]json.RawMessage{
+			"idx-b": json.RawMessage(`{"access_token":"access-b","id_token":"` + bToken + `"}`),
+		},
+		httpBody:    []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+		listStarted: make(chan struct{}, 1),
+		releaseList: make(chan struct{}),
+	}
+	store := NewPluginState(DefaultConfig())
+	requestA := pluginapi.SchedulerPickRequest{Provider: "codex", Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "a", Provider: "codex", Priority: 1}}}
+	requestB := pluginapi.SchedulerPickRequest{Provider: "codex", Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "b", Provider: "codex", Priority: 2}}}
+	admissionA, _ := HighestPriorityCodexAdmission(requestA)
+	admissionB, _ := HighestPriorityCodexAdmission(requestB)
+	versionA := store.ReplaceCPAAdmission(admissionA)
+	store.RecordCodexActivity(now)
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(host.releaseList)
+		}
+	})
+
+	refresher.RefreshSoon()
+	select {
+	case <-host.listStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for active refresh ListAuths call")
+	}
+	versionB := store.ReplaceCPAAdmission(admissionB)
+	refresher.RefreshDueCandidatesSoon(requestB, versionB)
+	refresher.RefreshDueCandidatesSoon(requestA, versionA)
+	close(host.releaseList)
+	released = true
+	refresher.wg.Wait()
+
+	if got := host.listCallCount(); got != 2 {
+		t.Fatalf("ListAuths calls = %d, want newest admission callback retained", got)
+	}
+	snapshot := store.Snapshot(now)
+	if len(snapshot.Accounts) != 1 || snapshot.Accounts[0].AuthID != "b" {
+		t.Fatalf("accounts = %#v, want newest admission B refreshed", snapshot.Accounts)
+	}
 }
 
 func TestRefreshOneSoonDoesNotOverlapRefreshes(t *testing.T) {

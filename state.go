@@ -3,14 +3,11 @@ package main
 import (
 	"sort"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
 type PluginState struct {
 	mu                  sync.RWMutex
-	cpaAdmissionLease   sync.RWMutex
-	cpaAdmissionIntent  atomic.Int64
 	cfg                 Config
 	accounts            map[string]AccountState
 	cpaAdmission        CPAAdmissionState
@@ -80,18 +77,6 @@ func equalCPAAdmission(left, right CPAAdmissionState) bool {
 }
 
 func (s *PluginState) ReplaceCPAAdmission(value CPAAdmissionState) uint64 {
-	s.mu.RLock()
-	if equalCPAAdmission(s.cpaAdmission, value) {
-		version := s.cpaAdmissionVersion
-		s.mu.RUnlock()
-		return version
-	}
-	s.mu.RUnlock()
-
-	s.cpaAdmissionIntent.Add(1)
-	defer s.cpaAdmissionIntent.Add(-1)
-	s.cpaAdmissionLease.Lock()
-	defer s.cpaAdmissionLease.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if equalCPAAdmission(s.cpaAdmission, value) {
@@ -113,36 +98,16 @@ func (s *PluginState) ReplaceCPAAdmission(value CPAAdmissionState) uint64 {
 	return s.cpaAdmissionVersion
 }
 
-type CPAAdmissionLease struct {
-	state *PluginState
-}
-
-func (s *PluginState) AcquireCPAAdmissionLease(authID string, version uint64) (*CPAAdmissionLease, bool) {
-	if s.cpaAdmissionIntent.Load() > 0 {
-		return nil, false
-	}
-	s.cpaAdmissionLease.RLock()
-	if s.cpaAdmissionIntent.Load() > 0 {
-		s.cpaAdmissionLease.RUnlock()
-		return nil, false
-	}
+func (s *PluginState) BeginCPAAdmissionCall(authID string, version uint64) bool {
 	s.mu.RLock()
-	admitted := s.admissionCurrentLocked(authID, version)
-	s.mu.RUnlock()
-	if !admitted {
-		s.cpaAdmissionLease.RUnlock()
-		return nil, false
-	}
-	return &CPAAdmissionLease{state: s}, true
+	defer s.mu.RUnlock()
+	return s.admissionCurrentLocked(authID, version)
 }
 
-func (l *CPAAdmissionLease) Release() {
-	if l == nil || l.state == nil {
-		return
-	}
-	state := l.state
-	l.state = nil
-	state.cpaAdmissionLease.RUnlock()
+func (s *PluginState) BeginCPAAdmissionVersionCall(version uint64) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cpaAdmission.Observed && s.cpaAdmissionVersion == version
 }
 
 func (s *PluginState) CPAAdmission() CPAAdmissionState {
