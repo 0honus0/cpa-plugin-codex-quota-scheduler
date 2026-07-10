@@ -50,6 +50,31 @@ func requestWithCandidates(ids ...string) pluginapi.SchedulerPickRequest {
 	return pluginapi.SchedulerPickRequest{Provider: "codex", Providers: []string{"codex"}, Candidates: candidates}
 }
 
+func TestHighestPriorityCodexAdmissionKeepsOnlyMaximumTier(t *testing.T) {
+	req := pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{
+		{ID: "high-a", Provider: "codex", Priority: 1},
+		{ID: "low", Provider: "codex", Priority: 0},
+		{ID: "high-b", Provider: "codex", Priority: 1},
+		{ID: "other", Provider: "openai", Priority: 99},
+	}}
+	admission, ok := HighestPriorityCodexAdmission(req)
+	if !ok || !admission.Observed || admission.Priority != 1 || len(admission.AuthIDs) != 2 {
+		t.Fatalf("admission = %#v, ok=%t", admission, ok)
+	}
+	if _, ok := admission.AuthIDs["low"]; ok {
+		t.Fatal("low CPA tier was admitted")
+	}
+}
+
+func TestHighestPriorityCodexAdmissionRejectsNoCodexCandidates(t *testing.T) {
+	admission, ok := HighestPriorityCodexAdmission(pluginapi.SchedulerPickRequest{
+		Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "other", Provider: "openai", Priority: 9}},
+	})
+	if ok || admission.Observed {
+		t.Fatalf("admission = %#v, ok=%t", admission, ok)
+	}
+}
+
 func TestPickRespectsCPAPriorityBeforeExpiry(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	cfg := DefaultConfig()

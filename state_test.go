@@ -7,6 +7,34 @@ import (
 	"time"
 )
 
+func TestReplaceCPAAdmissionPrunesExcludedAccounts(t *testing.T) {
+	store := NewPluginState(DefaultConfig())
+	store.UpsertQuota(AccountState{AuthID: "high", Provider: "codex", Priority: 1})
+	store.UpsertQuota(AccountState{AuthID: "low", Provider: "codex", Priority: 0})
+	store.ReplaceCPAAdmission(CPAAdmissionState{
+		Observed: true,
+		Priority: 1,
+		AuthIDs:  map[string]struct{}{"high": {}},
+	})
+	snapshot := store.Snapshot(time.Now())
+	if len(snapshot.Accounts) != 1 || snapshot.Accounts[0].AuthID != "high" {
+		t.Fatalf("accounts = %#v", snapshot.Accounts)
+	}
+	if store.IsAuthAdmitted("low") || !store.IsAuthAdmitted("high") {
+		t.Fatalf("admission = %#v", store.CPAAdmission())
+	}
+}
+
+func TestReplaceCPAAdmissionReplacesOldTier(t *testing.T) {
+	store := NewPluginState(DefaultConfig())
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 1, AuthIDs: map[string]struct{}{"old": {}}})
+	store.UpsertQuota(AccountState{AuthID: "old", Provider: "codex", Priority: 1})
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 2, AuthIDs: map[string]struct{}{"new": {}}})
+	if store.IsAuthAdmitted("old") || !store.IsAuthAdmitted("new") || len(store.Snapshot(time.Now()).Accounts) != 0 {
+		t.Fatalf("state not replaced: %#v", store.Snapshot(time.Now()))
+	}
+}
+
 func TestPluginStateUpsertsAndSnapshotsAccounts(t *testing.T) {
 	store := NewPluginState(DefaultConfig())
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)

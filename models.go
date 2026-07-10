@@ -147,9 +147,16 @@ type AccountState struct {
 	Annotation         AccountAnnotation
 }
 
+type CPAAdmissionState struct {
+	Observed bool
+	Priority int
+	AuthIDs  map[string]struct{}
+}
+
 type StateSnapshot struct {
 	Config              Config
 	Accounts            []AccountState
+	CPAAdmission        CPAAdmissionState
 	Annotations         AnnotationState
 	Logs                []LogEntry
 	LastSelected        string

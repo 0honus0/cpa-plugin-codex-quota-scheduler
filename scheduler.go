@@ -35,6 +35,28 @@ const (
 	QueueStatusUnavailable         QueueStatus = "unavailable"
 )
 
+func HighestPriorityCodexAdmission(req pluginapi.SchedulerPickRequest) (CPAAdmissionState, bool) {
+	admission := CPAAdmissionState{AuthIDs: make(map[string]struct{})}
+	for _, candidate := range req.Candidates {
+		if candidate.ID == "" || candidate.Provider != "codex" {
+			continue
+		}
+		if !admission.Observed || candidate.Priority > admission.Priority {
+			admission.Observed = true
+			admission.Priority = candidate.Priority
+			clear(admission.AuthIDs)
+		}
+		if candidate.Priority == admission.Priority {
+			admission.AuthIDs[candidate.ID] = struct{}{}
+		}
+	}
+	if !admission.Observed {
+		admission.AuthIDs = nil
+		return admission, false
+	}
+	return admission, true
+}
+
 func PickCodexAccount(req pluginapi.SchedulerPickRequest, snapshot StateSnapshot, now time.Time) PickDecision {
 	if !snapshot.Config.HandleEnabled {
 		return PickDecision{Reason: "handle_disabled"}

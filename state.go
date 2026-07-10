@@ -10,6 +10,7 @@ type PluginState struct {
 	mu                  sync.RWMutex
 	cfg                 Config
 	accounts            map[string]AccountState
+	cpaAdmission        CPAAdmissionState
 	annotations         AnnotationState
 	logs                []LogEntry
 	lastSelected        string
@@ -49,6 +50,57 @@ func (s *PluginState) Annotations() AnnotationState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return cloneAnnotationState(s.annotations)
+}
+
+func cloneCPAAdmission(value CPAAdmissionState) CPAAdmissionState {
+	cloned := CPAAdmissionState{Observed: value.Observed, Priority: value.Priority}
+	if len(value.AuthIDs) > 0 {
+		cloned.AuthIDs = make(map[string]struct{}, len(value.AuthIDs))
+		for authID := range value.AuthIDs {
+			cloned.AuthIDs[authID] = struct{}{}
+		}
+	}
+	return cloned
+}
+
+func (s *PluginState) ReplaceCPAAdmission(value CPAAdmissionState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cpaAdmission = cloneCPAAdmission(value)
+	if !value.Observed {
+		return
+	}
+	for key, account := range s.accounts {
+		if _, ok := value.AuthIDs[account.AuthID]; !ok {
+			delete(s.accounts, key)
+		}
+	}
+}
+
+func (s *PluginState) CPAAdmission() CPAAdmissionState {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneCPAAdmission(s.cpaAdmission)
+}
+
+func (s *PluginState) IsAuthAdmitted(authID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.cpaAdmission.Observed || authID == "" {
+		return false
+	}
+	_, ok := s.cpaAdmission.AuthIDs[authID]
+	return ok
+}
+
+func (s *PluginState) AdmittedCPAPriority(authID string) (int, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.cpaAdmission.Observed || authID == "" {
+		return 0, false
+	}
+	_, ok := s.cpaAdmission.AuthIDs[authID]
+	return s.cpaAdmission.Priority, ok
 }
 
 func (s *PluginState) UpsertQuota(account AccountState) {
@@ -253,6 +305,7 @@ func (s *PluginState) Snapshot(now time.Time) StateSnapshot {
 	return StateSnapshot{
 		Config:              s.cfg,
 		Accounts:            accounts,
+		CPAAdmission:        cloneCPAAdmission(s.cpaAdmission),
 		Annotations:         cloneAnnotationState(s.annotations),
 		Logs:                cloneLogs(retainedLogs(s.logs, NormalizeConfig(s.cfg), now)),
 		LastSelected:        s.lastSelected,
