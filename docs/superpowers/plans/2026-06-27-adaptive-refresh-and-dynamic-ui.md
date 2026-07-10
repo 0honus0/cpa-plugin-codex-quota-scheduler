@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace fixed quota polling with active-window due/retry refresh and update the management UI without hard page reloads.
+**Goal:** Replace fixed full-account quota polling with active-window per-account due/retry refresh and update the management UI without hard page reloads.
 
 **Architecture:** Keep the CPA security boundary unchanged: resource routes serve UI only, while all writes and privileged callbacks stay behind Management API routes. Add adaptive refresh metadata to account state, let `scheduler.pick` mark Codex activity, and let the refresher process only due/retry accounts while active. Rework the status page JavaScript to fetch Management API status JSON and re-render sections in place.
 
@@ -120,7 +120,9 @@ CircuitHalfOpenSuccessThreshold:     2,
 MaxLogEntries:                       200,
 ```
 
-Keep `QuotaRefreshInterval: 30 * time.Minute` for config compatibility, but do not use it as the polling driver in the implementation tasks below.
+Keep `QuotaRefreshInterval: 30 * time.Minute`. It must not drive a fixed
+full-account polling loop; within the active window it contributes each
+account's normal per-account due time.
 
 - [ ] **Step 4: Normalize slices safely**
 

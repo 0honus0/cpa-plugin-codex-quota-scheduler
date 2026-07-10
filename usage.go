@@ -86,17 +86,16 @@ func HandleUsageFeedback(state *PluginState, record pluginapi.UsageRecord, now t
 	if !ok {
 		return
 	}
-	account, recorded := state.RecordAccountFailure(event.AuthID, event.AuthIndex, event.Reason, event.ResetAt, now)
-	if !recorded {
-		return
+	if event.AuthID != "" {
+		state.MarkAccountTemporaryExhausted(event.AuthID, event.ResetAt, event.Reason)
+	} else {
+		state.MarkAccountTemporaryExhaustedByAuthIndex(event.AuthIndex, event.ResetAt, event.Reason)
 	}
-	state.RecordLog("warn", "circuit.failure", "账号请求失败，熔断计数已更新", map[string]any{
-		"auth_id":       account.AuthID,
-		"auth_index":    account.AuthIndex,
-		"reason":        event.Reason,
-		"failure_count": account.Circuit.FailureCount,
-		"circuit_state": account.Circuit.EffectiveState,
-		"next_probe_at": formatTime(account.Circuit.NextProbeAt),
+	state.RecordLog("warn", "quota.temporary_exhausted", "账号额度已用尽，等待重置", map[string]any{
+		"auth_id":    event.AuthID,
+		"auth_index": event.AuthIndex,
+		"reason":     event.Reason,
+		"reset_at":   formatTime(event.ResetAt),
 	}, now)
 }
 

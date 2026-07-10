@@ -238,7 +238,7 @@ func TestDetectQuotaFailureIgnoresSuccessfulRecord(t *testing.T) {
 	}
 }
 
-func TestUsageHandleOpensCircuitAfterThresholdByAuthIndex(t *testing.T) {
+func TestUsageHandleMarksTemporaryExhaustedByAuthIndex(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.CircuitFailureThreshold = 2
 	cfg.CircuitOpenDuration = 10 * time.Minute
@@ -257,11 +257,11 @@ func TestUsageHandleOpensCircuitAfterThresholdByAuthIndex(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	HandleUsageFeedback(store, record, now)
 	snapshot := store.Snapshot(now)
-	if snapshot.Accounts[0].TemporaryExhausted || snapshot.Accounts[0].Circuit.State != CircuitStateClosed || snapshot.Accounts[0].Circuit.FailureCount != 1 {
+	if !snapshot.Accounts[0].TemporaryExhausted || !snapshot.Accounts[0].TemporaryResetAt.Equal(time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)) {
 		t.Fatalf("account after first failure = %#v", snapshot.Accounts[0])
 	}
 	status, available, reason, sortTime := accountQueueState(snapshot.Accounts[0], now)
-	if status != QueueStatusUnavailable || available || reason != "quota_probe_wait" || !sortTime.Equal(time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)) {
+	if status != QueueStatusFiveHourExhausted || available || reason != "temporary_exhausted" || !sortTime.Equal(time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)) {
 		t.Fatalf("queue after first failure = status=%s available=%t reason=%q sort=%s account=%#v", status, available, reason, sortTime, snapshot.Accounts[0])
 	}
 
@@ -272,15 +272,49 @@ func TestUsageHandleOpensCircuitAfterThresholdByAuthIndex(t *testing.T) {
 		t.Fatalf("accounts = %#v", snapshot.Accounts)
 	}
 	account := snapshot.Accounts[0]
-	if account.TemporaryExhausted {
-		t.Fatalf("temporary exhausted should no longer be set by usage feedback: %#v", account)
-	}
-	if account.Circuit.State != CircuitStateOpen || account.Circuit.FailureCount != 2 || !account.Circuit.NextProbeAt.Equal(time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)) {
+	if !account.TemporaryExhausted || !account.TemporaryResetAt.Equal(time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)) {
 		t.Fatalf("account = %#v", account)
+	}
+	if account.Circuit.State != CircuitStateClosed || account.Circuit.FailureCount != 0 {
+		t.Fatalf("circuit = %#v, want closed without quota failure count", account.Circuit)
 	}
 }
 
-func TestUsageCircuitHalfOpenSuccessClosesCircuit(t *testing.T) {
+func TestUsageQuotaFailureMarksTemporaryExhaustedWithoutOpeningCircuit(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.CircuitFailureThreshold = 1
+	store := NewPluginState(cfg)
+	store.UpsertQuota(AccountState{AuthID: "auth-1", AuthIndex: "idx-1", Provider: "codex"})
+
+	record := pluginapi.UsageRecord{
+		Provider:  "codex",
+		AuthIndex: "idx-1",
+		Failed:    true,
+		Failure: pluginapi.UsageFailure{
+			StatusCode: 429,
+			Body:       `{"error":{"type":"usage_limit_reached","resets_at":"2026-06-21T12:00:00Z"}}`,
+		},
+	}
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	HandleUsageFeedback(store, record, now)
+
+	account := store.Snapshot(now).Accounts[0]
+	if !account.TemporaryExhausted {
+		t.Fatalf("TemporaryExhausted = false, want true: %#v", account)
+	}
+	if !account.TemporaryResetAt.Equal(time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)) {
+		t.Fatalf("TemporaryResetAt = %s, want quota reset time", account.TemporaryResetAt)
+	}
+	if account.Circuit.State != CircuitStateClosed || account.Circuit.FailureCount != 0 {
+		t.Fatalf("Circuit = %#v, want closed without quota failure count", account.Circuit)
+	}
+	status, available, reason, sortTime := accountQueueState(account, now)
+	if status != QueueStatusFiveHourExhausted || available || reason != "temporary_exhausted" || !sortTime.Equal(account.TemporaryResetAt) {
+		t.Fatalf("queue = status=%s available=%t reason=%q sort=%s account=%#v", status, available, reason, sortTime, account)
+	}
+}
+
+func TestUsageSuccessDoesNotClearTemporaryExhaustedWhenNoCircuitProbeExists(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.CircuitFailureThreshold = 1
 	cfg.CircuitOpenDuration = 5 * time.Minute
@@ -302,21 +336,15 @@ func TestUsageCircuitHalfOpenSuccessClosesCircuit(t *testing.T) {
 	HandleUsageFeedback(store, fail, now)
 
 	snapshot := store.Snapshot(now.Add(6 * time.Minute))
-	if snapshot.Accounts[0].Circuit.EffectiveState != CircuitStateHalfOpen {
-		t.Fatalf("circuit after probe time = %#v", snapshot.Accounts[0].Circuit)
+	if !snapshot.Accounts[0].TemporaryExhausted || snapshot.Accounts[0].Circuit.EffectiveState != CircuitStateClosed {
+		t.Fatalf("account after quota failure = %#v", snapshot.Accounts[0])
 	}
 
 	success := pluginapi.UsageRecord{Provider: "codex", AuthID: "auth-1", Failed: false}
 	HandleUsageFeedback(store, success, now.Add(6*time.Minute))
 	snapshot = store.Snapshot(now.Add(6 * time.Minute))
-	if snapshot.Accounts[0].Circuit.EffectiveState != CircuitStateHalfOpen || snapshot.Accounts[0].Circuit.SuccessCount != 1 {
-		t.Fatalf("circuit after first success = %#v", snapshot.Accounts[0].Circuit)
-	}
-
-	HandleUsageFeedback(store, success, now.Add(6*time.Minute+time.Second))
-	snapshot = store.Snapshot(now.Add(6*time.Minute + time.Second))
-	if snapshot.Accounts[0].Circuit.EffectiveState != CircuitStateClosed || snapshot.Accounts[0].Circuit.FailureCount != 0 || snapshot.Accounts[0].Circuit.SuccessCount != 0 {
-		t.Fatalf("circuit after second success = %#v", snapshot.Accounts[0].Circuit)
+	if !snapshot.Accounts[0].TemporaryExhausted || snapshot.Accounts[0].Circuit.EffectiveState != CircuitStateClosed || snapshot.Accounts[0].Circuit.SuccessCount != 0 {
+		t.Fatalf("account after success = %#v", snapshot.Accounts[0])
 	}
 }
 
@@ -361,10 +389,13 @@ func TestUsageLimitWithoutResetSchedulesShortPause(t *testing.T) {
 	HandleUsageFeedback(store, record, now)
 
 	account := store.Snapshot(now).Accounts[0]
-	if account.Circuit.NextProbeAt.IsZero() {
-		t.Fatal("NextProbeAt is zero, want short pause")
+	if account.TemporaryResetAt.IsZero() {
+		t.Fatal("TemporaryResetAt is zero, want short pause")
 	}
-	if !account.Circuit.NextProbeAt.Equal(now.Add(2 * time.Minute)) {
-		t.Fatalf("NextProbeAt = %s, want %s", account.Circuit.NextProbeAt, now.Add(2*time.Minute))
+	if !account.TemporaryResetAt.Equal(now.Add(2 * time.Minute)) {
+		t.Fatalf("TemporaryResetAt = %s, want %s", account.TemporaryResetAt, now.Add(2*time.Minute))
+	}
+	if account.Circuit.State != CircuitStateClosed || account.Circuit.FailureCount != 0 {
+		t.Fatalf("Circuit = %#v, want closed without quota failure count", account.Circuit)
 	}
 }

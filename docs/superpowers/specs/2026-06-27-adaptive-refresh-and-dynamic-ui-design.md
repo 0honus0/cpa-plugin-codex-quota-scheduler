@@ -64,10 +64,11 @@ Keep or change these defaults:
 - `max_log_entries`: `200`
 - `log_retention`: `24h`
 
-`quota_refresh_interval` should stop driving a fixed full-account polling loop.
-Retain it for backwards-compatible config decoding if needed, but remove it from
-the normal UI and do not use it to refresh all accounts on a timer. Due times,
-retry times, and the active window decide when upstream refreshes happen.
+`quota_refresh_interval` must not drive a fixed full-account polling loop.
+Instead, while the worker is inside the active window, it defines the normal
+per-account refresh cadence and contributes each account's next due time. Due
+times, retry times, reset times, and the active window decide when upstream
+refreshes happen; only due accounts are refreshed.
 
 ## Refresh Model
 
@@ -92,6 +93,7 @@ current cached state while the background worker refreshes due accounts.
 An account is due for refresh when at least one condition is true:
 
 - it has never had a successful quota refresh;
+- `last_success_at + quota_refresh_interval` is in the past;
 - `last_success_at + stale_after` is in the past;
 - a known 5-hour, weekly, or monthly reset time plus
   `refresh_after_reset_delay` is in the past;
@@ -133,6 +135,8 @@ Keep the existing 429-oriented usage feedback model:
 
 - If a Codex request returns `usage_limit_reached`, mark the selected account
   unavailable until the parsed reset time.
+- Quota exhaustion is availability state, not a transport/authentication
+  failure. It must not increment or open the circuit breaker.
 - If no reset time is available, keep the current short temporary pause behavior
   by marking the account unavailable for 2 minutes, then make it due for refresh
   inside the active window.
