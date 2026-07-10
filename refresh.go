@@ -529,8 +529,11 @@ func (r *QuotaRefresher) refreshAuthVersioned(auth pluginapi.HostAuthFileEntry, 
 	account := accountStateFromAuth(auth, r.now())
 	account.Priority = priority
 
-	authResp, err := r.host.GetAuth(auth.AuthIndex)
+	authResp, err := r.getAuthWithAdmissionLease(account.AuthID, version, auth.AuthIndex)
 	if err != nil {
+		if errors.Is(err, errCPAAdmissionChanged) {
+			return
+		}
 		r.upsertRefreshFailure(account, version, redactSecrets(fmt.Sprintf("get auth: %v", err)), RefreshFailureTransient)
 		return
 	}
@@ -555,8 +558,11 @@ func (r *QuotaRefresher) refreshAuthVersioned(auth pluginapi.HostAuthFileEntry, 
 	previous := account
 
 	cfg := r.state.Config()
-	quota, err := r.fetchQuota(credentials)
+	quota, err := r.fetchQuota(credentials, account.AuthID, version)
 	if err != nil {
+		if errors.Is(err, errCPAAdmissionChanged) {
+			return
+		}
 		kind := RefreshFailureTransient
 		var statusErr quotaStatusError
 		if errors.As(err, &statusErr) {
@@ -565,7 +571,10 @@ func (r *QuotaRefresher) refreshAuthVersioned(auth pluginapi.HostAuthFileEntry, 
 		r.upsertRefreshFailure(account, version, redactWithCredentials(err.Error(), credentials), kind)
 		return
 	}
-	if resetCredits, err := r.refreshResetCredits(credentials); err != nil {
+	if resetCredits, err := r.refreshResetCredits(credentials, account.AuthID, version); err != nil {
+		if errors.Is(err, errCPAAdmissionChanged) {
+			return
+		}
 		r.recordAdmissionLog(account.AuthID, version, "warn", "quota.reset_credits_failed", "主动重置次数刷新失败", map[string]any{"auth_id": account.AuthID, "error": redactWithCredentials(err.Error(), credentials)})
 	} else {
 		mergeResetCredits(&quota, resetCredits)
@@ -589,7 +598,10 @@ func (r *QuotaRefresher) refreshAuthVersioned(auth pluginapi.HostAuthFileEntry, 
 			account.ResetProbes[kind] = markResetProbeConfirmedActive(probe)
 		}
 		if len(lazyKinds) > 0 {
-			if err := r.runResetProbe(credentials); err != nil {
+			if err := r.runResetProbe(credentials, account.AuthID, version); err != nil {
+				if errors.Is(err, errCPAAdmissionChanged) {
+					return
+				}
 				for _, kind := range lazyKinds {
 					account.ResetProbes[kind] = markResetProbeRetry(account.ResetProbes[kind], r.now(), err, credentials, cfg)
 				}
@@ -599,11 +611,17 @@ func (r *QuotaRefresher) refreshAuthVersioned(auth pluginapi.HostAuthFileEntry, 
 					account.ResetProbes[kind] = markResetProbeVerified(account.ResetProbes[kind], r.now())
 				}
 				r.recordAdmissionLog(account.AuthID, version, "info", "quota.reset_probe_verified", "Codex reset probe verified", map[string]any{"auth_id": account.AuthID})
-				if refreshedQuota, err := r.fetchQuota(credentials); err != nil {
+				if refreshedQuota, err := r.fetchQuota(credentials, account.AuthID, version); err != nil {
+					if errors.Is(err, errCPAAdmissionChanged) {
+						return
+					}
 					r.recordAdmissionLog(account.AuthID, version, "warn", "quota.reset_probe_post_refresh_failed", "Post-probe quota refresh failed", map[string]any{"auth_id": account.AuthID, "error": redactWithCredentials(err.Error(), credentials)})
 				} else {
 					quota = refreshedQuota
-					if resetCredits, err := r.refreshResetCredits(credentials); err != nil {
+					if resetCredits, err := r.refreshResetCredits(credentials, account.AuthID, version); err != nil {
+						if errors.Is(err, errCPAAdmissionChanged) {
+							return
+						}
 						r.recordAdmissionLog(account.AuthID, version, "warn", "quota.reset_credits_failed", "主动重置次数刷新失败", map[string]any{"auth_id": account.AuthID, "error": redactWithCredentials(err.Error(), credentials)})
 					} else {
 						mergeResetCredits(&quota, resetCredits)
@@ -625,7 +643,34 @@ func (r *QuotaRefresher) recordAdmissionLog(authID string, version uint64, level
 	r.state.RecordLogIfAdmissionCurrent(authID, version, level, event, message, fields, r.now())
 }
 
-func (r *QuotaRefresher) fetchQuota(credentials CodexCredentials) (ParsedQuota, error) {
+func (r *QuotaRefresher) getAuthWithAdmissionLease(authID string, version uint64, authIndex string) (pluginapi.HostAuthGetResponse, error) {
+	lease, ok := r.state.AcquireCPAAdmissionLease(authID, version)
+	if !ok {
+		return pluginapi.HostAuthGetResponse{}, errCPAAdmissionChanged
+	}
+	defer lease.Release()
+	return r.host.GetAuth(authIndex)
+}
+
+func (r *QuotaRefresher) doWithAdmissionLease(authID string, version uint64, req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
+	lease, ok := r.state.AcquireCPAAdmissionLease(authID, version)
+	if !ok {
+		return pluginapi.HTTPResponse{}, errCPAAdmissionChanged
+	}
+	defer lease.Release()
+	return r.host.Do(req)
+}
+
+func (r *QuotaRefresher) saveAuthWithAdmissionLease(authID string, version uint64, name string, raw json.RawMessage) error {
+	lease, ok := r.state.AcquireCPAAdmissionLease(authID, version)
+	if !ok {
+		return errCPAAdmissionChanged
+	}
+	defer lease.Release()
+	return r.host.SaveAuth(name, raw)
+}
+
+func (r *QuotaRefresher) fetchQuota(credentials CodexCredentials, authID string, version uint64) (ParsedQuota, error) {
 	cfg := r.state.Config()
 	req := pluginapi.HTTPRequest{
 		Method: http.MethodGet,
@@ -637,7 +682,7 @@ func (r *QuotaRefresher) fetchQuota(credentials CodexCredentials) (ParsedQuota, 
 			"User-Agent":         []string{quotaUserAgent},
 		},
 	}
-	resp, err := r.host.Do(req)
+	resp, err := r.doWithAdmissionLease(authID, version, req)
 	if err != nil {
 		return ParsedQuota{}, fmt.Errorf("quota request: %w", err)
 	}
@@ -660,7 +705,7 @@ func (e quotaStatusError) Error() string {
 	return fmt.Sprintf("quota request returned status %d: response body: %s", e.status, sanitizedBodySummary(e.body))
 }
 
-func (r *QuotaRefresher) runResetProbe(credentials CodexCredentials) error {
+func (r *QuotaRefresher) runResetProbe(credentials CodexCredentials, authID string, version uint64) error {
 	req := pluginapi.HTTPRequest{
 		Method: http.MethodPost,
 		URL:    codexResetProbeEndpoint,
@@ -673,7 +718,7 @@ func (r *QuotaRefresher) runResetProbe(credentials CodexCredentials) error {
 		},
 		Body: resetProbePayloadBytes(),
 	}
-	resp, err := r.host.Do(req)
+	resp, err := r.doWithAdmissionLease(authID, version, req)
 	if err != nil {
 		return fmt.Errorf("reset probe request: %w", err)
 	}
@@ -690,7 +735,7 @@ func (r *QuotaRefresher) refreshAndSaveCredentials(authResp pluginapi.HostAuthGe
 	if strings.TrimSpace(current.RefreshToken) == "" {
 		return CodexCredentials{}, errors.New("access_token expired and refresh_token is missing")
 	}
-	refreshed, err := r.refreshCodexAccessToken(current.RefreshToken)
+	refreshed, err := r.refreshCodexAccessToken(current.RefreshToken, authID, version)
 	if err != nil {
 		return CodexCredentials{}, err
 	}
@@ -715,18 +760,14 @@ func (r *QuotaRefresher) refreshAndSaveCredentials(authResp pluginapi.HostAuthGe
 	if name == "" {
 		return CodexCredentials{}, errors.New("auth file name is required to save refreshed token")
 	}
-	_, currentVersion, admitted := r.state.AdmittedCPAPriorityVersioned(authID)
-	if !admitted || currentVersion != version {
-		return CodexCredentials{}, errCPAAdmissionChanged
-	}
-	if err := r.host.SaveAuth(name, updated); err != nil {
+	if err := r.saveAuthWithAdmissionLease(authID, version, name, updated); err != nil {
 		return CodexCredentials{}, err
 	}
 	r.recordAdmissionLog(authID, version, "info", "quota.token_refreshed", "Codex access token refreshed and saved", map[string]any{"auth_file": name})
 	return refreshed, nil
 }
 
-func (r *QuotaRefresher) refreshCodexAccessToken(refreshToken string) (CodexCredentials, error) {
+func (r *QuotaRefresher) refreshCodexAccessToken(refreshToken, authID string, version uint64) (CodexCredentials, error) {
 	form := url.Values{
 		"client_id":     {codexClientID},
 		"grant_type":    {"refresh_token"},
@@ -742,7 +783,7 @@ func (r *QuotaRefresher) refreshCodexAccessToken(refreshToken string) (CodexCred
 		},
 		Body: []byte(form.Encode()),
 	}
-	resp, err := r.host.Do(req)
+	resp, err := r.doWithAdmissionLease(authID, version, req)
 	if err != nil {
 		return CodexCredentials{}, fmt.Errorf("token refresh request: %w", err)
 	}
@@ -826,7 +867,7 @@ func updateCodexAuthJSON(raw json.RawMessage, credentials CodexCredentials, now 
 	return json.Marshal(doc)
 }
 
-func (r *QuotaRefresher) refreshResetCredits(credentials CodexCredentials) (ParsedQuota, error) {
+func (r *QuotaRefresher) refreshResetCredits(credentials CodexCredentials, authID string, version uint64) (ParsedQuota, error) {
 	req := pluginapi.HTTPRequest{
 		Method: http.MethodGet,
 		URL:    resetCreditsEndpoint,
@@ -837,7 +878,7 @@ func (r *QuotaRefresher) refreshResetCredits(credentials CodexCredentials) (Pars
 			"User-Agent":         []string{quotaUserAgent},
 		},
 	}
-	resp, err := r.host.Do(req)
+	resp, err := r.doWithAdmissionLease(authID, version, req)
 	if err != nil {
 		return ParsedQuota{}, fmt.Errorf("reset credits request: %w", err)
 	}

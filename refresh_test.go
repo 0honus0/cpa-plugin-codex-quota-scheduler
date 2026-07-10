@@ -26,6 +26,10 @@ type fakeHostClient struct {
 	releaseDo             chan struct{}
 	listStarted           chan struct{}
 	releaseList           chan struct{}
+	startedByURL          chan string
+	releaseByURL          map[string]chan struct{}
+	saveStarted           chan struct{}
+	releaseSave           chan struct{}
 
 	mu           sync.Mutex
 	listCalls    int
@@ -64,6 +68,15 @@ func (f *fakeHostClient) GetAuth(authIndex string) (pluginapi.HostAuthGetRespons
 }
 
 func (f *fakeHostClient) SaveAuth(name string, raw json.RawMessage) error {
+	if f.saveStarted != nil {
+		select {
+		case f.saveStarted <- struct{}{}:
+		default:
+		}
+	}
+	if f.releaseSave != nil {
+		<-f.releaseSave
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.saved == nil {
@@ -82,7 +95,14 @@ func (f *fakeHostClient) Do(req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, 
 		f.maxActive = f.activeHTTP
 	}
 	f.mu.Unlock()
-	blocks := f.releaseDo != nil && req.URL != resetCreditsEndpoint && req.URL != codexTokenEndpoint
+	if f.startedByURL != nil {
+		select {
+		case f.startedByURL <- req.URL:
+		default:
+		}
+	}
+	specificRelease := f.releaseByURL[req.URL]
+	blocks := specificRelease == nil && f.releaseDo != nil && req.URL != resetCreditsEndpoint && req.URL != codexTokenEndpoint
 	if f.doStarted != nil && blocks {
 		select {
 		case f.doStarted <- struct{}{}:
@@ -91,6 +111,9 @@ func (f *fakeHostClient) Do(req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, 
 	}
 	if blocks {
 		<-f.releaseDo
+	}
+	if specificRelease != nil {
+		<-specificRelease
 	}
 	defer func() {
 		f.mu.Lock()
@@ -206,6 +229,36 @@ func newAdmittedQuotaRefresherForTest(host *fakeHostClient, store *PluginState, 
 	}
 	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: priority, AuthIDs: authIDs})
 	return NewQuotaRefresher(host, store, now)
+}
+
+func waitForStartedURL(t *testing.T, started <-chan string, want string) {
+	t.Helper()
+	for {
+		select {
+		case got := <-started:
+			if got == want {
+				return
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for URL %s", want)
+		}
+	}
+}
+
+func replaceAdmissionAsync(store *PluginState, admission CPAAdmissionState) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		store.ReplaceCPAAdmission(admission)
+		close(done)
+	}()
+	return done
+}
+
+func waitForAdmissionReplacementPending(t *testing.T, store *PluginState) {
+	t.Helper()
+	if !waitUntil(time.Second, func() bool { return store.cpaAdmissionIntent.Load() > 0 }) {
+		t.Fatal("admission replacement did not become pending")
+	}
 }
 
 func accountByAuthID(t *testing.T, snapshot StateSnapshot, authID string) AccountState {
@@ -713,12 +766,27 @@ func TestRefreshOnceFiltersMixedTierAndCountsOnlyAdmitted(t *testing.T) {
 	if err := refresher.RefreshOnce(); err != nil {
 		t.Fatal(err)
 	}
+	if got := host.httpCallCount(); got != 2 {
+		t.Fatalf("HTTP calls = %d, want quota/reset calls for admitted high only", got)
+	}
 	snapshot := store.Snapshot(now)
 	if snapshot.CodexAuthCount != 1 {
 		t.Fatalf("CodexAuthCount = %d, want 1", snapshot.CodexAuthCount)
 	}
 	if len(snapshot.Accounts) != 1 || snapshot.Accounts[0].AuthID != "high" || snapshot.Accounts[0].Priority != 9 {
 		t.Fatalf("accounts = %#v, want admitted high at CPA priority 9", snapshot.Accounts)
+	}
+}
+
+func TestFilterAdmittedAuthsMixedTier(t *testing.T) {
+	auths := []pluginapi.HostAuthFileEntry{
+		{ID: "high", AuthIndex: "idx-high", Provider: "codex"},
+		{ID: "low", AuthIndex: "idx-low", Provider: "codex"},
+	}
+	admission := CPAAdmissionState{Observed: true, Priority: 9, AuthIDs: map[string]struct{}{"high": {}}}
+	filtered := filterAdmittedAuths(auths, admission)
+	if len(filtered) != 1 || filtered[0].ID != "high" {
+		t.Fatalf("filtered = %#v, want only admitted high", filtered)
 	}
 }
 
@@ -802,8 +870,6 @@ func TestRefreshDueOnceFiltersMixedTier(t *testing.T) {
 	}
 	store := NewPluginState(DefaultConfig())
 	store.RecordCodexActivity(now)
-	store.UpsertQuota(AccountState{AuthID: "high", AuthIndex: "idx-high", Provider: "codex", LastSuccessAt: now.Add(-6 * time.Hour)})
-	store.UpsertQuota(AccountState{AuthID: "low", AuthIndex: "idx-low", Provider: "codex", LastSuccessAt: now.Add(-6 * time.Hour)})
 	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 7, AuthIDs: map[string]struct{}{"high": {}}})
 	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
 
@@ -856,8 +922,10 @@ func TestRefreshAuthDiscardsInFlightSuccessAfterPriorityGenerationChange(t *test
 	done := make(chan error, 1)
 	go func() { done <- refresher.RefreshOnce() }()
 	<-host.doStarted
-	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 9, AuthIDs: map[string]struct{}{"a": {}}})
+	replaceDone := replaceAdmissionAsync(store, CPAAdmissionState{Observed: true, Priority: 9, AuthIDs: map[string]struct{}{"a": {}}})
+	waitForAdmissionReplacementPending(t, store)
 	close(host.releaseDo)
+	<-replaceDone
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
@@ -890,8 +958,10 @@ func TestRefreshAuthDiscardsInFlightFailureAfterExclusion(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- refresher.RefreshOnce() }()
 	<-host.doStarted
-	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 2, AuthIDs: map[string]struct{}{"b": {}}})
+	replaceDone := replaceAdmissionAsync(store, CPAAdmissionState{Observed: true, Priority: 2, AuthIDs: map[string]struct{}{"b": {}}})
+	waitForAdmissionReplacementPending(t, store)
 	close(host.releaseDo)
+	<-replaceDone
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
@@ -904,6 +974,197 @@ func TestRefreshAuthDiscardsInFlightFailureAfterExclusion(t *testing.T) {
 			t.Fatalf("stale failure log committed: %#v", entry)
 		}
 	}
+}
+
+func TestAdmissionChangeAfterQuotaPreventsResetCreditsRequest(t *testing.T) {
+	now := time.Date(2026, 7, 10, 9, 0, 0, 0, time.UTC)
+	token := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-a"})
+	quotaRelease := make(chan struct{})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{ID: "a", AuthIndex: "idx-a", Provider: "codex"}},
+		authJSON: map[string]json.RawMessage{"idx-a": json.RawMessage(`{"access_token":"access-a","id_token":"` + token + `"}`)},
+		responseByURL: map[string]pluginapi.HTTPResponse{
+			chatGPTQuotaEndpoint: {StatusCode: http.StatusOK, Body: []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600}}}`)},
+			resetCreditsEndpoint: {StatusCode: http.StatusOK, Body: []byte(`{"available_count":0}`)},
+		},
+		startedByURL: make(chan string, 4),
+		releaseByURL: map[string]chan struct{}{chatGPTQuotaEndpoint: quotaRelease},
+	}
+	store := NewPluginState(DefaultConfig())
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 1, AuthIDs: map[string]struct{}{"a": {}}})
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refreshDone := make(chan error, 1)
+	go func() { refreshDone <- refresher.RefreshOnce() }()
+	waitForStartedURL(t, host.startedByURL, chatGPTQuotaEndpoint)
+	replaceDone := replaceAdmissionAsync(store, CPAAdmissionState{Observed: true, Priority: 2, AuthIDs: map[string]struct{}{"b": {}}})
+	waitForAdmissionReplacementPending(t, store)
+	close(quotaRelease)
+	<-replaceDone
+	if err := <-refreshDone; err != nil {
+		t.Fatal(err)
+	}
+	if urls := strings.Join(host.requestedURLs(), "\n"); strings.Contains(urls, resetCreditsEndpoint) {
+		t.Fatalf("stale refresh started reset credits request:\n%s", urls)
+	}
+}
+
+func TestAdmissionChangeAfterResetCreditsPreventsProbeRequest(t *testing.T) {
+	resetAt := time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC)
+	now := resetAt.Add(10 * time.Minute)
+	seconds := int64(fiveHourSeconds)
+	token := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-a"})
+	resetRelease := make(chan struct{})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{ID: "a", AuthIndex: "idx-a", Provider: "codex"}},
+		authJSON: map[string]json.RawMessage{"idx-a": json.RawMessage(`{"access_token":"access-a","id_token":"` + token + `"}`)},
+		responseByURL: map[string]pluginapi.HTTPResponse{
+			chatGPTQuotaEndpoint:    {StatusCode: http.StatusOK, Body: []byte(`{"rate_limit":{"primary_window":{"used_percent":1,"limit_window_seconds":18000,"reset_after_seconds":18000}}}`)},
+			resetCreditsEndpoint:    {StatusCode: http.StatusOK, Body: []byte(`{"available_count":0}`)},
+			codexResetProbeEndpoint: {StatusCode: http.StatusOK, Body: []byte(`{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`)},
+		},
+		startedByURL: make(chan string, 8),
+		releaseByURL: map[string]chan struct{}{resetCreditsEndpoint: resetRelease},
+	}
+	cfg := DefaultConfig()
+	cfg.EnableResetProbe = true
+	store := NewPluginState(cfg)
+	store.UpsertQuota(AccountState{
+		AuthID: "a", AuthIndex: "idx-a", Provider: "codex", LastSuccessAt: resetAt.Add(-time.Hour),
+		Quota:       ParsedQuota{FiveHour: &QuotaWindow{Kind: WindowFiveHour, LimitWindowSeconds: &seconds, ResetAt: resetAt}},
+		ResetProbes: map[WindowKind]ResetProbeState{WindowFiveHour: {WindowKind: WindowFiveHour, WindowSeconds: fiveHourSeconds, ResetAt: resetAt, NextCheckAt: now, Status: ResetProbeStatusPending}},
+	})
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 1, AuthIDs: map[string]struct{}{"a": {}}})
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refreshDone := make(chan error, 1)
+	go func() { refreshDone <- refresher.RefreshOnce() }()
+	waitForStartedURL(t, host.startedByURL, resetCreditsEndpoint)
+	replaceDone := replaceAdmissionAsync(store, CPAAdmissionState{Observed: true, Priority: 2, AuthIDs: map[string]struct{}{"b": {}}})
+	waitForAdmissionReplacementPending(t, store)
+	close(resetRelease)
+	<-replaceDone
+	if err := <-refreshDone; err != nil {
+		t.Fatal(err)
+	}
+	if urls := strings.Join(host.requestedURLs(), "\n"); strings.Contains(urls, codexResetProbeEndpoint) {
+		t.Fatalf("stale refresh started reset probe request:\n%s", urls)
+	}
+}
+
+func TestAdmissionChangeAfterProbePreventsPostProbeQuotaRequest(t *testing.T) {
+	resetAt := time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC)
+	now := resetAt.Add(10 * time.Minute)
+	seconds := int64(fiveHourSeconds)
+	token := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-a"})
+	probeRelease := make(chan struct{})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{ID: "a", AuthIndex: "idx-a", Provider: "codex"}},
+		authJSON: map[string]json.RawMessage{"idx-a": json.RawMessage(`{"access_token":"access-a","id_token":"` + token + `"}`)},
+		responseByURL: map[string]pluginapi.HTTPResponse{
+			chatGPTQuotaEndpoint:    {StatusCode: http.StatusOK, Body: []byte(`{"rate_limit":{"primary_window":{"used_percent":1,"limit_window_seconds":18000,"reset_after_seconds":18000}}}`)},
+			resetCreditsEndpoint:    {StatusCode: http.StatusOK, Body: []byte(`{"available_count":0}`)},
+			codexResetProbeEndpoint: {StatusCode: http.StatusOK, Body: []byte(`{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`)},
+		},
+		startedByURL: make(chan string, 8),
+		releaseByURL: map[string]chan struct{}{codexResetProbeEndpoint: probeRelease},
+	}
+	cfg := DefaultConfig()
+	cfg.EnableResetProbe = true
+	store := NewPluginState(cfg)
+	store.UpsertQuota(AccountState{
+		AuthID: "a", AuthIndex: "idx-a", Provider: "codex", LastSuccessAt: resetAt.Add(-time.Hour),
+		Quota:       ParsedQuota{FiveHour: &QuotaWindow{Kind: WindowFiveHour, LimitWindowSeconds: &seconds, ResetAt: resetAt}},
+		ResetProbes: map[WindowKind]ResetProbeState{WindowFiveHour: {WindowKind: WindowFiveHour, WindowSeconds: fiveHourSeconds, ResetAt: resetAt, NextCheckAt: now, Status: ResetProbeStatusPending}},
+	})
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 1, AuthIDs: map[string]struct{}{"a": {}}})
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refreshDone := make(chan error, 1)
+	go func() { refreshDone <- refresher.RefreshOnce() }()
+	waitForStartedURL(t, host.startedByURL, codexResetProbeEndpoint)
+	replaceDone := replaceAdmissionAsync(store, CPAAdmissionState{Observed: true, Priority: 2, AuthIDs: map[string]struct{}{"b": {}}})
+	waitForAdmissionReplacementPending(t, store)
+	close(probeRelease)
+	<-replaceDone
+	if err := <-refreshDone; err != nil {
+		t.Fatal(err)
+	}
+	urls := strings.Join(host.requestedURLs(), "\n")
+	if strings.Count(urls, chatGPTQuotaEndpoint) != 1 {
+		t.Fatalf("stale refresh started post-probe quota request:\n%s", urls)
+	}
+}
+
+func TestAdmissionChangeDuringTokenRefreshPreventsSaveAuth(t *testing.T) {
+	now := time.Date(2026, 7, 10, 9, 0, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-a"})
+	tokenRelease := make(chan struct{})
+	host := &fakeHostClient{
+		authList:      []pluginapi.HostAuthFileEntry{{ID: "a", AuthIndex: "idx-a", Name: "a.json", Provider: "codex"}},
+		authJSON:      map[string]json.RawMessage{"idx-a": json.RawMessage(`{"access_token":"old","refresh_token":"refresh","id_token":"` + idToken + `","account_id":"acct-a","expired":"` + now.Add(-time.Hour).Format(time.RFC3339) + `"}`)},
+		responseByURL: map[string]pluginapi.HTTPResponse{codexTokenEndpoint: {StatusCode: http.StatusOK, Body: []byte(`{"access_token":"new","refresh_token":"new-refresh","id_token":"` + idToken + `","expires_in":3600}`)}},
+		startedByURL:  make(chan string, 4),
+		releaseByURL:  map[string]chan struct{}{codexTokenEndpoint: tokenRelease},
+		saveStarted:   make(chan struct{}, 1),
+	}
+	store := NewPluginState(DefaultConfig())
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 1, AuthIDs: map[string]struct{}{"a": {}}})
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refreshDone := make(chan error, 1)
+	go func() { refreshDone <- refresher.RefreshOnce() }()
+	waitForStartedURL(t, host.startedByURL, codexTokenEndpoint)
+	replaceDone := replaceAdmissionAsync(store, CPAAdmissionState{Observed: true, Priority: 2, AuthIDs: map[string]struct{}{"b": {}}})
+	waitForAdmissionReplacementPending(t, store)
+	close(tokenRelease)
+	<-replaceDone
+	if err := <-refreshDone; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-host.saveStarted:
+		t.Fatal("SaveAuth started after token refresh lost admission")
+	default:
+	}
+	if len(host.saved) != 0 {
+		t.Fatalf("saved auths = %#v, want none", host.saved)
+	}
+}
+
+func TestSaveAuthLeaseSerializesAdmissionReplacement(t *testing.T) {
+	now := time.Date(2026, 7, 10, 9, 0, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-a"})
+	host := &fakeHostClient{
+		authList:      []pluginapi.HostAuthFileEntry{{ID: "a", AuthIndex: "idx-a", Name: "a.json", Provider: "codex"}},
+		authJSON:      map[string]json.RawMessage{"idx-a": json.RawMessage(`{"access_token":"old","refresh_token":"refresh","id_token":"` + idToken + `","account_id":"acct-a","expired":"` + now.Add(-time.Hour).Format(time.RFC3339) + `"}`)},
+		responseByURL: map[string]pluginapi.HTTPResponse{codexTokenEndpoint: {StatusCode: http.StatusOK, Body: []byte(`{"access_token":"new","refresh_token":"new-refresh","id_token":"` + idToken + `","expires_in":3600}`)}},
+		saveStarted:   make(chan struct{}, 1),
+		releaseSave:   make(chan struct{}),
+	}
+	store := NewPluginState(DefaultConfig())
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 1, AuthIDs: map[string]struct{}{"a": {}}})
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refreshDone := make(chan error, 1)
+	go func() { refreshDone <- refresher.RefreshOnce() }()
+	<-host.saveStarted
+	replaceStarted := make(chan struct{})
+	replaceDone := make(chan struct{})
+	go func() {
+		close(replaceStarted)
+		store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 2, AuthIDs: map[string]struct{}{"b": {}}})
+		close(replaceDone)
+	}()
+	<-replaceStarted
+	waitForAdmissionReplacementPending(t, store)
+	select {
+	case <-replaceDone:
+		close(host.releaseSave)
+		<-refreshDone
+		t.Fatal("admission replacement completed while SaveAuth was blocked")
+	default:
+	}
+	close(host.releaseSave)
+	if err := <-refreshDone; err != nil {
+		t.Fatal(err)
+	}
+	<-replaceDone
 }
 
 func TestRefreshOneRejectsOutsideAdmission(t *testing.T) {

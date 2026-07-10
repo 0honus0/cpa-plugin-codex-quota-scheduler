@@ -191,9 +191,20 @@ func TestConcurrentSchedulerPicksCoalesceLatestAdmission(t *testing.T) {
 	}
 	request("a", 1)
 	<-host.doStarted
-	request("b", 2)
+	requestBDone := make(chan error, 1)
+	go func() {
+		raw, _ := json.Marshal(pluginapi.SchedulerPickRequest{Provider: "codex", Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "b", Provider: "codex", Priority: 2}}})
+		_, err := handleSchedulerPick(raw)
+		requestBDone <- err
+	}()
+	if !waitForCondition(t, time.Second, func() bool { return store.cpaAdmissionIntent.Load() > 0 }) {
+		t.Fatal("latest scheduler admission did not become pending")
+	}
 	close(host.releaseDo)
 	released = true
+	if err := <-requestBDone; err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case <-host.doStarted:
 	case <-time.After(time.Second):
