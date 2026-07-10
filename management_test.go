@@ -63,6 +63,7 @@ func TestManagementRegisterExposesStatusResourceAndRoutes(t *testing.T) {
 func TestManagementRoutesDispatchFullCPAPaths(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	store := NewPluginState(DefaultConfig())
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 5, AuthIDs: map[string]struct{}{"auth-1": {}}})
 	store.UpsertQuota(weeklyAccount("auth-1", 5, now.Add(24*time.Hour), false))
 
 	refreshes := 0
@@ -136,6 +137,28 @@ func TestManagementRoutesDispatchFullCPAPaths(t *testing.T) {
 	}
 	if refreshOne != "auth-1" {
 		t.Fatalf("refreshOne = %q, want auth-1", refreshOne)
+	}
+}
+
+func TestManagementRefreshAccountRejectsOutsideAdmission(t *testing.T) {
+	store := NewPluginState(DefaultConfig())
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 1, AuthIDs: map[string]struct{}{"high": {}}})
+
+	called := false
+	previousRefreshOneSoon := managementRefreshOneSoon
+	managementRefreshOneSoon = func(string) { called = true }
+	t.Cleanup(func() { managementRefreshOneSoon = previousRefreshOneSoon })
+
+	resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
+		Method: http.MethodPost,
+		Path:   "/plugins/codex-quota-scheduler/refresh/account",
+		Body:   []byte(`{"auth_id":"low"}`),
+	}, time.Now())
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusConflict, resp.Body)
+	}
+	if called {
+		t.Fatal("management refresh callback was called for excluded auth")
 	}
 }
 

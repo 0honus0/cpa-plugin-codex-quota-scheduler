@@ -70,17 +70,15 @@ func NewQuotaRefresher(host HostClient, state *PluginState, now func() time.Time
 }
 
 func (r *QuotaRefresher) RefreshOnce() error {
+	if !r.state.CPAAdmission().Observed {
+		return nil
+	}
 	auths, err := r.host.ListAuths()
 	if err != nil {
 		return fmt.Errorf("list auths: %w", err)
 	}
 	r.recordAuthScan(auths)
-	eligible := make([]pluginapi.HostAuthFileEntry, 0, len(auths))
-	for _, auth := range auths {
-		if isRefreshEligible(auth) {
-			eligible = append(eligible, auth)
-		}
-	}
+	eligible := filterAdmittedAuths(auths, r.state)
 	if len(eligible) == 0 {
 		return nil
 	}
@@ -90,6 +88,9 @@ func (r *QuotaRefresher) RefreshOnce() error {
 }
 
 func (r *QuotaRefresher) RefreshDueOnce() error {
+	if !r.state.CPAAdmission().Observed {
+		return nil
+	}
 	now := r.now()
 	if !r.state.RefreshActive(now) {
 		return nil
@@ -112,10 +113,7 @@ func (r *QuotaRefresher) RefreshDueOnce() error {
 	}
 	r.recordAuthScan(auths)
 	eligible := make([]pluginapi.HostAuthFileEntry, 0, len(auths))
-	for _, auth := range auths {
-		if !isRefreshEligible(auth) {
-			continue
-		}
+	for _, auth := range filterAdmittedAuths(auths, r.state) {
 		if len(dueAuthIDs) == 0 {
 			eligible = append(eligible, auth)
 			continue
@@ -133,11 +131,18 @@ func (r *QuotaRefresher) RefreshDueOnce() error {
 }
 
 func (r *QuotaRefresher) RefreshDueCandidatesOnce(req pluginapi.SchedulerPickRequest) error {
+	if admission, ok := HighestPriorityCodexAdmission(req); ok {
+		r.state.ReplaceCPAAdmission(admission)
+	}
+	admission := r.state.CPAAdmission()
+	if !admission.Observed {
+		return nil
+	}
 	now := r.now()
 	if !r.state.RefreshActive(now) {
 		return nil
 	}
-	candidateIDs := activePriorityCandidateIDs(req)
+	candidateIDs := admission.AuthIDs
 	if len(candidateIDs) == 0 {
 		return r.RefreshDueOnce()
 	}
@@ -158,10 +163,7 @@ func (r *QuotaRefresher) RefreshDueCandidatesOnce(req pluginapi.SchedulerPickReq
 	}
 	r.recordAuthScan(auths)
 	eligible := make([]pluginapi.HostAuthFileEntry, 0, len(candidateIDs))
-	for _, auth := range auths {
-		if !isRefreshEligible(auth) {
-			continue
-		}
+	for _, auth := range filterAdmittedAuths(auths, r.state) {
 		if _, candidate := candidateIDs[auth.ID]; !candidate {
 			continue
 		}
@@ -186,38 +188,13 @@ func (r *QuotaRefresher) RefreshDueCandidatesOnce(req pluginapi.SchedulerPickReq
 	return nil
 }
 
-func activePriorityCandidateIDs(req pluginapi.SchedulerPickRequest) map[string]struct{} {
-	maxPriority := 0
-	hasCandidate := false
-	for _, candidate := range req.Candidates {
-		if candidate.ID == "" || candidate.Provider != "codex" {
-			continue
-		}
-		if !hasCandidate || candidate.Priority > maxPriority {
-			maxPriority = candidate.Priority
-			hasCandidate = true
-		}
-	}
-	if !hasCandidate {
-		return nil
-	}
-	ids := make(map[string]struct{})
-	for _, candidate := range req.Candidates {
-		if candidate.ID == "" || candidate.Provider != "codex" || candidate.Priority != maxPriority {
-			continue
-		}
-		ids[candidate.ID] = struct{}{}
-	}
-	return ids
-}
-
 func (r *QuotaRefresher) recordAuthScan(auths []pluginapi.HostAuthFileEntry) {
 	if r.state == nil {
 		return
 	}
 	count := 0
 	for _, auth := range auths {
-		if isRefreshEligible(auth) {
+		if isRefreshEligible(auth) && r.state.IsAuthAdmitted(auth.ID) {
 			count++
 		}
 	}
@@ -274,6 +251,9 @@ func (r *QuotaRefresher) RefreshOneAuthID(authID string) error {
 	authID = strings.TrimSpace(authID)
 	if authID == "" {
 		return fmt.Errorf("auth_id is required")
+	}
+	if !r.state.IsAuthAdmitted(authID) {
+		return fmt.Errorf("auth %s is outside the active CPA priority tier", authID)
 	}
 	auths, err := r.host.ListAuths()
 	if err != nil {
@@ -500,7 +480,12 @@ func (r *QuotaRefresher) refreshDueSoon(refresh func() error) {
 }
 
 func (r *QuotaRefresher) refreshAuth(auth pluginapi.HostAuthFileEntry) {
+	priority, admitted := r.state.AdmittedCPAPriority(auth.ID)
+	if !admitted {
+		return
+	}
 	account := accountStateFromAuth(auth, r.now())
+	account.Priority = priority
 
 	authResp, err := r.host.GetAuth(auth.AuthIndex)
 	if err != nil {
@@ -884,6 +869,16 @@ func isRefreshEligible(auth pluginapi.HostAuthFileEntry) bool {
 		!auth.Disabled &&
 		!auth.Unavailable &&
 		auth.AuthIndex != ""
+}
+
+func filterAdmittedAuths(auths []pluginapi.HostAuthFileEntry, state *PluginState) []pluginapi.HostAuthFileEntry {
+	filtered := make([]pluginapi.HostAuthFileEntry, 0, len(auths))
+	for _, auth := range auths {
+		if isRefreshEligible(auth) && state.IsAuthAdmitted(auth.ID) {
+			filtered = append(filtered, auth)
+		}
+	}
+	return filtered
 }
 
 func redactWithCredentials(message string, credentials CodexCredentials) string {

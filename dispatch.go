@@ -86,6 +86,14 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 		}
 	}
 	now := time.Now()
+	if admission, ok := HighestPriorityCodexAdmission(req); ok {
+		globalState.ReplaceCPAAdmission(admission)
+		globalState.RecordLog("info", "scheduler.cpa_admission_updated", "CPA priority admission updated", map[string]any{
+			"cpa_priority":   admission.Priority,
+			"admitted_count": len(admission.AuthIDs),
+			"excluded_count": codexCandidateCount(req) - len(admission.AuthIDs),
+		}, now)
+	}
 	if requestIncludesCodex(req) {
 		globalState.RecordCodexActivity(now)
 		refreshGlobalRefresherDueSoon(req)

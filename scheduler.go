@@ -57,6 +57,17 @@ func HighestPriorityCodexAdmission(req pluginapi.SchedulerPickRequest) (CPAAdmis
 	return admission, true
 }
 
+func codexCandidateCount(req pluginapi.SchedulerPickRequest) int {
+	seen := make(map[string]struct{}, len(req.Candidates))
+	for _, candidate := range req.Candidates {
+		if candidate.ID == "" || candidate.Provider != "codex" {
+			continue
+		}
+		seen[candidate.ID] = struct{}{}
+	}
+	return len(seen)
+}
+
 func PickCodexAccount(req pluginapi.SchedulerPickRequest, snapshot StateSnapshot, now time.Time) PickDecision {
 	if !snapshot.Config.HandleEnabled {
 		return PickDecision{Reason: "handle_disabled"}

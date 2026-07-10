@@ -386,6 +386,11 @@ func handleRefreshAccountRequest(store *PluginState, req pluginapi.ManagementReq
 	if authID == "" {
 		return jsonManagementResponse(http.StatusBadRequest, map[string]string{"error": "auth_id is required"})
 	}
+	if !store.IsAuthAdmitted(authID) {
+		return jsonManagementResponse(http.StatusConflict, map[string]string{
+			"error": fmt.Sprintf("auth %s is outside the active CPA priority tier", authID),
+		})
+	}
 	triggerRefreshOneSoon(authID)
 	store.RecordLog("info", "ui.refresh_one_requested", "页面请求刷新单个账号额度", map[string]any{"auth_id": authID}, now)
 	return jsonManagementResponse(http.StatusAccepted, map[string]bool{"ok": true})

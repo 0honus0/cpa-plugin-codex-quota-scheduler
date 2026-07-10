@@ -179,6 +179,24 @@ func (f *fakeHostClient) activeHTTPCount() int {
 	return f.activeHTTP
 }
 
+func newAdmittedQuotaRefresherForTest(host *fakeHostClient, store *PluginState, now func() time.Time) *QuotaRefresher {
+	authIDs := make(map[string]struct{})
+	priority := 0
+	hasPriority := false
+	for _, auth := range host.authList {
+		if auth.ID == "" || !strings.EqualFold(auth.Provider, "codex") {
+			continue
+		}
+		authIDs[auth.ID] = struct{}{}
+		if !hasPriority || auth.Priority > priority {
+			priority = auth.Priority
+			hasPriority = true
+		}
+	}
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: priority, AuthIDs: authIDs})
+	return NewQuotaRefresher(host, store, now)
+}
+
 func accountByAuthID(t *testing.T, snapshot StateSnapshot, authID string) AccountState {
 	t.Helper()
 	for _, account := range snapshot.Accounts {
@@ -241,7 +259,7 @@ func TestRefreshDueRunsResetProbeForLazyWindow(t *testing.T) {
 		LastSuccessAt: resetAt.Add(-time.Hour),
 	})
 
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 	if err := refresher.RefreshDueOnce(); err != nil {
 		t.Fatalf("RefreshDueOnce returned error: %v", err)
 	}
@@ -313,7 +331,7 @@ func TestRefreshDueFailedResetProbeBacksOff(t *testing.T) {
 		LastSuccessAt: now.Add(-time.Hour),
 	})
 
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 	if err := refresher.RefreshDueOnce(); err != nil {
 		t.Fatalf("RefreshDueOnce returned error: %v", err)
 	}
@@ -387,7 +405,7 @@ func TestRefreshDueDoesNotProbeActiveWindow(t *testing.T) {
 		LastSuccessAt: resetAt.Add(-time.Hour),
 	})
 
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 	if err := refresher.RefreshDueOnce(); err != nil {
 		t.Fatalf("RefreshDueOnce returned error: %v", err)
 	}
@@ -432,7 +450,7 @@ func TestRefreshDueOnceSkipsFreshAccountsAndRefreshesOnlyDueAccounts(t *testing.
 		LastSuccessAt: now.Add(-10 * time.Minute),
 	})
 
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 	if err := refresher.RefreshDueOnce(); err != nil {
 		t.Fatalf("RefreshDueOnce returned error: %v", err)
 	}
@@ -465,7 +483,7 @@ func TestRefreshDueOnceSkipsAllFreshKnownAccounts(t *testing.T) {
 		authList: []pluginapi.HostAuthFileEntry{{ID: "fresh", AuthIndex: "idx-fresh", Provider: "codex"}},
 	}
 
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 	if err := refresher.RefreshDueOnce(); err != nil {
 		t.Fatalf("RefreshDueOnce returned error: %v", err)
 	}
@@ -500,7 +518,7 @@ func TestRefreshDueOnceRefreshesAccountPastQuotaRefreshInterval(t *testing.T) {
 		LastSuccessAt: now.Add(-31 * time.Minute),
 	})
 
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 	if err := refresher.RefreshDueOnce(); err != nil {
 		t.Fatalf("RefreshDueOnce returned error: %v", err)
 	}
@@ -530,7 +548,7 @@ func TestRefreshDueOnceDiscoversAuthsWhenStateIsEmpty(t *testing.T) {
 	store := NewPluginState(DefaultConfig())
 	store.RecordCodexActivity(now)
 
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 	if err := refresher.RefreshDueOnce(); err != nil {
 		t.Fatalf("RefreshDueOnce returned error: %v", err)
 	}
@@ -564,7 +582,7 @@ func TestRefreshDueCandidatesOnceUsesActivePriorityCandidates(t *testing.T) {
 	store.RecordCodexActivity(now)
 	store.UpsertQuota(AccountState{AuthID: "high", AuthIndex: "idx-high", Provider: "codex", LastSuccessAt: now.Add(-6 * time.Hour), Priority: 10})
 	store.UpsertQuota(AccountState{AuthID: "low", AuthIndex: "idx-low", Provider: "codex", LastSuccessAt: now.Add(-6 * time.Hour), Priority: 1})
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 
 	req := pluginapi.SchedulerPickRequest{Provider: "codex", Candidates: []pluginapi.SchedulerAuthCandidate{
 		{ID: "high", Provider: "codex", Priority: 10},
@@ -578,9 +596,10 @@ func TestRefreshDueCandidatesOnceUsesActivePriorityCandidates(t *testing.T) {
 	if high.LastSuccessAt.IsZero() || !high.LastSuccessAt.Equal(now) {
 		t.Fatalf("high LastSuccessAt = %s, want refreshed now", high.LastSuccessAt)
 	}
-	low := accountByAuthID(t, store.Snapshot(now), "low")
-	if !low.LastSuccessAt.Equal(now.Add(-6 * time.Hour)) {
-		t.Fatalf("low LastSuccessAt = %s, want unchanged", low.LastSuccessAt)
+	for _, account := range store.Snapshot(now).Accounts {
+		if account.AuthID == "low" {
+			t.Fatalf("low-priority account remained in state: %#v", account)
+		}
 	}
 }
 
@@ -592,7 +611,7 @@ func TestRefreshDueCandidatesOnceSkipsFreshKnownCandidates(t *testing.T) {
 	host := &fakeHostClient{
 		authList: []pluginapi.HostAuthFileEntry{{ID: "high", AuthIndex: "idx-high", Provider: "codex"}},
 	}
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 
 	req := pluginapi.SchedulerPickRequest{Provider: "codex", Candidates: []pluginapi.SchedulerAuthCandidate{
 		{ID: "high", Provider: "codex", Priority: 10},
@@ -622,7 +641,7 @@ func TestRefreshDueOnceDoesNothingOutsideActiveWindow(t *testing.T) {
 		authList: []pluginapi.HostAuthFileEntry{{ID: "stale", AuthIndex: "idx-stale", Provider: "codex"}},
 	}
 
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 	if err := refresher.RefreshDueOnce(); err != nil {
 		t.Fatalf("RefreshDueOnce returned error: %v", err)
 	}
@@ -639,7 +658,7 @@ func TestRefreshOnceRecordsCodexAuthScanCount(t *testing.T) {
 			{ID: "openai-1", AuthIndex: "idx-openai", Provider: "openai"},
 		},
 	}
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 
 	if err := refresher.RefreshOnce(); err != nil {
 		t.Fatalf("RefreshOnce returned error: %v", err)
@@ -647,6 +666,26 @@ func TestRefreshOnceRecordsCodexAuthScanCount(t *testing.T) {
 	snapshot := store.Snapshot(now)
 	if snapshot.CodexAuthCount != 0 || !snapshot.LastAuthScanAt.Equal(now) {
 		t.Fatalf("auth scan = count %d at %s, want 0 at %s", snapshot.CodexAuthCount, snapshot.LastAuthScanAt, now)
+	}
+}
+
+func TestRefreshOnceDoesNothingBeforeAdmission(t *testing.T) {
+	host := &fakeHostClient{authList: []pluginapi.HostAuthFileEntry{{ID: "auth-1", Provider: "codex"}}}
+	refresher := NewQuotaRefresher(host, NewPluginState(DefaultConfig()), time.Now)
+	if err := refresher.RefreshOnce(); err != nil {
+		t.Fatal(err)
+	}
+	if host.listCallCount() != 0 {
+		t.Fatalf("ListAuths calls = %d", host.listCallCount())
+	}
+}
+
+func TestRefreshOneRejectsOutsideAdmission(t *testing.T) {
+	store := NewPluginState(DefaultConfig())
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 1, AuthIDs: map[string]struct{}{"high": {}}})
+	err := NewQuotaRefresher(&fakeHostClient{}, store, time.Now).RefreshOneAuthID("low")
+	if err == nil || !strings.Contains(err.Error(), "outside the active CPA priority tier") {
+		t.Fatalf("error = %v", err)
 	}
 }
 
@@ -687,7 +726,7 @@ func TestStartWakesAtRetryDueBeforeRefreshInterval(t *testing.T) {
 		},
 		httpBody: []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
 	}
-	refresher := NewQuotaRefresher(host, store, time.Now)
+	refresher := newAdmittedQuotaRefresherForTest(host, store, time.Now)
 
 	refresher.Start()
 	defer refresher.Stop()
@@ -716,7 +755,7 @@ func TestStartRecomputesDelayAfterAsyncRefreshSchedulesRetry(t *testing.T) {
 		httpStatus: http.StatusForbidden,
 		httpBody:   []byte(`{"error":"temporary"}`),
 	}
-	refresher := NewQuotaRefresher(host, store, time.Now)
+	refresher := newAdmittedQuotaRefresherForTest(host, store, time.Now)
 	refresher.Start()
 	defer refresher.Stop()
 
@@ -744,6 +783,7 @@ func TestStartDoesNotBusyLoopWhenDueRefreshMakesNoProgress(t *testing.T) {
 	store.UpsertQuota(account)
 
 	host := &fakeHostClient{}
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 5, AuthIDs: map[string]struct{}{"auth-1": {}}})
 	refresher := NewQuotaRefresher(host, store, time.Now)
 	refresher.Start()
 	defer refresher.Stop()
@@ -782,7 +822,7 @@ func TestRefreshDueSuccessCompletesCircuitProbeWithoutRequeue(t *testing.T) {
 		},
 		httpBody: []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
 	}
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 
 	if err := refresher.RefreshDueOnce(); err != nil {
 		t.Fatalf("RefreshDueOnce returned error: %v", err)
@@ -813,7 +853,7 @@ func TestRefreshOnceLoadsCodexAuthAndQuota(t *testing.T) {
 		httpBody: []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
 	}
 	store := NewPluginState(DefaultConfig())
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 	if err := refresher.RefreshOnce(); err != nil {
 		t.Fatalf("RefreshOnce returned error: %v", err)
 	}
@@ -867,7 +907,7 @@ func TestRefreshOnceRefreshesExpiredAccessTokenAndSavesAuth(t *testing.T) {
 		},
 	}
 	store := NewPluginState(DefaultConfig())
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 
 	if err := refresher.RefreshOnce(); err != nil {
 		t.Fatalf("RefreshOnce returned error: %v", err)
@@ -900,7 +940,7 @@ func TestRefreshTokenFailure401MarksAuthFailure(t *testing.T) {
 		},
 	}
 	store := NewPluginState(DefaultConfig())
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 
 	if err := refresher.RefreshOnce(); err != nil {
 		t.Fatalf("RefreshOnce returned error: %v", err)
@@ -927,7 +967,7 @@ func TestRefreshTokenFailure400InvalidGrantMarksAuthFailure(t *testing.T) {
 		},
 	}
 	store := NewPluginState(DefaultConfig())
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 
 	if err := refresher.RefreshOnce(); err != nil {
 		t.Fatalf("RefreshOnce returned error: %v", err)
@@ -954,7 +994,7 @@ func TestRefreshTokenFailure403SchedulesRetry(t *testing.T) {
 		},
 	}
 	store := NewPluginState(DefaultConfig())
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 
 	if err := refresher.RefreshOnce(); err != nil {
 		t.Fatalf("RefreshOnce returned error: %v", err)
@@ -992,7 +1032,7 @@ func TestRefreshOnceLoadsResetCreditsFromDedicatedEndpoint(t *testing.T) {
 		},
 	}
 	store := NewPluginState(DefaultConfig())
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 
 	if err := refresher.RefreshOnce(); err != nil {
 		t.Fatalf("RefreshOnce returned error: %v", err)
@@ -1033,6 +1073,7 @@ func TestRefreshOneAuthIDOnlyRefreshesRequestedAccount(t *testing.T) {
 		httpBody: []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
 	}
 	store := NewPluginState(DefaultConfig())
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 0, AuthIDs: map[string]struct{}{"auth-2": {}}})
 	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
 
 	if err := refresher.RefreshOneAuthID("auth-2"); err != nil {
@@ -1061,7 +1102,7 @@ func TestRefreshOnceSkipsIneligibleAuthEntries(t *testing.T) {
 		authJSON: map[string]json.RawMessage{},
 	}
 	store := NewPluginState(DefaultConfig())
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 	if err := refresher.RefreshOnce(); err != nil {
 		t.Fatalf("RefreshOnce returned error: %v", err)
 	}
@@ -1081,7 +1122,7 @@ func TestRefreshOnceRecordsRedactedErrorWithoutTokenLeak(t *testing.T) {
 		},
 	}
 	store := NewPluginState(DefaultConfig())
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 	if err := refresher.RefreshOnce(); err != nil {
 		t.Fatalf("RefreshOnce returned error: %v", err)
 	}
@@ -1110,7 +1151,7 @@ func TestRefreshOnceMissingAccessTokenRecordsErrorWithoutQuotaSuccess(t *testing
 		httpBody: []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
 	}
 	store := NewPluginState(DefaultConfig())
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 	if err := refresher.RefreshOnce(); err != nil {
 		t.Fatalf("RefreshOnce returned error: %v", err)
 	}
@@ -1146,7 +1187,7 @@ func TestRefreshOnceMissingChatGPTAccountIDRecordsErrorWithoutQuotaSuccess(t *te
 		httpBody: []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
 	}
 	store := NewPluginState(DefaultConfig())
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 	if err := refresher.RefreshOnce(); err != nil {
 		t.Fatalf("RefreshOnce returned error: %v", err)
 	}
@@ -1185,7 +1226,7 @@ func TestRefreshOnceHTTPNon2xxRecordsRedactedErrorWithoutQuotaSuccess(t *testing
 		httpBody:   []byte(`upstream rejected access-1`),
 	}
 	store := NewPluginState(DefaultConfig())
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 	if err := refresher.RefreshOnce(); err != nil {
 		t.Fatalf("RefreshOnce returned error: %v", err)
 	}
@@ -1220,7 +1261,7 @@ func TestRefreshFailure401MarksAuthFailureWithoutRetry(t *testing.T) {
 		httpBody:   []byte(`{"error":"expired"}`),
 	}
 	store := NewPluginState(DefaultConfig())
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 	if err := refresher.RefreshOnce(); err != nil {
 		t.Fatalf("RefreshOnce returned error: %v", err)
 	}
@@ -1251,7 +1292,7 @@ func TestRefreshFailure403SchedulesTransientRetry(t *testing.T) {
 		httpBody:   []byte(`{"error":"forbidden"}`),
 	}
 	store := NewPluginState(DefaultConfig())
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 	if err := refresher.RefreshOnce(); err != nil {
 		t.Fatalf("RefreshOnce returned error: %v", err)
 	}
@@ -1283,7 +1324,7 @@ func TestRefreshOnceFailurePreservesPriorSuccessfulQuota(t *testing.T) {
 		httpBody: []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
 	}
 	store := NewPluginState(DefaultConfig())
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return currentNow })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return currentNow })
 	if err := refresher.RefreshOnce(); err != nil {
 		t.Fatalf("first RefreshOnce returned error: %v", err)
 	}
@@ -1341,7 +1382,7 @@ func TestRefreshOnceNon2xxStoresBoundedSanitizedSummary(t *testing.T) {
 		}`),
 	}
 	store := NewPluginState(DefaultConfig())
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 	if err := refresher.RefreshOnce(); err != nil {
 		t.Fatalf("RefreshOnce returned error: %v", err)
 	}
@@ -1396,7 +1437,7 @@ func TestRefreshOnceContinuesAfterOneAccountFails(t *testing.T) {
 		},
 	}
 	store := NewPluginState(DefaultConfig())
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 	if err := refresher.RefreshOnce(); err != nil {
 		t.Fatalf("RefreshOnce returned error: %v", err)
 	}
@@ -1456,7 +1497,7 @@ func TestRefreshOnceHonorsMaxRefreshConcurrency(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MaxRefreshConcurrency = 2
 	store := NewPluginState(cfg)
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 
 	done := make(chan error, 1)
 	go func() {
@@ -1516,7 +1557,7 @@ func TestRefreshSoonDoesNotOverlapRefreshes(t *testing.T) {
 		httpStatus: http.StatusOK,
 	}
 	store := NewPluginState(DefaultConfig())
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 
 	refresher.RefreshSoon()
 	select {
@@ -1556,6 +1597,7 @@ func TestRefreshOneSoonDoesNotOverlapRefreshes(t *testing.T) {
 		httpStatus: http.StatusOK,
 	}
 	store := NewPluginState(DefaultConfig())
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 0, AuthIDs: map[string]struct{}{"auth-1": {}}})
 	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
 
 	refresher.RefreshOneSoon("auth-1")
@@ -1603,7 +1645,7 @@ func TestStopWaitsForActiveRefreshSoon(t *testing.T) {
 		releaseDo: make(chan struct{}),
 	}
 	store := NewPluginState(DefaultConfig())
-	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return now })
 
 	refresher.RefreshSoon()
 	select {

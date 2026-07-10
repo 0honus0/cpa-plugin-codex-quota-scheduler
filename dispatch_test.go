@@ -85,8 +85,25 @@ func TestPluginRegisterRefreshesOnStartupWhenConfigured(t *testing.T) {
 		t.Fatalf("plugin.register returned error: %v", err)
 	}
 
-	if refreshed := waitForCondition(t, time.Second, func() bool { return host.listCallCount() > 0 }); !refreshed {
-		t.Fatal("ListAuths was not called, want startup refresh")
+	if refreshed := waitForCondition(t, 50*time.Millisecond, func() bool { return host.listCallCount() > 0 }); refreshed {
+		t.Fatalf("ListAuths calls = %d, want no scan before scheduler admission", host.listCallCount())
+	}
+}
+
+func TestSchedulerPickReplacesAdmissionBeforeRefresh(t *testing.T) {
+	store := NewPluginState(DefaultConfig())
+	refresher := NewQuotaRefresher(&fakeHostClient{}, store, time.Now)
+	withGlobalRefresherForTest(t, store, refresher)
+	raw, _ := json.Marshal(pluginapi.SchedulerPickRequest{Provider: "codex", Candidates: []pluginapi.SchedulerAuthCandidate{
+		{ID: "high", Provider: "codex", Priority: 1},
+		{ID: "low", Provider: "codex", Priority: 0},
+	}})
+	if _, err := handleSchedulerPick(raw); err != nil {
+		t.Fatal(err)
+	}
+	admission := store.CPAAdmission()
+	if admission.Priority != 1 || len(admission.AuthIDs) != 1 {
+		t.Fatalf("admission = %#v", admission)
 	}
 }
 
@@ -176,9 +193,10 @@ func TestSchedulerPickRefreshesOnlyActivePriorityCandidates(t *testing.T) {
 	}); !refreshed {
 		t.Fatal("high priority account was not refreshed")
 	}
-	low := accountByAuthID(t, store.Snapshot(time.Now()), "low")
-	if !low.LastSuccessAt.Equal(lowBefore) {
-		t.Fatalf("low LastSuccessAt = %s, want unchanged %s", low.LastSuccessAt, lowBefore)
+	for _, account := range store.Snapshot(time.Now()).Accounts {
+		if account.AuthID == "low" {
+			t.Fatalf("low-priority account remained in state: %#v", account)
+		}
 	}
 }
 
