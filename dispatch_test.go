@@ -77,7 +77,17 @@ func TestPluginRegisterStartsRefresherWithoutStartupRefreshByDefault(t *testing.
 
 func TestPluginRegisterRefreshesOnStartupWhenConfigured(t *testing.T) {
 	store := NewPluginState(DefaultConfig())
-	host := &fakeHostClient{}
+	highToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-high"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{
+			{ID: "high", AuthIndex: "idx-high", Provider: "codex"},
+			{ID: "low", AuthIndex: "idx-low", Provider: "codex"},
+		},
+		authJSON:  map[string]json.RawMessage{"idx-high": json.RawMessage(`{"access_token":"access-high","id_token":"` + highToken + `"}`)},
+		httpBody:  []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+		doStarted: make(chan struct{}, 1),
+		releaseDo: make(chan struct{}),
+	}
 	refresher := NewQuotaRefresher(host, store, time.Now)
 	withGlobalRefresherForTest(t, store, refresher)
 
@@ -85,8 +95,23 @@ func TestPluginRegisterRefreshesOnStartupWhenConfigured(t *testing.T) {
 		t.Fatalf("plugin.register returned error: %v", err)
 	}
 
-	if refreshed := waitForCondition(t, 50*time.Millisecond, func() bool { return host.listCallCount() > 0 }); refreshed {
+	refresher.wg.Wait()
+	if host.listCallCount() != 0 {
 		t.Fatalf("ListAuths calls = %d, want no scan before scheduler admission", host.listCallCount())
+	}
+	raw, _ := json.Marshal(pluginapi.SchedulerPickRequest{Provider: "codex", Candidates: []pluginapi.SchedulerAuthCandidate{
+		{ID: "high", Provider: "codex", Priority: 10},
+		{ID: "low", Provider: "codex", Priority: 1},
+	}})
+	if _, err := handleSchedulerPick(raw); err != nil {
+		t.Fatal(err)
+	}
+	<-host.doStarted
+	close(host.releaseDo)
+	refresher.wg.Wait()
+	snapshot := store.Snapshot(time.Now())
+	if len(snapshot.Accounts) != 1 || snapshot.Accounts[0].AuthID != "high" {
+		t.Fatalf("accounts = %#v, want only admitted high account", snapshot.Accounts)
 	}
 }
 
@@ -104,6 +129,84 @@ func TestSchedulerPickReplacesAdmissionBeforeRefresh(t *testing.T) {
 	admission := store.CPAAdmission()
 	if admission.Priority != 1 || len(admission.AuthIDs) != 1 {
 		t.Fatalf("admission = %#v", admission)
+	}
+}
+
+func TestSchedulerAdmissionLogDeduplicatesCandidateCounts(t *testing.T) {
+	store := NewPluginState(DefaultConfig())
+	withGlobalRefresherForTest(t, store, nil)
+	raw, _ := json.Marshal(pluginapi.SchedulerPickRequest{Provider: "codex", Candidates: []pluginapi.SchedulerAuthCandidate{
+		{ID: "high", Provider: "codex", Priority: 10},
+		{ID: "high", Provider: "codex", Priority: 10},
+		{ID: "low", Provider: "codex", Priority: 1},
+		{ID: "other", Provider: "openai", Priority: 99},
+	}})
+	if _, err := handleSchedulerPick(raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range store.Snapshot(time.Now()).Logs {
+		if entry.Event != "scheduler.cpa_admission_updated" {
+			continue
+		}
+		if entry.Fields["admitted_count"] != 1 || entry.Fields["excluded_count"] != 1 {
+			t.Fatalf("admission log fields = %#v, want deduplicated counts 1/1", entry.Fields)
+		}
+		return
+	}
+	t.Fatal("scheduler.cpa_admission_updated log not found")
+}
+
+func TestConcurrentSchedulerPicksCoalesceLatestAdmission(t *testing.T) {
+	now := time.Date(2026, 7, 10, 9, 0, 0, 0, time.UTC)
+	aToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-a"})
+	bToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-b"})
+	store := NewPluginState(DefaultConfig())
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{
+			{ID: "a", AuthIndex: "idx-a", Provider: "codex"},
+			{ID: "b", AuthIndex: "idx-b", Provider: "codex"},
+		},
+		authJSON: map[string]json.RawMessage{
+			"idx-a": json.RawMessage(`{"access_token":"access-a","id_token":"` + aToken + `"}`),
+			"idx-b": json.RawMessage(`{"access_token":"access-b","id_token":"` + bToken + `"}`),
+		},
+		httpBody:  []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+		doStarted: make(chan struct{}, 2),
+		releaseDo: make(chan struct{}),
+	}
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	withGlobalRefresherForTest(t, store, refresher)
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(host.releaseDo)
+		}
+	})
+
+	request := func(authID string, priority int) {
+		raw, _ := json.Marshal(pluginapi.SchedulerPickRequest{Provider: "codex", Candidates: []pluginapi.SchedulerAuthCandidate{{ID: authID, Provider: "codex", Priority: priority}}})
+		if _, err := handleSchedulerPick(raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request("a", 1)
+	<-host.doStarted
+	request("b", 2)
+	close(host.releaseDo)
+	released = true
+	select {
+	case <-host.doStarted:
+	case <-time.After(time.Second):
+		t.Fatal("latest scheduler admission was not refreshed after in-flight refresh completed")
+	}
+	refresher.wg.Wait()
+	admission := store.CPAAdmission()
+	if admission.Priority != 2 || !store.IsAuthAdmitted("b") || store.IsAuthAdmitted("a") {
+		t.Fatalf("admission = %#v, want latest b priority 2", admission)
+	}
+	snapshot := store.Snapshot(now)
+	if len(snapshot.Accounts) != 1 || snapshot.Accounts[0].AuthID != "b" {
+		t.Fatalf("accounts = %#v, want only latest admitted b", snapshot.Accounts)
 	}
 }
 

@@ -35,6 +35,42 @@ func TestReplaceCPAAdmissionReplacesOldTier(t *testing.T) {
 	}
 }
 
+func TestCPAAdmissionVersionChangesOnlyWhenAdmissionChanges(t *testing.T) {
+	store := NewPluginState(DefaultConfig())
+	first := CPAAdmissionState{Observed: true, Priority: 1, AuthIDs: map[string]struct{}{"a": {}}}
+	version1 := store.ReplaceCPAAdmission(first)
+	if version1 == 0 {
+		t.Fatal("first admission version is zero")
+	}
+	if same := store.ReplaceCPAAdmission(first); same != version1 {
+		t.Fatalf("same admission version = %d, want %d", same, version1)
+	}
+	version2 := store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 2, AuthIDs: map[string]struct{}{"b": {}}})
+	if version2 <= version1 {
+		t.Fatalf("changed admission version = %d, want greater than %d", version2, version1)
+	}
+}
+
+func TestConditionalRefreshMutationsRejectStaleAdmissionVersion(t *testing.T) {
+	now := time.Date(2026, 7, 10, 9, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	version := store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 1, AuthIDs: map[string]struct{}{"a": {}}})
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 2, AuthIDs: map[string]struct{}{"b": {}}})
+	account := AccountState{AuthID: "a", AuthIndex: "idx-a", Provider: "codex", LastSuccessAt: now}
+	if store.ApplyQuotaRefreshSuccessIfAdmissionCurrent(account, version, now) {
+		t.Fatal("stale success mutation was accepted")
+	}
+	if store.ApplyQuotaRefreshFailureIfAdmissionCurrent(account, version, RefreshFailureTransient, "failed", now) {
+		t.Fatal("stale failure mutation was accepted")
+	}
+	if store.RecordLogIfAdmissionCurrent("a", version, "warn", "quota.refresh_failed", "failed", nil, now) {
+		t.Fatal("stale log mutation was accepted")
+	}
+	if snapshot := store.Snapshot(now); len(snapshot.Accounts) != 0 || len(snapshot.Logs) != 0 {
+		t.Fatalf("snapshot = %#v, want no stale result mutations", snapshot)
+	}
+}
+
 func TestPluginStateUpsertsAndSnapshotsAccounts(t *testing.T) {
 	store := NewPluginState(DefaultConfig())
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)

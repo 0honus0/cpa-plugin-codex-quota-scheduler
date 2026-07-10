@@ -24,6 +24,8 @@ type fakeHostClient struct {
 	httpStatus            int
 	doStarted             chan struct{}
 	releaseDo             chan struct{}
+	listStarted           chan struct{}
+	releaseList           chan struct{}
 
 	mu           sync.Mutex
 	listCalls    int
@@ -38,6 +40,15 @@ func (f *fakeHostClient) ListAuths() ([]pluginapi.HostAuthFileEntry, error) {
 	f.mu.Lock()
 	f.listCalls++
 	f.mu.Unlock()
+	if f.listStarted != nil {
+		select {
+		case f.listStarted <- struct{}{}:
+		default:
+		}
+	}
+	if f.releaseList != nil {
+		<-f.releaseList
+	}
 	return f.authList, nil
 }
 
@@ -677,6 +688,221 @@ func TestRefreshOnceDoesNothingBeforeAdmission(t *testing.T) {
 	}
 	if host.listCallCount() != 0 {
 		t.Fatalf("ListAuths calls = %d", host.listCallCount())
+	}
+}
+
+func TestRefreshOnceFiltersMixedTierAndCountsOnlyAdmitted(t *testing.T) {
+	now := time.Date(2026, 7, 10, 9, 0, 0, 0, time.UTC)
+	highToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-high"})
+	lowToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-low"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{
+			{ID: "high", AuthIndex: "idx-high", Provider: "codex"},
+			{ID: "low", AuthIndex: "idx-low", Provider: "codex"},
+		},
+		authJSON: map[string]json.RawMessage{
+			"idx-high": json.RawMessage(`{"access_token":"access-high","id_token":"` + highToken + `"}`),
+			"idx-low":  json.RawMessage(`{"access_token":"access-low","id_token":"` + lowToken + `"}`),
+		},
+		httpBody: []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+	}
+	store := NewPluginState(DefaultConfig())
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 9, AuthIDs: map[string]struct{}{"high": {}}})
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+
+	if err := refresher.RefreshOnce(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := store.Snapshot(now)
+	if snapshot.CodexAuthCount != 1 {
+		t.Fatalf("CodexAuthCount = %d, want 1", snapshot.CodexAuthCount)
+	}
+	if len(snapshot.Accounts) != 1 || snapshot.Accounts[0].AuthID != "high" || snapshot.Accounts[0].Priority != 9 {
+		t.Fatalf("accounts = %#v, want admitted high at CPA priority 9", snapshot.Accounts)
+	}
+}
+
+func TestRefreshOnceDoesNotCrossAdmissionGenerationDuringList(t *testing.T) {
+	now := time.Date(2026, 7, 10, 9, 0, 0, 0, time.UTC)
+	bToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-b"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{
+			{ID: "a", AuthIndex: "idx-a", Provider: "codex"},
+			{ID: "b", AuthIndex: "idx-b", Provider: "codex"},
+		},
+		authJSON:    map[string]json.RawMessage{"idx-b": json.RawMessage(`{"access_token":"access-b","id_token":"` + bToken + `"}`)},
+		httpBody:    []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+		listStarted: make(chan struct{}, 1),
+		releaseList: make(chan struct{}),
+	}
+	store := NewPluginState(DefaultConfig())
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 1, AuthIDs: map[string]struct{}{"a": {}}})
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	done := make(chan error, 1)
+	go func() { done <- refresher.RefreshOnce() }()
+	<-host.listStarted
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 2, AuthIDs: map[string]struct{}{"b": {}}})
+	close(host.releaseList)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got := host.httpCallCount(); got != 0 {
+		t.Fatalf("HTTP calls = %d, want 0 after admission generation changed", got)
+	}
+	snapshot := store.Snapshot(now)
+	if !snapshot.LastAuthScanAt.IsZero() {
+		t.Fatalf("LastAuthScanAt = %s, want no stale scan mutation", snapshot.LastAuthScanAt)
+	}
+}
+
+func TestRefreshDueOnceDoesNotCrossAdmissionGenerationDuringList(t *testing.T) {
+	now := time.Date(2026, 7, 10, 9, 0, 0, 0, time.UTC)
+	bToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-b"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{
+			{ID: "a", AuthIndex: "idx-a", Provider: "codex"},
+			{ID: "b", AuthIndex: "idx-b", Provider: "codex"},
+		},
+		authJSON:    map[string]json.RawMessage{"idx-b": json.RawMessage(`{"access_token":"access-b","id_token":"` + bToken + `"}`)},
+		httpBody:    []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+		listStarted: make(chan struct{}, 1),
+		releaseList: make(chan struct{}),
+	}
+	store := NewPluginState(DefaultConfig())
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 1, AuthIDs: map[string]struct{}{"a": {}}})
+	store.RecordCodexActivity(now)
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	done := make(chan error, 1)
+	go func() { done <- refresher.RefreshDueOnce() }()
+	<-host.listStarted
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 2, AuthIDs: map[string]struct{}{"b": {}}})
+	close(host.releaseList)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got := host.httpCallCount(); got != 0 {
+		t.Fatalf("HTTP calls = %d, want 0 after admission generation changed", got)
+	}
+}
+
+func TestRefreshDueOnceFiltersMixedTier(t *testing.T) {
+	now := time.Date(2026, 7, 10, 9, 0, 0, 0, time.UTC)
+	highToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-high"})
+	lowToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-low"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{
+			{ID: "high", AuthIndex: "idx-high", Provider: "codex"},
+			{ID: "low", AuthIndex: "idx-low", Provider: "codex"},
+		},
+		authJSON: map[string]json.RawMessage{
+			"idx-high": json.RawMessage(`{"access_token":"access-high","id_token":"` + highToken + `"}`),
+			"idx-low":  json.RawMessage(`{"access_token":"access-low","id_token":"` + lowToken + `"}`),
+		},
+		httpBody: []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+	}
+	store := NewPluginState(DefaultConfig())
+	store.RecordCodexActivity(now)
+	store.UpsertQuota(AccountState{AuthID: "high", AuthIndex: "idx-high", Provider: "codex", LastSuccessAt: now.Add(-6 * time.Hour)})
+	store.UpsertQuota(AccountState{AuthID: "low", AuthIndex: "idx-low", Provider: "codex", LastSuccessAt: now.Add(-6 * time.Hour)})
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 7, AuthIDs: map[string]struct{}{"high": {}}})
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+
+	if err := refresher.RefreshDueOnce(); err != nil {
+		t.Fatal(err)
+	}
+	if got := host.httpCallCount(); got != 2 {
+		t.Fatalf("HTTP calls = %d, want quota/reset calls for admitted high only", got)
+	}
+	snapshot := store.Snapshot(now)
+	if len(snapshot.Accounts) != 1 || snapshot.Accounts[0].AuthID != "high" || snapshot.Accounts[0].Priority != 7 {
+		t.Fatalf("accounts = %#v, want only high at CPA priority 7", snapshot.Accounts)
+	}
+}
+
+func TestRefreshAuthDirectlyRejectsExcludedAuth(t *testing.T) {
+	now := time.Date(2026, 7, 10, 9, 0, 0, 0, time.UTC)
+	lowToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-low"})
+	auth := pluginapi.HostAuthFileEntry{ID: "low", AuthIndex: "idx-low", Provider: "codex"}
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{auth},
+		authJSON: map[string]json.RawMessage{"idx-low": json.RawMessage(`{"access_token":"access-low","id_token":"` + lowToken + `"}`)},
+		httpBody: []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+	}
+	store := NewPluginState(DefaultConfig())
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 9, AuthIDs: map[string]struct{}{"high": {}}})
+	NewQuotaRefresher(host, store, func() time.Time { return now }).refreshAuth(auth)
+
+	if got := host.httpCallCount(); got != 0 {
+		t.Fatalf("HTTP calls = %d, want 0 for direct excluded refresh", got)
+	}
+	if accounts := store.Snapshot(now).Accounts; len(accounts) != 0 {
+		t.Fatalf("accounts = %#v, want no excluded account", accounts)
+	}
+}
+
+func TestRefreshAuthDiscardsInFlightSuccessAfterPriorityGenerationChange(t *testing.T) {
+	now := time.Date(2026, 7, 10, 9, 0, 0, 0, time.UTC)
+	token := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-a"})
+	host := &fakeHostClient{
+		authList:  []pluginapi.HostAuthFileEntry{{ID: "a", AuthIndex: "idx-a", Provider: "codex", Priority: 1}},
+		authJSON:  map[string]json.RawMessage{"idx-a": json.RawMessage(`{"access_token":"access-a","id_token":"` + token + `"}`)},
+		httpBody:  []byte(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+		doStarted: make(chan struct{}, 1),
+		releaseDo: make(chan struct{}),
+	}
+	store := NewPluginState(DefaultConfig())
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 1, AuthIDs: map[string]struct{}{"a": {}}})
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	done := make(chan error, 1)
+	go func() { done <- refresher.RefreshOnce() }()
+	<-host.doStarted
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 9, AuthIDs: map[string]struct{}{"a": {}}})
+	close(host.releaseDo)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if accounts := store.Snapshot(now).Accounts; len(accounts) != 0 {
+		t.Fatalf("stale generation committed accounts: %#v", accounts)
+	}
+	if err := refresher.RefreshOnce(); err != nil {
+		t.Fatal(err)
+	}
+	account := accountByAuthID(t, store.Snapshot(now), "a")
+	if account.Priority != 9 {
+		t.Fatalf("Priority = %d, want current CPA priority 9", account.Priority)
+	}
+}
+
+func TestRefreshAuthDiscardsInFlightFailureAfterExclusion(t *testing.T) {
+	now := time.Date(2026, 7, 10, 9, 0, 0, 0, time.UTC)
+	token := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-a"})
+	host := &fakeHostClient{
+		authList:   []pluginapi.HostAuthFileEntry{{ID: "a", AuthIndex: "idx-a", Provider: "codex"}},
+		authJSON:   map[string]json.RawMessage{"idx-a": json.RawMessage(`{"access_token":"access-a","id_token":"` + token + `"}`)},
+		httpStatus: http.StatusForbidden,
+		httpBody:   []byte(`{"error":"forbidden"}`),
+		doStarted:  make(chan struct{}, 1),
+		releaseDo:  make(chan struct{}),
+	}
+	store := NewPluginState(DefaultConfig())
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 1, AuthIDs: map[string]struct{}{"a": {}}})
+	refresher := NewQuotaRefresher(host, store, func() time.Time { return now })
+	done := make(chan error, 1)
+	go func() { done <- refresher.RefreshOnce() }()
+	<-host.doStarted
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 2, AuthIDs: map[string]struct{}{"b": {}}})
+	close(host.releaseDo)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	snapshot := store.Snapshot(now)
+	if len(snapshot.Accounts) != 0 {
+		t.Fatalf("stale failure reinserted account: %#v", snapshot.Accounts)
+	}
+	for _, entry := range snapshot.Logs {
+		if entry.Event == "quota.refresh_failed" {
+			t.Fatalf("stale failure log committed: %#v", entry)
+		}
 	}
 }
 

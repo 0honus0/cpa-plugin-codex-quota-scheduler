@@ -11,6 +11,7 @@ type PluginState struct {
 	cfg                 Config
 	accounts            map[string]AccountState
 	cpaAdmission        CPAAdmissionState
+	cpaAdmissionVersion uint64
 	annotations         AnnotationState
 	logs                []LogEntry
 	lastSelected        string
@@ -63,24 +64,49 @@ func cloneCPAAdmission(value CPAAdmissionState) CPAAdmissionState {
 	return cloned
 }
 
-func (s *PluginState) ReplaceCPAAdmission(value CPAAdmissionState) {
+func equalCPAAdmission(left, right CPAAdmissionState) bool {
+	if left.Observed != right.Observed || left.Priority != right.Priority || len(left.AuthIDs) != len(right.AuthIDs) {
+		return false
+	}
+	for authID := range left.AuthIDs {
+		if _, ok := right.AuthIDs[authID]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *PluginState) ReplaceCPAAdmission(value CPAAdmissionState) uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if equalCPAAdmission(s.cpaAdmission, value) {
+		return s.cpaAdmissionVersion
+	}
+	s.cpaAdmissionVersion++
 	s.cpaAdmission = cloneCPAAdmission(value)
 	if !value.Observed {
-		return
+		return s.cpaAdmissionVersion
 	}
 	for key, account := range s.accounts {
 		if _, ok := value.AuthIDs[account.AuthID]; !ok {
 			delete(s.accounts, key)
+			continue
 		}
+		account.Priority = value.Priority
+		s.accounts[key] = account
 	}
+	return s.cpaAdmissionVersion
 }
 
 func (s *PluginState) CPAAdmission() CPAAdmissionState {
+	admission, _ := s.CPAAdmissionVersioned()
+	return admission
+}
+
+func (s *PluginState) CPAAdmissionVersioned() (CPAAdmissionState, uint64) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return cloneCPAAdmission(s.cpaAdmission)
+	return cloneCPAAdmission(s.cpaAdmission), s.cpaAdmissionVersion
 }
 
 func (s *PluginState) IsAuthAdmitted(authID string) bool {
@@ -94,13 +120,32 @@ func (s *PluginState) IsAuthAdmitted(authID string) bool {
 }
 
 func (s *PluginState) AdmittedCPAPriority(authID string) (int, bool) {
+	priority, _, ok := s.AdmittedCPAPriorityVersioned(authID)
+	return priority, ok
+}
+
+func (s *PluginState) AdmittedCPAPriorityVersioned(authID string) (int, uint64, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if !s.cpaAdmission.Observed || authID == "" {
-		return 0, false
+		return 0, s.cpaAdmissionVersion, false
 	}
 	_, ok := s.cpaAdmission.AuthIDs[authID]
-	return s.cpaAdmission.Priority, ok
+	return s.cpaAdmission.Priority, s.cpaAdmissionVersion, ok
+}
+
+func (s *PluginState) CPAAdmissionVersionCurrent(version uint64) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cpaAdmissionVersion == version
+}
+
+func (s *PluginState) admissionCurrentLocked(authID string, version uint64) bool {
+	if s.cpaAdmissionVersion != version || !s.cpaAdmission.Observed || authID == "" {
+		return false
+	}
+	_, ok := s.cpaAdmission.AuthIDs[authID]
+	return ok
 }
 
 func (s *PluginState) UpsertQuota(account AccountState) {
@@ -227,6 +272,23 @@ func (s *PluginState) RecordAuthScan(codexAuthCount int, now time.Time) {
 	s.codexAuthCount = codexAuthCount
 }
 
+func (s *PluginState) RecordAuthScanIfAdmissionCurrent(version uint64, codexAuthCount int, now time.Time) bool {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if codexAuthCount < 0 {
+		codexAuthCount = 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cpaAdmissionVersion != version {
+		return false
+	}
+	s.lastAuthScanAt = now
+	s.codexAuthCount = codexAuthCount
+	return true
+}
+
 func (s *PluginState) RefreshActive(now time.Time) bool {
 	if now.IsZero() {
 		now = time.Now()
@@ -269,6 +331,57 @@ func (s *PluginState) RecordRefreshFailure(authID, authIndex string, kind Refres
 	return cloneAccountState(account), true
 }
 
+func (s *PluginState) ApplyQuotaRefreshFailureIfAdmissionCurrent(account AccountState, version uint64, kind RefreshFailureKind, message string, now time.Time) bool {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.admissionCurrentLocked(account.AuthID, version) {
+		return false
+	}
+	account.Priority = s.cpaAdmission.Priority
+	account.LastError = message
+	account.Refresh.LastFailureKind = kind
+	account.Refresh.LastFailureAt = now
+	if kind == RefreshFailureAuth || kind == RefreshFailureLocal {
+		account.Refresh.AuthFailure = kind == RefreshFailureAuth
+		account.Refresh.NextRetryAt = time.Time{}
+	} else {
+		account.Refresh.AuthFailure = false
+		account.Refresh.RetryAttempt++
+		account.Refresh.NextRetryAt = now.Add(retryDelayForAttempt(NormalizeConfig(s.cfg), account.Refresh.RetryAttempt))
+	}
+	key := accountStateKey(account)
+	if key == "" {
+		return false
+	}
+	s.accounts[key] = cloneAccountState(account)
+	return true
+}
+
+func (s *PluginState) ApplyQuotaRefreshSuccessIfAdmissionCurrent(account AccountState, version uint64, now time.Time) bool {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.admissionCurrentLocked(account.AuthID, version) {
+		return false
+	}
+	account.Priority = s.cpaAdmission.Priority
+	if !account.LastSuccessAt.IsZero() && account.LastError == "" {
+		account.Refresh = AccountRefreshState{}
+	}
+	applyCircuitSuccess(&account, NormalizeConfig(s.cfg), now)
+	key := accountStateKey(account)
+	if key == "" {
+		return false
+	}
+	s.accounts[key] = cloneAccountState(account)
+	return true
+}
+
 func (s *PluginState) RecordLog(level, event, message string, fields map[string]any, now time.Time) {
 	if now.IsZero() {
 		now = time.Now()
@@ -284,6 +397,27 @@ func (s *PluginState) RecordLog(level, event, message string, fields map[string]
 	}
 	s.logs = append(s.logs, entry)
 	s.logs = retainedLogs(s.logs, NormalizeConfig(s.cfg), now)
+}
+
+func (s *PluginState) RecordLogIfAdmissionCurrent(authID string, version uint64, level, event, message string, fields map[string]any, now time.Time) bool {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.admissionCurrentLocked(authID, version) {
+		return false
+	}
+	entry := LogEntry{
+		Time:    now,
+		Level:   level,
+		Event:   event,
+		Message: message,
+		Fields:  cloneMap(fields),
+	}
+	s.logs = append(s.logs, entry)
+	s.logs = retainedLogs(s.logs, NormalizeConfig(s.cfg), now)
+	return true
 }
 
 func (s *PluginState) Snapshot(now time.Time) StateSnapshot {
