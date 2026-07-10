@@ -459,6 +459,35 @@ func TestRecordCodexActivityControlsActiveWindow(t *testing.T) {
 	}
 }
 
+func TestQuotaRefreshIntervalMakesSuccessfulAccountDue(t *testing.T) {
+	now := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
+	cfg := DefaultConfig()
+	cfg.QuotaRefreshInterval = 30 * time.Minute
+	cfg.StaleAfter = 5 * time.Hour
+	account := AccountState{AuthID: "auth-1", LastSuccessAt: now.Add(-31 * time.Minute)}
+
+	due, reason := accountRefreshDue(account, cfg, now)
+	if !due || reason != "refresh_interval_due" {
+		t.Fatalf("accountRefreshDue = %t, %q; want true refresh_interval_due", due, reason)
+	}
+}
+
+func TestNextRefreshDueAtUsesQuotaRefreshInterval(t *testing.T) {
+	now := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
+	cfg := DefaultConfig()
+	cfg.QuotaRefreshInterval = 30 * time.Minute
+	cfg.StaleAfter = 5 * time.Hour
+	store := NewPluginState(cfg)
+	store.RecordCodexActivity(now)
+	store.UpsertQuota(AccountState{AuthID: "auth-1", LastSuccessAt: now.Add(-10 * time.Minute)})
+
+	next := store.NextRefreshDueAt(now)
+	want := now.Add(20 * time.Minute)
+	if !next.Equal(want) {
+		t.Fatalf("NextRefreshDueAt = %s, want %s", next, want)
+	}
+}
+
 func TestRecordRefreshFailureSchedulesRetry(t *testing.T) {
 	now := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
 	store := NewPluginState(DefaultConfig())

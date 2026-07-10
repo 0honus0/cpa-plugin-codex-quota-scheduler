@@ -11,7 +11,8 @@ reset or expiry time.
 ## Features
 
 - Scheduler plugin for CPA Codex accounts.
-- Usage feedback handling for `usage_limit_reached` responses.
+- Usage feedback handling for `usage_limit_reached` responses without counting
+  quota exhaustion as a circuit-breaker failure.
 - Five-hour, weekly, monthly, and reset-credit quota display when available.
 - Circuit breaker state for repeated account failures.
 - Bilingual Management UI: English and Chinese, with browser-language detection
@@ -116,6 +117,14 @@ log_retention: 24h
 - `priority`: prefer monthly accounts before weekly accounts within the same CPA
   priority tier.
 
+While the scheduler is inside `refresh_active_window`,
+`quota_refresh_interval` is the normal per-account refresh cadence. The worker
+refreshes only accounts that are due; it does not run a fixed full-account poll.
+`stale_after` remains the maximum cache-age safety threshold. A
+`usage_limit_reached` response immediately marks the selected account
+temporarily exhausted until its reported reset time (or for 2 minutes when no
+reset time is reported) and does not increment the circuit breaker.
+
 ## Management UI
 
 Open the resource page from CPA's plugin resources, or visit:
@@ -175,13 +184,13 @@ make build
 Build and package the release zip:
 
 ```bash
-make package VERSION=0.1.4
+make package VERSION=0.1.5
 ```
 
 Generate an aggregate checksum file for local release assets:
 
 ```bash
-make checksums VERSION=0.1.4
+make checksums VERSION=0.1.5
 ```
 
 Windows users can also use the PowerShell helper:
@@ -195,18 +204,21 @@ compiler such as MinGW-w64 on `PATH`.
 
 ## GitHub Releases
 
-Version `0.1.4` keeps account cards, logs, refresh actions, scheduler status,
-and reset-probe notices behind the CPA Management key. Version `0.1.3` adds the
-opt-in automatic reset probe for lazy Codex quota windows. Version `0.1.2` adds adaptive refresh scheduling and a dynamically
-updating bilingual UI. Version `0.1.1` moves all state-changing and privileged operations
+Version `0.1.5` restores interval-based per-account refreshes inside the active
+window and keeps quota-exhaustion feedback separate from circuit-breaker
+failures. Version `0.1.4` keeps account cards, logs, refresh actions, scheduler
+status, and reset-probe notices behind the CPA Management key. Version `0.1.3`
+adds the opt-in automatic reset probe for lazy Codex quota windows. Version
+`0.1.2` adds adaptive refresh scheduling and a dynamically updating bilingual
+UI. Version `0.1.1` moves all state-changing and privileged operations
 behind CPA Management API routes and restricts `quota_endpoint` to the expected
 ChatGPT quota endpoint. Version `0.1.0` was the first public release version for
 this repository. GitHub Actions builds release assets when a tag matching `v*`
 is pushed. Use a dotted numeric version tag such as:
 
 ```bash
-git tag v0.1.4
-git push origin v0.1.4
+git tag v0.1.5
+git push origin v0.1.5
 ```
 
 The `Build` workflow runs tests and creates the release automatically. Release
@@ -217,21 +229,21 @@ codex-quota-scheduler_<version>_<goos>_<goarch>.zip
 checksums.txt
 ```
 
-For `v0.1.4`, the expected platform assets are:
+For `v0.1.5`, the expected platform assets are:
 
-- `codex-quota-scheduler_0.1.4_darwin_amd64.zip`
-- `codex-quota-scheduler_0.1.4_darwin_arm64.zip`
-- `codex-quota-scheduler_0.1.4_freebsd_amd64.zip`
-- `codex-quota-scheduler_0.1.4_linux_amd64.zip`
-- `codex-quota-scheduler_0.1.4_linux_arm64.zip`
-- `codex-quota-scheduler_0.1.4_windows_amd64.zip`
-- `codex-quota-scheduler_0.1.4_windows_arm64.zip`
+- `codex-quota-scheduler_0.1.5_darwin_amd64.zip`
+- `codex-quota-scheduler_0.1.5_darwin_arm64.zip`
+- `codex-quota-scheduler_0.1.5_freebsd_amd64.zip`
+- `codex-quota-scheduler_0.1.5_linux_amd64.zip`
+- `codex-quota-scheduler_0.1.5_linux_arm64.zip`
+- `codex-quota-scheduler_0.1.5_windows_amd64.zip`
+- `codex-quota-scheduler_0.1.5_windows_arm64.zip`
 - `checksums.txt`
 
 `checksums.txt` uses sha256sum format:
 
 ```text
-<sha256>  codex-quota-scheduler_0.1.4_darwin_arm64.zip
+<sha256>  codex-quota-scheduler_0.1.5_darwin_arm64.zip
 ```
 
 ## Management API

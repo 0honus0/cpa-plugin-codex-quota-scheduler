@@ -333,6 +333,7 @@ func (s *PluginState) NextRefreshDueAt(now time.Time) time.Time {
 				}
 			}
 		}
+		consider(account.LastSuccessAt.Add(cfg.QuotaRefreshInterval))
 		consider(account.LastSuccessAt.Add(cfg.StaleAfter))
 		if account.Quota.FiveHour != nil && !account.Quota.FiveHour.ResetAt.IsZero() {
 			consider(account.Quota.FiveHour.ResetAt.Add(cfg.RefreshAfterResetDelay))
@@ -393,6 +394,9 @@ func accountRefreshDue(account AccountState, cfg Config, now time.Time) (bool, s
 	if now.Sub(account.LastSuccessAt) > cfg.StaleAfter {
 		return true, "stale"
 	}
+	if !account.LastSuccessAt.Add(cfg.QuotaRefreshInterval).After(now) {
+		return true, "refresh_interval_due"
+	}
 	if cfg.EnableResetProbe && resetProbeDueAny(account.ResetProbes, now) {
 		return true, "reset_probe_check_due"
 	}
@@ -438,6 +442,7 @@ func markTemporaryExhausted(account *AccountState, resetAt time.Time, reason str
 	account.TemporaryExhausted = true
 	account.TemporaryResetAt = resetAt
 	account.LastError = reason
+	account.Circuit = CircuitBreakerState{State: CircuitStateClosed, EffectiveState: CircuitStateClosed}
 }
 
 func applyCircuitFailure(account *AccountState, cfg Config, reason string, resetAt, now time.Time) {

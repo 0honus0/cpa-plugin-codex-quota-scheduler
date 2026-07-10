@@ -564,7 +564,7 @@ func accountStatusNote(account AccountState, dueReason string, snapshot StateSna
 	}
 	if !refreshActive {
 		switch dueReason {
-		case "stale", "never_refreshed", "retry_due", "five_hour_reset_due", "long_window_reset_due", "temporary_reset_due":
+		case "stale", "never_refreshed", "retry_due", "refresh_interval_due", "five_hour_reset_due", "long_window_reset_due", "temporary_reset_due":
 			return fmt.Sprintf("账号额度已过期或待刷新，但最近 %s 内没有 Codex 请求，调度器处于休眠状态。发送一次 Codex 请求后会获取账号额度信息。", cfg.RefreshActiveWindow)
 		}
 	}
@@ -573,6 +573,8 @@ func accountStatusNote(account AccountState, dueReason string, snapshot StateSna
 		return "账号额度已过期，调度器处于活跃窗口，将按刷新队列更新。"
 	case "never_refreshed":
 		return "账号尚未获取额度信息，调度器处于活跃窗口，将按刷新队列更新。"
+	case "refresh_interval_due":
+		return "已达到额度刷新间隔，调度器将按刷新队列更新。"
 	case "retry_due":
 		return "上次额度刷新失败，当前已到重试时间。"
 	case "five_hour_reset_due", "long_window_reset_due", "temporary_reset_due":
@@ -1168,8 +1170,8 @@ const INLINE_TRANSLATIONS=[
   ['填写 CPA 管理密钥后将动态加载账号队列、调度日志和当前调度状态','Enter the CPA management key to dynamically load the account queue, scheduler logs, and current scheduler state'],['发送 Codex 请求后，调度器会在活跃窗口内刷新额度','After a Codex request, the scheduler refreshes quota within the active window']
 ];
 const DUE_REASON_LABELS={
-  en:{stale:'Quota data is stale or pending refresh',never_refreshed:'Never refreshed',retry_due:'Retry is due now',retry_wait:'Waiting before retry',five_hour_reset_due:'5-hour reset is due',long_window_reset_due:'Long quota reset is due',temporary_reset_due:'Temporary reset is due',circuit_wait:'Circuit wait',circuit_probe_due:'Circuit probe due',auth_failure:'Authentication needs re-login',local_failure:'Local auth data needs attention'},
-  'zh-CN':{stale:'额度缓存过期',never_refreshed:'尚未刷新',retry_due:'重试时间已到',retry_wait:'等待重试',five_hour_reset_due:'5 小时重置已到',long_window_reset_due:'长额度重置已到',temporary_reset_due:'主动重置已到',circuit_wait:'熔断等待',circuit_probe_due:'熔断探测已到',auth_failure:'认证异常',local_failure:'本地认证异常'}
+  en:{stale:'Quota data is stale or pending refresh',never_refreshed:'Never refreshed',retry_due:'Retry is due now',retry_wait:'Waiting before retry',refresh_interval_due:'Refresh interval due',five_hour_reset_due:'5-hour reset is due',long_window_reset_due:'Long quota reset is due',temporary_reset_due:'Temporary reset is due',circuit_wait:'Circuit wait',circuit_probe_due:'Circuit probe due',auth_failure:'Authentication needs re-login',local_failure:'Local auth data needs attention'},
+  'zh-CN':{stale:'额度缓存过期',never_refreshed:'尚未刷新',retry_due:'重试时间已到',retry_wait:'等待重试',refresh_interval_due:'刷新间隔已到',five_hour_reset_due:'5 小时重置已到',long_window_reset_due:'长额度重置已到',temporary_reset_due:'主动重置已到',circuit_wait:'熔断等待',circuit_probe_due:'熔断探测已到',auth_failure:'认证异常',local_failure:'本地认证异常'}
 };
 const UNAVAILABLE_REASON_LABELS={
   en:{auth_failure:'Authentication needs re-login',local_failure:'Local auth data needs attention',stale_quota:'Quota data is stale or pending refresh',circuit_open:'Circuit open',quota_probe_wait:'Quota probe wait',temporary_exhausted:'Temporarily exhausted',five_hour_exhausted:'5-hour quota exhausted',weekly_exhausted:'Weekly quota exhausted',monthly_exhausted:'Monthly quota exhausted',unknown_account:'Unknown account'},
