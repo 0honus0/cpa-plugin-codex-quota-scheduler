@@ -334,6 +334,35 @@ func TestAccountRefreshDueReturnsResetProbeCheckDue(t *testing.T) {
 	}
 }
 
+func TestAccountRefreshDueIgnoresResetConsumedBySuccess(t *testing.T) {
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	cfg := DefaultConfig()
+	cfg.QuotaRefreshInterval = 30 * time.Minute
+	account := weeklyAccount("auth-1", 1, now.Add(24*time.Hour), true)
+	account.LastSuccessAt = now.Add(-time.Minute)
+	account.Quota.FiveHour.ResetAt = now.Add(-10 * time.Minute)
+	due, reason := accountRefreshDue(account, cfg, now)
+	if due || reason != "" {
+		t.Fatalf("due=%t reason=%q", due, reason)
+	}
+}
+
+func TestNextRefreshDueAtIgnoresConsumedReset(t *testing.T) {
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	cfg := DefaultConfig()
+	cfg.QuotaRefreshInterval = 30 * time.Minute
+	store := NewPluginState(cfg)
+	store.RecordCodexActivity(now)
+	account := weeklyAccount("auth-1", 1, now.Add(24*time.Hour), true)
+	account.LastSuccessAt = now.Add(-time.Minute)
+	account.Quota.FiveHour.ResetAt = now.Add(-10 * time.Minute)
+	store.UpsertQuota(account)
+	want := account.LastSuccessAt.Add(cfg.QuotaRefreshInterval)
+	if got := store.NextRefreshDueAt(now); !got.Equal(want) {
+		t.Fatalf("next=%s want=%s", got, want)
+	}
+}
+
 func TestPluginStateNormalizesConfigAtBoundaries(t *testing.T) {
 	store := NewPluginState(Config{})
 	if store.Config().MaxLogEntries != DefaultConfig().MaxLogEntries || store.Config().LogRetention != DefaultConfig().LogRetention {

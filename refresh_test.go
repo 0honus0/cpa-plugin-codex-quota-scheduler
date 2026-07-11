@@ -603,6 +603,47 @@ func TestRefreshDueOnceRefreshesAccountPastQuotaRefreshInterval(t *testing.T) {
 	}
 }
 
+func TestRefreshDueOnceDoesNotRepeatSuccessfulRefreshForObservedPastReset(t *testing.T) {
+	resetAt := time.Date(2026, 7, 10, 11, 50, 0, 0, time.UTC)
+	currentNow := resetAt.Add(10 * time.Minute)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})
+	host := &fakeHostClient{
+		authList: []pluginapi.HostAuthFileEntry{{ID: "auth-1", AuthIndex: "idx-1", Provider: "codex"}},
+		authJSON: map[string]json.RawMessage{
+			"idx-1": json.RawMessage(`{"access_token":"access-1","id_token":"` + idToken + `"}`),
+		},
+		httpBody: []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_at":%q}}}`, resetAt.Format(time.RFC3339))),
+	}
+	cfg := DefaultConfig()
+	cfg.QuotaRefreshInterval = 30 * time.Minute
+	store := NewPluginState(cfg)
+	store.RecordCodexActivity(currentNow)
+	store.UpsertQuota(AccountState{
+		AuthID:        "auth-1",
+		AuthIndex:     "idx-1",
+		Provider:      "codex",
+		Quota:         ParsedQuota{FiveHour: &QuotaWindow{Kind: WindowFiveHour, ResetAt: resetAt}},
+		LastSuccessAt: resetAt.Add(-time.Hour),
+	})
+
+	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return currentNow })
+	if err := refresher.RefreshDueOnce(); err != nil {
+		t.Fatalf("first RefreshDueOnce returned error: %v", err)
+	}
+	firstCalls := host.httpCallCount()
+	if firstCalls == 0 {
+		t.Fatal("first RefreshDueOnce made no HTTP calls")
+	}
+
+	currentNow = currentNow.Add(2 * time.Second)
+	if err := refresher.RefreshDueOnce(); err != nil {
+		t.Fatalf("second RefreshDueOnce returned error: %v", err)
+	}
+	if got := host.httpCallCount(); got != firstCalls {
+		t.Fatalf("HTTP calls after second refresh = %d, want unchanged %d", got, firstCalls)
+	}
+}
+
 func TestRefreshDueOnceDiscoversAuthsWhenStateIsEmpty(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct-1"})

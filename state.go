@@ -535,13 +535,22 @@ func (s *PluginState) NextRefreshDueAt(now time.Time) time.Time {
 		consider(account.LastSuccessAt.Add(cfg.QuotaRefreshInterval))
 		consider(account.LastSuccessAt.Add(cfg.StaleAfter))
 		if account.Quota.FiveHour != nil && !account.Quota.FiveHour.ResetAt.IsZero() {
-			consider(account.Quota.FiveHour.ResetAt.Add(cfg.RefreshAfterResetDelay))
+			triggerAt := account.Quota.FiveHour.ResetAt.Add(cfg.RefreshAfterResetDelay)
+			if refreshTriggerPending(account.LastSuccessAt, triggerAt) {
+				consider(triggerAt)
+			}
 		}
 		if account.Quota.LongWindow != nil && !account.Quota.LongWindow.ResetAt.IsZero() {
-			consider(account.Quota.LongWindow.ResetAt.Add(cfg.RefreshAfterResetDelay))
+			triggerAt := account.Quota.LongWindow.ResetAt.Add(cfg.RefreshAfterResetDelay)
+			if refreshTriggerPending(account.LastSuccessAt, triggerAt) {
+				consider(triggerAt)
+			}
 		}
 		if account.TemporaryExhausted && !account.TemporaryResetAt.IsZero() {
-			consider(account.TemporaryResetAt.Add(cfg.RefreshAfterResetDelay))
+			triggerAt := account.TemporaryResetAt.Add(cfg.RefreshAfterResetDelay)
+			if refreshTriggerPending(account.LastSuccessAt, triggerAt) {
+				consider(triggerAt)
+			}
 		}
 	}
 	return next
@@ -599,20 +608,31 @@ func accountRefreshDue(account AccountState, cfg Config, now time.Time) (bool, s
 	if cfg.EnableResetProbe && resetProbeDueAny(account.ResetProbes, now) {
 		return true, "reset_probe_check_due"
 	}
-	if resetDue(account.Quota.FiveHour, cfg.RefreshAfterResetDelay, now) {
+	if resetDue(account.Quota.FiveHour, cfg.RefreshAfterResetDelay, account.LastSuccessAt, now) {
 		return true, "five_hour_reset_due"
 	}
-	if resetDue(account.Quota.LongWindow, cfg.RefreshAfterResetDelay, now) {
+	if resetDue(account.Quota.LongWindow, cfg.RefreshAfterResetDelay, account.LastSuccessAt, now) {
 		return true, "long_window_reset_due"
 	}
-	if account.TemporaryExhausted && !account.TemporaryResetAt.IsZero() && !account.TemporaryResetAt.Add(cfg.RefreshAfterResetDelay).After(now) {
-		return true, "temporary_reset_due"
+	if account.TemporaryExhausted && !account.TemporaryResetAt.IsZero() {
+		triggerAt := account.TemporaryResetAt.Add(cfg.RefreshAfterResetDelay)
+		if refreshTriggerPending(account.LastSuccessAt, triggerAt) && !triggerAt.After(now) {
+			return true, "temporary_reset_due"
+		}
 	}
 	return false, ""
 }
 
-func resetDue(window *QuotaWindow, delay time.Duration, now time.Time) bool {
-	return window != nil && !window.ResetAt.IsZero() && !window.ResetAt.Add(delay).After(now)
+func refreshTriggerPending(lastSuccessAt, triggerAt time.Time) bool {
+	return !triggerAt.IsZero() && (lastSuccessAt.IsZero() || lastSuccessAt.Before(triggerAt))
+}
+
+func resetDue(window *QuotaWindow, delay time.Duration, lastSuccessAt, now time.Time) bool {
+	if window == nil || window.ResetAt.IsZero() {
+		return false
+	}
+	triggerAt := window.ResetAt.Add(delay)
+	return refreshTriggerPending(lastSuccessAt, triggerAt) && !triggerAt.After(now)
 }
 
 func retryDelayForAttempt(cfg Config, attempt int) time.Duration {
