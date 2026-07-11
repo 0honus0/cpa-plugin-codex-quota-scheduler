@@ -99,8 +99,13 @@ plugins:
   configs:
     codex-quota-scheduler:
       enabled: true
-      priority: 1
+      priority: 1 # CPA plugin registration/load priority
 ```
+
+The `plugins.configs.codex-quota-scheduler.priority` value above is CPA's plugin
+registration/load priority. It is unrelated to the per-account, plugin-owned
+`scheduler_priority` edited in this plugin's Management UI, and it is also
+separate from CPA auth priority on managed Codex accounts.
 
 The plugin does not declare Management Center form fields. Scheduler settings,
 aliases, notes, tags, and groups are edited from the plugin resource page and

@@ -39,6 +39,12 @@ func TestDecodeConfigDefaults(t *testing.T) {
 	}
 }
 
+func TestPluginRegistrationUsesV016SourceVersion(t *testing.T) {
+	if got := PluginRegistration().Metadata.Version; got != "0.1.6" {
+		t.Fatalf("plugin registration version = %q, want 0.1.6", got)
+	}
+}
+
 func TestDefaultConfigAdaptiveRefreshDefaults(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg.RefreshActiveWindow != time.Hour {

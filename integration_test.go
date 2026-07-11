@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -221,6 +222,14 @@ func TestSixAccountIncidentUsesPluginPriorityFallthroughWhenCPAPrioritiesMatch(t
 	if len(decision.Ordered) != 6 {
 		t.Fatalf("ordered account count = %d, want 6: %#v", len(decision.Ordered), decision.Ordered)
 	}
+	gotIDs := make([]string, 0, len(decision.Ordered))
+	for _, account := range decision.Ordered {
+		gotIDs = append(gotIDs, account.AuthID)
+	}
+	wantIDs := []string{"exhausted-a", "exhausted-b", "usable-a", "usable-b", "usable-c", "usable-d"}
+	if !slices.Equal(gotIDs, wantIDs) {
+		t.Fatalf("ordered IDs = %#v, want %#v", gotIDs, wantIDs)
+	}
 	if decision.Ordered[0].SchedulerPriority != 1 || decision.Ordered[1].SchedulerPriority != 1 {
 		t.Fatalf("first plugin tier = %#v, want two plugin-priority-1 accounts", decision.Ordered[:2])
 	}
@@ -266,6 +275,11 @@ func TestSixAccountIncidentMixedCPAPrioritiesExposeOnlyMaximumTier(t *testing.T)
 	}
 	if len(decision.Ordered) != 2 {
 		t.Fatalf("ordered account count = %d, want only 2 maximum-tier accounts: %#v", len(decision.Ordered), decision.Ordered)
+	}
+	gotIDs := []string{decision.Ordered[0].AuthID, decision.Ordered[1].AuthID}
+	wantIDs := []string{"exhausted-a", "exhausted-b"}
+	if !slices.Equal(gotIDs, wantIDs) {
+		t.Fatalf("ordered IDs = %#v, want %#v", gotIDs, wantIDs)
 	}
 	for _, account := range decision.Ordered {
 		if account.CPAPriority != 1 || account.Available {
