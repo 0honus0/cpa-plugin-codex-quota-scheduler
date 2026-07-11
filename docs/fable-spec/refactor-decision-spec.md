@@ -1,282 +1,353 @@
-# Codex Quota Scheduler 重构决策方案（Decision Spec v1）
+# Codex Quota Scheduler 重构决策方案（Decision Spec v2）
 
-> **文档用途**：本文件是对《目标设计文档》（三控制器 + 统一协调层）的**决策补充**。原设计文档回答"架构长什么样"，本文件把其中留白的策略点全部定死为可实现、可测试的规则。若两份文档冲突，以本文件为准。
+> **版本说明**：v2 依据 Codex 审核意见（12 项 + 补充不变量）全面修订。v1 作废。
+> 本文件仍是对《目标设计文档》的决策补充；冲突时以本文件为准。
 >
-> **给审核者（Codex）的说明**：请将本文件与原设计文档、以及仓库 v0.1.6 源码（重点：`refresh.go`、`probe.go`、`scheduler.go`、`quota.go`、`state.go`、`auth.go`、`dispatch.go`）一并阅读。文末第 10 节列出了需要你重点审核的问题清单。
+> **v1 → v2 变更对照**（对应 Codex 审核编号）：
+>
+> | 审核项 | 处置 | 落点 |
+> |---|---|---|
+> | 1 verify 合并因果性 | 接受：causal barrier | §3.3、INV-26 |
+> | 2 租约 fencing | 接受：ExecutionToken | §1.3、§5.4、INV-25 |
+> | 3 启动 roster 来源 | 接受并细化：三来源 + Provisional 有界放行 | §2（新增）、S1 |
+> | 4 Probe 崩溃重发 | 接受：副作用 WAL + best-effort-once | §5.3、§8.1、INV-27 |
+> | 5 身份/实例混淆 | 接受：Identity / AuthInstance / BindingEpoch 拆分 | §1 全面重写、INV-28 |
+> | 6 同步失败矛盾 | 接受有限期 fail-open；范围收窄至后台业务线 | §7.3、INV-02/20/21 修订、INV-35 |
+> | 7 D7 越界 | 接受：正常 payload 仅最高层 | §7.1 |
+> | 8 乐观放行风暴 | 接受：optimistic trial lease + Preferred 跨层优先 | §4.3、§4.4、INV-29 |
+> | 9 CredentialEpoch 过宽 | 接受：拆为 BindingEpoch / LoginEpoch / TokenEpoch | §1.2 |
+> | 10 lazy 判定不精确 | 接受：纯函数判定表 | §6.2 |
+> | 11 实施顺序 | 接受：改为 8 步 | §9 |
+> | 12 持久化不完整 | 接受：新增持久化规范 | §8 |
+> | 补充不变量 | 全部采纳（INV-25～34），另增 INV-35 | §10 |
 
 ---
 
-## 1. 身份与版本模型
+## 1. 身份、实例与版本模型（重写）
 
-### 1.1 账号身份键（AccountIdentity）
+### 1.1 三个不同的"是谁"
 
-- **主键**：ChatGPT 账号 ID（从凭据 ID token claims 中解析的 account/user ID）。
-- **次键（主键不可得时）**：账号 email，做大小写不敏感比较。
-- **明确不作为身份**：CPA auth 文件名、文件路径、CPA 内部索引。这些在重新登录后可能变化。
-- 插件内部配置（别名、插件优先级、分组、标签、备注、Probe 历史）全部以 AccountIdentity 为键持久化。CPA 中重新登录后只要身份匹配即保留。
+| 概念 | 定义 | 用途 |
+|---|---|---|
+| **AccountIdentity** | ChatGPT 账号 ID（凭据 ID token claims），次键 email（大小写不敏感） | **仅**用于继承插件内部配置：别名、插件优先级、分组、标签、备注、Probe 历史统计 |
+| **AuthInstanceID** | CPA 宿主标识的具体认证实例（宿主提供的 auth ID / 文件标识） | **操作单位**：admission 集合、锁、去重、请求、写回、日志全部以它为键 |
+| Identity↔Instance 绑定 | 一个 Identity 可能对应 0/1/多个 Instance；绑定关系由 CPA 同步维护 | 同一身份出现两个 auth 实例时，两个实例独立参与调度，配置继承同一份 Identity 记录 |
 
-### 1.2 两个正交的版本号
+身份不可解析（无 account ID 且无 email）的实例：不做配置继承，以 AuthInstanceID 为独立记录参与调度，UI 标记"身份不可识别"。**修订 v1 D10**：不再拒绝纳入活动集合——排除会造成"CPA 认为可用而插件拒绝调度"的行为分裂；只降级为无继承。
 
-| 版本号 | 作用域 | 递增时机 | 保护什么 |
+### 1.2 版本号族
+
+| 版本号 | 作用域 | 递增时机 | 用途 |
 |---|---|---|---|
-| **TierGeneration（G）** | 全局 | 最高 CPA 层的**账号身份集合**发生任何变化（增、删、层整体替换） | 防止旧层账号的请求结果写回新层状态 |
-| **CredentialEpoch（E）** | 单账号 | CPA 同步发现该账号**凭据内容**变化（对凭据做内容哈希比较） | 防止用旧 refresh token 刷出的 access token 覆盖用户重新登录后的新凭据 |
+| **TierGeneration（G）** | 全局 | 最高层的 **(AuthInstanceID, LoginEpoch) 多重集** 发生任何变化 | 层级写回防护。"删除又加回同一身份"必然导致 InstanceID 或 LoginEpoch 变化 → G++ |
+| **AuthBindingEpoch** | 每 Identity | Identity 与 Instance 的绑定关系变化（换文件、增删实例） | 配置继承迁移时的一致性检查 |
+| **LoginEpoch** | 每 Instance | **证明真实重新登录**的字段变化：refresh token 值、账号主体（sub/account id）变化 | 唯一能解除 AuthBlocked 的信号；凭据写回校验 |
+| **TokenEpoch** | 每 Instance | access token 更新（含插件自身刷新） | 仅用于日志与调试，**不**参与任何门控，**不**解除 AuthBlocked |
+| **ExecutionToken** | 每次授权执行 | 协调层每签发一次执行（含租约回收后重签） | 写回 fencing（§5.4） |
 
-**写回校验矩阵**（协调层在请求发出前 snapshot `(G, E)`，写回前复核）：
+凭据比较不做整体 JSON 哈希（字段顺序、无关 metadata 会误报）：LoginEpoch 只比较提取后的具名字段（refresh token、subject）。
 
-| 写回内容 | 需 G 有效 | 需 E 有效 |
-|---|---|---|
-| 额度数据 / 重置时间 | ✅ | ❌（旧凭据取回的额度仍是该账号的真实额度，可写回） |
-| 刷新后的 access token / 凭据保存 | ✅ | ✅（E 过期 → **静默丢弃**凭据写回，记录日志） |
-| Probe 窗口状态推进 | ✅ | ❌ |
-| Exhausted / 临时不可用标记 | ✅ | ❌ |
+### 1.3 写回校验矩阵（v2）
 
-**关键规则**：凭据变化（E++）**不**递增 G。层组成没变，调度不需要重置；只有凭据写回需要 E 防护。
+**所有写回统一先校验 ExecutionToken**（fencing：租约回收即旧 token 作废，旧 worker 的结果与成功日志一律丢弃）。在此之上：
 
----
-
-## 2. 缓存状态机与调度可选性（决策 D1）
-
-### 2.1 缓存年龄状态（每账号每次成功额度获取后重算）
-
-```text
-age = now - last_success_fetch_time
-
-Unknown : 从未成功获取
-Fresh   : age ≤ quota_refresh_interval
-Aging   : quota_refresh_interval < age ≤ stale_after
-Stale   : age > stale_after
-```
-
-**Aging 是纯标签**：只影响 UI 显示和排序内的轻微降权，**不触发任何刷新**。刷新的触发来源全系统只有五个：`scheduler_initial`（首次）、`scheduler_interval`（活跃期到间隔）、`scheduler_stale_recovery`（真实请求遇到 Stale）、`probe_*`（Probe 业务线）、`manual_refresh`。这条规则彻底消灭 `stale_after` 作为第二条刷新时间线的可能性。
-
-### 2.2 Exhausted 标记的时效
-
-- Exhausted 标记必须携带来源 reset 时间；无 reset 时间时按现行为标记 2 分钟。
-- **reset 时间已过的 Exhausted 标记视同 Unknown**（不是"仍耗尽"，也不是"可用"）。调度器读取该标记时现场判断，不依赖后台任务来清除。
-
-### 2.3 调度可选性：三档制（乐观放行 + 反馈兜底）
-
-调度器对当前最高 CPA 层账号，按插件优先级 → 业务策略排序后，将每个账号归入三档：
-
-```text
-第一档 Preferred     : Fresh/Aging 且未耗尽、无熔断、无认证失败
-第二档 Opportunistic : Unknown；Stale 且上次已知可用；Exhausted 但 reset 已过
-第三档 Excluded      : 确认耗尽且 reset 未到；认证失败待重新登录；熔断开启；临时不可用
-```
-
-选取规则：
-
-1. 在同一插件优先级层内，先取第一档，第一档为空则**允许选取第二档**（乐观放行），同时立即提交对应刷新意图（`scheduler_initial` 或 `scheduler_stale_recovery`）。
-2. 第二档账号被选中后若返回 `usage_limit_reached`，沿用现有反馈机制立即标记耗尽，**不计熔断失败**——这是乐观放行的兜底。
-3. 高插件优先级层全部落入第三档时，继续尝试同 CPA 层内较低插件优先级；全部账号均为第三档时才返回无法选取，进入 CPA fallback。
-
-**这一策略保证冷启动不死锁**：插件重启、Probe 未启用、缓存全 Stale/Unknown 时，第一条真实请求仍能被服务，同时触发刷新使系统回到正常状态。
+| 写回内容 | 额外校验 |
+|---|---|
+| 额度数据 / 重置时间 | G 有效，Instance 仍在当前层 |
+| 刷新后的凭据保存 | + 该 Instance 的 LoginEpoch 与请求 snapshot 一致（不一致 → 静默丢弃凭据写回，记录日志；额度数据部分仍可写） |
+| Probe 窗口状态推进 | G 有效，Instance 仍在当前层 |
+| Exhausted / 临时不可用标记 | G 有效，Instance 仍在当前层 |
 
 ---
 
-## 3. 统一协调层执行模型（决策 D3、D6）
+## 2. 启动 Roster 来源与 Bootstrap（新增，回应审核项 3）
 
-### 3.1 两级资源与固定获取顺序
+**前置事实**：v0.1.6 中 CPA 优先级仅出现在 `scheduler.pick` candidates 中；现有 `ListAuths/GetAuth` 路径未确认包含优先级字段。因此"启动即计算最高层"目前缺少已验证的数据来源。
+
+### 2.1 Roster 的三个合法来源（按权威度）
+
+1. **宿主 roster API**（若存在）：带优先级的受保护账号清单接口。**S1 阶段的 P0 调查项**：确认 CPA Host API / Management API 是否提供；不提供则向上游提交能力需求（关联 issue #4196 的沟通渠道）。
+2. **`scheduler.pick` candidates**：每次真实请求宿主逐次提供，是该时刻的权威 roster + 优先级信息。**每次 pick 都视为一次免费的 roster 确认**，喂给 CPA 同步控制器（更新 last-confirmed、必要时重算 G）。
+3. **持久化的 last-confirmed roster**：仅作启动时的 Provisional。
+
+### 2.2 Bootstrap 状态机
 
 ```text
-资源一：per-account mutex（同一账号所有会修改凭据或状态的操作串行）
+启动
+→ 尝试来源 1（若 API 已确认存在）：成功 → Confirmed roster，正常运行
+→ API 不存在或失败：
+    加载持久化 last-confirmed roster → 状态 = Provisional（沿用保存的 G）
+    Management 页标记 provisional
+    普通刷新：Dormant（本来就等真实请求，无影响）
+    Probe：
+      - roster 确认时间距今 < provisional_probe_max_age（内部策略，默认 24h）
+        → 允许在 Provisional roster 上执行到期 Probe
+      - 否则 → 全部窗口进入 WaitingRoster，等待首次 pick 或 API 确认
+→ 首次 pick candidates 到达 → roster 确认/替换（可能 G++），WaitingRoster 解除
+```
+
+理由：pick candidates 保证真实请求路径**永远**基于权威 roster；Provisional 只承担后台业务线的有界风险，且以确认时效为界。
+
+---
+
+## 3. 统一协调层执行模型
+
+### 3.1 两级资源与固定获取顺序（同 v1）
+
+```text
+资源一：per-AuthInstance mutex（同实例所有修改凭据或状态的操作串行）
 资源二：global semaphore，容量 = max_refresh_concurrency
-        计费单位 = 单次对外 HTTP 请求（不是账号，不是序列）
+        计费单位 = 单次对外 HTTP 请求
 ```
 
-**固定顺序（防死锁的唯一合法路径）**：
+固定顺序：`acquire(instance_lock) → 每次 HTTP 前 acquire(slot) → HTTP → 立即 release(slot) → … → release(instance_lock)`。
+禁止：持 instance lock 等另一 instance lock；持 slot 等任何 lock；持 slot 做非 HTTP 等待。
+
+### 3.2 Probe 关键序列（同 v1 + attempt_id）
+
+每次 Probe attempt 分配全局唯一 `attempt_id`。`precheck → send → verify` 在一次 instance lock 持有期内完成；任一步失败立即释放锁，重试为新意图（新 attempt_id）；send 与 verify 之间的传播等待不持 slot，超过锁租约阈值则释放锁、verify 以独立意图重新排队（携带原 attempt_id 与 causal barrier）。
+
+### 3.3 去重与合并（修订：causal barrier）
+
+去重键：`(AuthInstanceID, op-class, G)`。
+
+`quota_read` 意图携带可选参数 `started_after`（causal barrier，时间戳或单调序号）：
+
+- **协调层合并规则**：一个 `quota_read` 意图只能 join 满足 `read.started_at > intent.started_after` 的 in-flight 读取；无满足者则新起一次读取。
+- `probe_precheck`：`started_after` 为空——它只需当前额度，可与任何 in-flight `quota_read` 合并。
+- `probe_verify`：`started_after = 该 attempt 的 sent_at`——**只能使用对应 Probe 发送成功之后启动的读取**；不与 send 前启动的任何读取合并，不跨 attempt 合并。
+- `probe_send`：不与任何请求合并。
+- `token_refresh`：同实例 in-flight 可合并；结果保存校验 LoginEpoch。
+- `manual_refresh`：bypass 缓存新鲜度，但可 join 同实例 in-flight `quota_read`。
+
+### 3.4 推荐实现模型（同 v1，待 S1 验证宿主线程约定）
+
+意图队列 + 单一协调 goroutine 持有全部可变状态 + worker 只做 HTTP。S1 需确认 `scheduler.pick` 在 c-shared/CGO 下的调用线程模型与允许延迟。
+
+---
+
+## 4. 缓存状态机与调度可选性
+
+### 4.1 缓存年龄四态（同 v1）
+
+`Unknown / Fresh(≤interval) / Aging(≤stale_after) / Stale(>stale_after)`。Aging 纯标签，不触发刷新。全系统刷新触发来源仍仅五类。
+
+### 4.2 Exhausted 时效（同 v1）
+
+reset 已过的 Exhausted 视同 Unknown，调度器现场判断。
+
+### 4.3 三档可选性 + 跨层扫描顺序（修订）
 
 ```text
-acquire(account_lock)
-  → 每次 HTTP 前 acquire(global_slot)
-  → 发送 HTTP
-  → HTTP 返回后立即 release(global_slot)
-  → （序列内下一步重复上两行）
-release(account_lock)
+Preferred     : Fresh/Aging 且未耗尽、无熔断、无认证失败
+Opportunistic : Unknown；Stale 且上次已知可用；Exhausted 但 reset 已过
+Excluded      : 确认耗尽未到 reset；AuthBlocked；熔断开；临时不可用；optimistic trial 进行中
 ```
 
-禁止：持有 account lock 时等待另一个 account lock；持有 global slot 时等待任何 account lock；在持有 global slot 期间做任何非 HTTP 的等待（如激活传播延迟）。
+**选取顺序（采纳审核项 8 建议）**：
 
-### 3.2 Probe 关键序列的原子性
+1. 按插件优先级从高到低扫描**全部层的 Preferred**，取第一个。
+2. Preferred 全空 → 按插件优先级从高到低扫描 **Opportunistic**，取第一个并开启 optimistic trial。
+3. 全部 Excluded → 返回无法选取，进入 CPA fallback。
 
-`precheck 额度查询 → Probe 发送 → verify 额度查询` 三步在**一次 account lock 持有期内**完成，保证不被同账号其他操作插入。但：
+即：已知可用的低插件优先级账号，优先于状态未知的高插件优先级账号。可靠性压过优先级；冷启动全 Unknown 时自然回落到纯优先级顺序。
 
-- **任一步失败 → 立即释放 account lock**，将重试注册为一个全新的意图（带 Probe 自己的退避时间），绝不持锁退避。
-- 若 Probe 发送与 verify 之间需要等待激活传播（建议固定小延迟，如 2–5 秒，可配置为内部策略），该等待**不持有 global slot**；若等待需要超过锁租约阈值，释放 account lock，verify 作为独立意图重新排队（verify 意图执行前重新校验 G）。
-- `max_refresh_concurrency: 1`（当前默认值）下，因为槽按 HTTP 计费且请求间释放，一个 Probe 序列不会长期独占全局吞吐。
+### 4.4 Optimistic Trial Lease（新增）
 
-### 3.3 去重与合并规则
+- 每 AuthInstance 同时最多一个 trial。选中 Opportunistic 账号即开启 trial（记录开启时间），trial 期间该实例归入 Excluded（不再被乐观放行；若期间刷新确认可用则转 Preferred 正常参与）。
+- 释放条件（任一）：usage feedback 到达（成功或 `usage_limit_reached`）；额度刷新结果写回；超时（`optimistic_trial_timeout`，内部策略，默认 60s）。
+- trial 开启同时提交对应刷新意图（`scheduler_initial` / `scheduler_stale_recovery`）。
 
-去重键：`(AccountIdentity, op-class, G)`。
+---
 
-op-class 枚举与合并规则：
+## 5. 时间、租约与 Fencing
 
-| op-class | 可合并对象 | 说明 |
+1. **绝对时间截止**、tick 仅为检查器（同 v1）。
+2. **启动/唤醒重算不重放**（同 v1）：时间跳跃检测后按 `(持久化 reset 时间, 最近快照, now)` 推导，每窗口至多一次序列。
+3. **持久化原则（修订）**：执行中状态不持久化；**但外部副作用的 WAL 记录必须先于副作用落盘**（详见 §8.1）。启动时无 WAL 记录的中间态一律回退 pending；有 WAL 记录的按 §6.3 恢复。
+4. **租约 + Fencing（修订）**：任务进入执行态记 `startedAt` 并持有 ExecutionToken；超过租约（内部策略，默认 2 分钟）→ 协调层回收：作废该 token、释放锁、按退避重签。旧 worker 稍后返回时因 token 失效，结果与成功日志全部丢弃（INV-25）。
+
+---
+
+## 6. Probe 控制器
+
+### 6.1 双窗口状态机（v2）
+
+```text
+Idle → WaitingReset → PendingCheck
+PendingCheck --授权--> [precheck 读取] --classify-->
+   ActivatedNew / ActivatedInferred → Confirmed
+   NotDueYet → WaitingReset（重算截止）
+   StillLazy → [WAL: attempt sending] → [send] → [WAL: sent] 
+             → SentAwaitingVerify → [verify 读取, barrier=sent_at] --classify-->
+                 Activated* → Confirmed
+                 StillLazy / Ambiguous → RetryWait
+   Anomaly → AnomalyHold（记录，下周期重评，不发 Probe）
+任一步失败 → RetryWait（Probe 退避）；401 → AuthBlocked
+AuthBlocked --LoginEpoch++--> PendingCheck
+WaitingRoster（Bootstrap §2.2）--roster 确认--> 按重算进入对应状态
+任意状态 --实例退出最高层 / G 失效--> Idle（取消截止，作废未完成 attempt）
+```
+
+持久化状态集：`Idle / WaitingReset / PendingCheck / SentAwaitingVerify / RetryWait / Confirmed / AuthBlocked / AnomalyHold / WaitingRoster`。其中 SentAwaitingVerify 是**副作用事实**，不是执行中状态，必须持久化。
+
+### 6.2 窗口判定纯函数（新增，回应审核项 10）
+
+```text
+classifyWindow(window_type, prev_reset_at, prev_snapshot, snap, now, cfg) → 判定
+cfg：skew_tol（默认 120s）、window_len（5h / 上游报告的长周期）、
+     refresh_after_reset_delay（沿用现配置）
+```
+
+| # | 条件（按序匹配，首个命中生效） | 判定 |
 |---|---|---|
-| `quota_read` | scheduler_initial / scheduler_interval / scheduler_stale_recovery / probe_precheck / probe_verify / manual_refresh 之间**全部可合并** | 同账号 in-flight 的额度读取只发一次，所有等待方共享结果，各自回到自己的状态机 |
-| `probe_send` | **不与任何请求合并** | 它是不同类型的对外请求 |
-| `token_refresh` | 同账号 in-flight 可合并 | 结果保存前校验 E |
+| 1 | snap.reset_at 存在 且 snap.reset_at > prev_reset_at + skew_tol | **ActivatedNew**（窗口已翻转） |
+| 2 | snap.reset_at 存在 且 snap.reset_at < prev_reset_at − skew_tol | **Anomaly**（reset 倒退） |
+| 3 | snap.reset_at 与 prev 差值 > 2 × window_len | **Anomaly**（异常跳跃） |
+| 4 | now < prev_reset_at + refresh_after_reset_delay | **NotDueYet** |
+| 5 | snap.reset_at 缺失 且 snap 用量相对 prev_snapshot 已清零/回满 | **ActivatedInferred** |
+| 6 | snap.reset_at 缺失 且 用量与 prev 相同 | **Ambiguous**（按 StillLazy 处理，但该 attempt 后若仍 Ambiguous → RetryWait，不连发） |
+| 7 | snap.reset_at ≈ prev（±tol）且 已过 delay 且 用量未清零 | **StillLazy** |
+| 8 | 其余 | **Ambiguous** |
 
-**手动刷新的特殊性**：`manual_refresh` 无视缓存新鲜度（一定产生一次读取意图），但**可以** join 同账号 in-flight 的 `quota_read`——用户连点两次按钮不产生两个请求。
+- prev_reset_at 从未知（首次）：以 snap 建立基线，判定 NotDueYet 并进入 WaitingReset。
+- **双窗口推进**：一次额度响应同时喂给两个窗口，各自独立调用 classify、独立推进；一次 send 的 attempt 记录其意图激活的窗口集合，verify 按窗口分别判定，一个窗口 Confirmed 不代表另一个。
 
-### 3.4 推荐实现模型（供 Codex 评估）
+### 6.3 崩溃恢复与重复抑制（回应审核项 4）
 
-建议采用**意图队列 + 单一协调 goroutine 持有全部可变状态 + worker goroutine 只做 HTTP** 的 actor 式模型：三个控制器和 management 只向队列投递意图；协调 goroutine 做去重、锁、槽、G/E 校验和状态写回；worker 拿到已授权的请求描述后执行 HTTP 并把结果作为事件投回队列。这样绝大多数共享状态不需要显式 mutex，G/E 校验天然在单线程内完成。account lock / global slot 在该模型下退化为协调 goroutine 内的簿记，而非真正的 sync 原语。**这是推荐而非定死，请 Codex 结合 CPA 插件宿主的调用约定（`scheduler.pick` 由宿主线程同步调用？）评估可行性。**
+目标明确为 **best-effort-once**：严格 exactly-once 不可达。
 
----
+- WAL 中存在 `phase=sending`（发送结果未知）或 `phase=sent` 的 attempt → 启动后**先 verify**（等待 `verify_not_before`），禁止立即重发。
+- 重复抑制窗口：同一窗口自该 attempt `created_at` 起 `probe_resend_suppress`（内部策略，默认 max(verify 宽限, 10 分钟)）内不允许新的 send；抑制期后仍 StillLazy 才允许新 attempt。
 
-## 4. Probe 与熔断的双向隔离（决策 D4）
+### 6.4 与熔断的双向隔离（同 v1 四条硬规则）
 
-四条硬规则：
-
-1. **熔断不阻断 Probe**：熔断开启、半开、额度耗尽、临时不可用，均不能阻止已到期的 Probe 序列执行（原设计第七.4 节的"独立受控执行许可"）。
-2. **Probe 不修改熔断**：Probe 成功不推进半开成功计数、不关闭熔断、不清零失败计数。
-3. **Probe 失败不计熔断**：Probe 的任何失败（含 429、5xx、超时）只进入 Probe 自己的失败计数与退避，不进入熔断失败计数。
-4. **Probe 允许修改的业务状态仅限事实纠正**：写回窗口额度数据、重置时间；当 precheck/verify 读到窗口已激活时，清除**对应窗口**的 Exhausted 标记。除此之外不触碰任何业务可用性状态。
-
-熔断半开的成功计数**只**由真实 `scheduler.pick` 选中账号后的业务请求成功推进（沿用原设计第九节"不能被无关的静态读取推进"，此处进一步把 Probe 也排除）。
-
-认证失败（401 且 token 恢复失败）是唯一的跨业务线状态：一旦确认凭据不可恢复，普通刷新、Probe、半开验证**全部**停止对该账号的自动请求，账号进入第三档 Excluded，UI 提示重新登录。解除条件：CPA 同步检测到 E++（用户重新登录）。
+熔断不阻断 Probe；Probe 不修改熔断；Probe 失败不计熔断；Probe 仅做事实纠正（窗口数据 + 对应窗口 Exhausted 清除）。半开只由真实业务请求推进。AuthBlocked 是唯一跨业务线状态，仅 LoginEpoch++ 解除（TokenEpoch 变化不解除，INV-33）。
 
 ---
 
-## 5. 时间、持久化与崩溃恢复（决策 D5）
+## 7. 边界决策（修订）
 
-1. **全部使用绝对时间**：每个待执行任务持久化的是"截止时刻"（deadline），定时器 tick 只是检查器。禁止任何依赖 tick 计数或相对累计的调度。
-2. **启动/唤醒 = 重算，不是重放**：进程启动或检测到大幅时间跳跃（如 `now - last_tick > 2 × tick 间隔`，对应宿主机睡眠唤醒）后，对每个账号每个窗口，用 `(持久化的上次 reset 时间, 最近额度快照, now)` **推导当前应处状态**，丢弃积压的到期事件。同一窗口无论积压多少个到期点，最多产生一次 Probe 序列。
-3. **只持久化意图与截止，不持久化 in-flight**：状态文件中不允许出现"正在检查""正在发送"这类执行中状态。启动恢复时，任何遗留的执行中状态一律回退为对应的 pending 态。
-4. **执行租约**：任务进入执行态时记录 `startedAt`；协调层发现执行超过租约（建议 2 分钟，内部策略）即视为死任务，回收并按退避重新调度。防止 worker 挂死导致某账号永久卡锁。
-5. reset 时间来自上游报告，保留现有 `refresh_after_reset_delay` 作为 reset 后的确认宽限；已消费的 reset 触发保持 one-shot（沿用 v0.1.6 已修复的行为）。
+### 7.1 D7（修订，回应审核项 7）
 
----
+正常 Management 账号 payload **只包含当前最高层账号**——与"低层不加载、不显示、不调度"的既有产品要求一致。手动刷新仅限最高层实例，越界返回明确错误。若未来需要观察 CPA 全量 roster：另设独立的受保护诊断端点 + 显式配置开关（默认关闭），不混入活动账号列表；本次重构不实现。
 
-## 6. 边界决策（D7–D10）
+### 7.2 D8（同 v1）
 
-**D7 · 低 CPA 层账号与 Management**：低层账号在 Management 页只展示 CPA 静态信息（存在于 CPA、层级、身份），**禁止**对其手动刷新，API 对此返回明确错误。理由：保持"活动集合是插件访问 OpenAI 的唯一面"这条不变量绝对简单，不为它开任何口子。
+`refresh_on_startup` 只约束普通刷新控制器；Probe 启动读取不受其控制，文档与 UI 显式说明。
 
-**D8 · `refresh_on_startup` 语义收窄**：该配置只约束普通刷新控制器。Probe 启用时，Probe 控制器的启动额度读取**不受**它控制（这是 Probe 业务线的固有行为）。配置说明与 UI 需明确写出这一点。
+### 7.3 CPA 同步失败策略（修订，回应审核项 6）
 
-**D9 · CPA 同步失败降级**：沿用 last-known-good 集合，G 不变，Probe 与普通刷新照常。所有基于降级清单发出的请求在结构化日志中标记 `degraded_roster: true`，便于事后排查"为什么对已删除账号发了请求"。降级持续超过阈值（如 30 分钟，内部策略）时在 Management 页显著提示。
+**关键事实**：真实 `scheduler.pick` 的 candidates 由宿主逐次提供，真实请求路径不依赖同步缓存——降级策略只需覆盖后台业务线（普通刷新、Probe）。
 
-**D10 · 身份不可解析的账号**：凭据中既无 account ID 也无 email 的账号，不纳入活动集合，Management 页标记"身份不可识别"。不允许以文件名为键降级管理（避免重登录后配置错配）。
-
----
-
-## 7. 状态机汇总（实现基准）
-
-### 7.1 单窗口 Probe 状态机（五小时窗口、长周期窗口各一份，互不共享任何字段）
+有限期 fail-open：
 
 ```text
-Idle（未启用/账号不在最高层）
-WaitingReset（持久化：预计 reset 时刻 + refresh_after_reset_delay）
-  --deadline 到--> PendingCheck
-PendingCheck --协调层授权--> [precheck 额度读取]
-  --窗口已激活--> Confirmed（记录激活方式=natural）
-  --reset 时间已更新--> Confirmed（激活方式=observed）
-  --仍为 lazy--> [发送 Probe] --> [verify 额度读取]
-      --已激活--> Confirmed（激活方式=probed）
-      --仍未激活--> RetryWait（Probe 退避，持久化下次截止）
-  --任一步失败--> RetryWait（Probe 退避；401 → AuthBlocked）
-Confirmed --下一个 reset 时刻可推导--> WaitingReset
-AuthBlocked --E++（重新登录）--> PendingCheck
-任意状态 --账号退出最高层/G 失效--> Idle（取消所有截止）
+同步失败 → 进入 Degraded（记 degraded_since）
+Degraded 且 now − degraded_since ≤ roster_degraded_max（内部策略，默认 30 分钟）：
+  后台业务线继续使用 last-confirmed roster
+  所有请求标记 degraded_roster: true
+超过阈值 → RosterFailClosed：
+  暂停全部后台 OpenAI 请求（普通刷新意图丢弃、Probe 窗口进入 RosterHold）
+  真实 pick 不受影响（candidates 权威）
+  Management 页显著告警
+恢复：任一成功同步或任一次 pick candidates 到达 → 确认 roster、解除、RosterHold 窗口重算
 ```
 
-持久化字段（每窗口）：上次 reset 时间、当前状态（仅限 Idle/WaitingReset/PendingCheck/RetryWait/Confirmed/AuthBlocked，无执行中态）、失败计数、下次截止时刻、最近激活方式。
-
-### 7.2 普通刷新活跃窗口
-
-```text
-Dormant --真实 scheduler.pick--> Active（记录 last_activity；窗口截止 = last_activity + refresh_active_window）
-Active 内每次 pick：延长窗口；若账号 Unknown/Stale → 提交对应刷新意图；若距上次刷新 ≥ quota_refresh_interval → 提交 scheduler_interval 意图
-Active --窗口截止且无新 pick--> Dormant（保留全部缓存与账号，UI 标记"普通后台刷新已休眠"）
-```
+INV-02、INV-20、INV-21 的措辞相应修订（见 §10）。
 
 ---
 
-## 8. 不变量总表（Mock 测试的验收基准）
+## 8. 持久化规范（新增，回应审核项 12）
 
-每条均应转化为至少一个自动化测试场景。
+### 8.1 落盘时机
+
+**必须立即落盘（写穿）**：Probe attempt WAL 记录（sending 先于 HTTP、sent 紧随发送成功）；AuthBlocked 置位/解除；LoginEpoch / AuthBindingEpoch / G 变化；roster 确认（last-confirmed 集合与时间）。
+**可合批**：额度快照、日志、统计、UI 注解（内部策略：≤1 次/5s，进程退出时 flush）。
+
+### 8.2 写入路径
+
+- 文件头含 `schema_version`；升级提供逐版本迁移；识别到更高版本 → 只读加载不写回并告警。
+- 原子写：序列化 → 同目录临时文件 → fsync → rename 覆盖 → fsync 目录（Windows 下 rename 语义为 best-effort，S2 验证并记录平台差异）。
+- 成功写入后保留上一份为 `.bak`。
+
+### 8.3 损坏恢复
+
+主文件解析失败 → 加载 `.bak`；两者皆失败 → 将损坏文件改名 `.corrupt` 保留取证，以安全默认值启动（所有 Probe 窗口回 Idle/WaitingRoster、无 roster → Bootstrap 流程），Management 页告警。任何恢复路径不得导致凭据泄露——**状态文件从不存储** access/refresh token、cookie、authorization header；LoginEpoch 比较所需内容仅存哈希。
+
+---
+
+## 9. 实施顺序（v2，8 步，回应审核项 11）
+
+| 阶段 | 内容 | 验收 |
+|---|---|---|
+| **S0** | 锁死 Resource/Management 安全边界（补测试；行为应已符合 v0.1.x） | INV-01 |
+| **S1** | 宿主能力验证：roster/priority API 是否存在、`scheduler.pick` 线程模型与延迟预算；产出 §2 Bootstrap 路线的最终形态；必要时向 CPA 上游提能力需求 | 书面结论 + Bootstrap 决策定稿 |
+| **S2** | Identity / AuthInstance / 各 Epoch 的 vertical slice + 持久化框架（schema version、原子写、迁移、损坏恢复） | INV-28、30；旧状态迁移测试 |
+| **S3** | 协调层**只接管 `quota_read`**（去重、barrier、锁、按 HTTP 计费的 slot、ExecutionToken、来源标签） | INV-05、09、24、25、26 |
+| **S4** | 协调层接管 `token_refresh`；普通刷新控制器状态机（活跃窗口 + interval + stale_recovery，删除 stale 独立时间线） | INV-04、10、11、22、§7.2 时间线用例 |
+| **S5** | 调度可选性三档 + optimistic trial lease + 跨层扫描顺序 | INV-12、13、29 |
+| **S6** | Probe 状态机重写（双窗口、classify 判定表、WAL、恢复、抑制窗口、熔断隔离）；`probe_send` 入协调层 | INV-06、07、08、14～19、27 |
+| **S7** | CPA 同步控制器（TTL、pick candidates 喂入、Degraded/FailClosed）、Management 收尾、Bootstrap 接线 | INV-02、03、20、21、23、31～35 |
+
+每阶段独立合入；前阶段测试持续通过。
+
+---
+
+## 10. 不变量总表（v2）
+
+INV-01 ～ INV-24 沿用 v1，其中三条修订措辞：
+
+- **INV-02（修订）**：任意时刻，插件对 OpenAI 的请求只针对**最后确认的最高层**实例；处于 Degraded 时必须带 `degraded_roster` 标记，且 Degraded 持续不超过 `roster_degraded_max`。
+- **INV-20（修订）**：roster 确认账号删除或降层后，其所有待执行截止被取消，后续无任何请求；同步失败期间的例外仅限 Degraded 窗口内且带标记。
+- **INV-21（修订）**：同步失败时活动集合不清空、G 不变；Degraded 超阈值后后台请求停止而非继续。
+
+新增：
 
 | 编号 | 不变量 |
 |---|---|
-| INV-01 | Resource 端点响应中不出现任何账号 ID、别名、额度、优先级、熔断或日志数据 |
-| INV-02 | 任意时刻，插件对 OpenAI 的请求只针对当前最高 CPA 层账号（手动刷新亦然） |
-| INV-03 | G 失效后返回的结果不写回活动状态；不产生成功日志误导 |
-| INV-04 | E 失效后返回的凭据不覆盖新凭据（构造竞争：in-flight token 刷新期间用户重登录） |
-| INV-05 | 同账号同 op-class 的 in-flight 请求最多一个；等待方共享同一结果 |
-| INV-06 | `probe_send` 永不与其他请求合并 |
-| INV-07 | Probe 三步序列之间不被同账号其他写操作插入 |
-| INV-08 | Probe 序列任一步失败后，account lock 在有界时间内释放，普通刷新可继续 |
-| INV-09 | 全局并发按 HTTP 请求计：并发=1 时，Probe 等待期内其他账号仍能发出请求 |
-| INV-10 | `stale_after` 在任何时间线上不独立触发请求（仅真实请求遇 Stale 时触发一次 stale_recovery） |
-| INV-11 | Aging 状态不触发请求 |
-| INV-12 | 全部账号 Unknown/Stale 时，首条真实请求能选出账号（乐观放行），且触发且仅触发一轮刷新 |
-| INV-13 | Exhausted 且 reset 已过的账号按 Unknown 处理，可被乐观选取 |
-| INV-14 | 熔断开启不阻断到期 Probe；Probe 成功/失败均不改变熔断计数与状态 |
-| INV-15 | 半开成功计数只被真实业务请求推进 |
-| INV-16 | `usage_limit_reached` 不递增熔断失败计数（回归保护） |
-| INV-17 | 五小时窗口与长周期窗口的状态、退避、截止互不影响；一次 Probe 请求的结果可同时更新两窗口数据但不合并任务状态 |
-| INV-18 | 模拟时间跳跃（睡眠唤醒）后，同一窗口至多产生一次 Probe 序列，无积压重放 |
-| INV-19 | 状态文件中不存在执行中状态；从任意持久化状态启动均能收敛到合法状态 |
-| INV-20 | 账号从 CPA 删除或降层后，其所有待执行截止被取消，后续无任何对该账号的请求 |
-| INV-21 | CPA 同步失败时活动集合不清空、G 不变，降级请求带 `degraded_roster` 标记 |
-| INV-22 | 普通刷新休眠（Dormant）期间账号卡片与缓存保留，且已启用的 Probe 照常到期执行 |
-| INV-23 | 认证不可恢复后，该账号所有业务线自动请求停止；E++ 后自动恢复 |
-| INV-24 | 结构化日志中每个对外请求都有八种来源标签之一，且与实际触发方一致 |
+| INV-25 | 租约回收后，旧 ExecutionToken 的结果与成功日志不写回、不记录 |
+| INV-26 | Probe verify 只使用对应 attempt send 成功之后启动的额度读取（causal barrier） |
+| INV-27 | 崩溃发生在 send 与 verify 之间时，重启先 verify；抑制窗口内不重发 |
+| INV-28 | 同一 Identity 的 auth 实例替换后，旧实例的 in-flight 写回不被新实例继承 |
+| INV-29 | 每 AuthInstance 同时最多一个 optimistic trial；trial 期间不再被乐观放行 |
+| INV-30 | 状态文件截断、损坏或版本不符时安全恢复，且任何路径不泄露凭据 |
+| INV-31 | 多个 CPA 同步唤醒来源并发时，同一时刻只执行一次 roster sync |
+| INV-32 | 普通刷新 Dormant 期间无 OpenAI 访问，但到期 Probe 仍照常唤醒执行 |
+| INV-33 | TokenEpoch 变化（含插件自身刷新）不解除 AuthBlocked；LoginEpoch 变化解除 |
+| INV-34 | 低 CPA 层账号不出现在正常 Management payload，也不产生任何 OpenAI 请求 |
+| INV-35 | RosterFailClosed 状态下无任何后台 OpenAI 请求；真实 pick 不受影响 |
 
 ---
 
-## 9. 实施顺序（映射到现有仓库结构）
+## 11. 提交给 Codex 的 v2 复审任务清单
 
-每个阶段可独立合入、独立验证，前一阶段的测试在后续阶段持续通过。
-
-**Phase 0 · 地基（无行为变化）**
-`models.go` 引入 AccountIdentity、TierGeneration、CredentialEpoch 类型与 `(G,E)` snapshot 结构；`state.go`/`disk_state.go` 迁移持久化键到 AccountIdentity（含旧格式迁移）；新增 `coordinator.go` 骨架（意图队列、op-class、来源标签），此阶段仅透传。验收：全部现有测试通过，状态文件迁移测试。
-
-**Phase 1 · 协调层接管所有对外请求**
-`quota.go`、`auth.go`、`probe.go`、`management.go` 的全部 OpenAI/CPA 访问改为提交意图；实现去重、account lock、按 HTTP 计费的 global slot、G/E 写回校验、日志来源标签。验收：INV-02～09、24。
-
-**Phase 2 · 缓存状态机与调度可选性**
-`quota.go` 实现四态缓存与 Exhausted 时效判断；`scheduler.go` 实现三档可选性与乐观放行；`refresh.go` 删除 stale 独立时间线，只保留活跃窗口 + interval + stale_recovery。验收：INV-10～13、22 及第 7.2 节时间线场景（10:00/10:20/10:30/11:00/11:20 用例）。
-
-**Phase 3 · Probe 状态机重写**
-`probe.go` 按第 7.1 节双窗口状态机重写；绝对时间截止、启动重算、租约回收；与熔断双向隔离。验收：INV-14～19。
-
-**Phase 4 · CPA 同步控制器与 Management 收尾**
-同步 TTL、失败降级、D7 手动刷新边界、D8 配置语义、UI 状态展示（休眠标记、过期标记、Probe 双窗口状态、最后请求来源）。验收：INV-01、20、21、23 与第十一节展示要求。
+1. §3.3 的 causal barrier 实现语义：`started_at` 用墙钟还是协调层单调序号？（建议单调序号，请确认无剩余竞争。）
+2. §1.2 的 G 定义改为 (AuthInstanceID, LoginEpoch) 多重集后，构造反例验证"删除又加回"的全部路径是否都触发 G++（含 CPA 复用同名文件、复用同 refresh token 的极端情况）。
+3. §2.2 Bootstrap：`provisional_probe_max_age=24h` 的风险面评估；WaitingRoster 是否需要对"Probe 启用但长期无人访问"的部署给出额外出路（如可选的定期 roster API 轮询——仅当 S1 确认 API 存在）。
+4. §4.3 跨层扫描顺序改变了插件优先级语义，请评估是否需要配置开关保留旧行为（严格优先级模式）。
+5. §6.2 判定表：对上游可能的响应形态（reset 缺失、用量字段缺失、长周期窗口 window_len 未知）做穷举核对；skew_tol=120s 是否足够覆盖实际观测到的时钟漂移。
+6. §6.3 抑制窗口与 Probe 退避、锁租约三者的取值关系是否存在 verify 永远排不上的组合（v1 问题 5 在 v2 参数下复验）。
+7. §8.2 Windows 平台原子写语义的落地方案。
+8. S3"只接管 quota_read"期间，未接管的 probe/token 路径与协调层并存的过渡态是否引入新竞争（建议过渡期对同实例加共享 instance lock）。
+9. 全表 INV-01～35 与本文件规则逐条对齐检查，补充遗漏。
+10. 各内部策略默认值（trial 60s、租约 2min、degraded 30min、suppress 10min、skew 120s、provisional 24h）之间的组合矛盾扫描。
 
 ---
 
-## 10. 提交给 Codex 的审核任务清单
-
-请 Codex 结合本文件 + 原设计文档 + v0.1.6 源码，重点回答：
-
-1. **宿主约定冲突**：`scheduler.pick` 由 CPA 宿主以何种线程模型调用？第 3.4 节的 actor 模型在 c-shared 插件（CGO 回调）约束下是否可行？pick 路径上"提交意图"是否会引入不可接受的延迟或跨 goroutine 阻塞？
-2. **锁模型证伪**：按第 3.1 节的固定获取顺序，构造反例证明是否仍存在死锁或活锁（特别是 Probe verify 重新排队与 token_refresh 合并交织的路径）。
-3. **G/E 模型漏洞**：找出 G 与 E 覆盖不到的写回竞争。例如：同一账号在两次 CPA 同步之间被"删除又加回"（身份相同、G 递增两次），in-flight 请求应如何判定？E 的哈希比较对凭据字段顺序变化是否稳健？
-4. **乐观放行的风险面**：第二档放行是否可能在多账号同时 Unknown 时造成对多个耗尽账号的连续真实请求打击？是否需要在 pick 层面对第二档增加单位时间放行上限？
-5. **Probe 序列的锁租约与传播延迟**：verify 延迟阈值、锁租约、Probe 退避三者的取值关系是否存在导致 verify 永远排不上的组合？
-6. **崩溃恢复完备性**：对第 7.1 节状态机做穷举——每个持久化状态 × 启动时的额度/时间条件，验证第 5.2 节的重算规则都能收敛且不重放副作用。
-7. **不变量表缺口**：INV-01～24 是否漏掉了设计中承诺的规则？请补充可测试的新不变量。
-8. **实施顺序风险**：Phase 1 一次性接管全部对外请求是否过大？是否应先只接管 quota_read？
-9. **与 CPA issue #4196 的耦合**：若上游 fallback 行为修复，本设计哪些决策（尤其 D7、最高层隔离）需要预留演进路径？
-10. **性能与资源**：意图队列 + 每 tick 重算在几十账号规模下的开销评估；状态文件写入频率是否需要合批。
-
----
-
-## 附：本方案定死的决策一览
+## 附：v2 决策一览
 
 | 决策 | 一句话结论 |
 |---|---|
-| D1 缓存与调度 | 四态缓存 + 三档可选性；乐观放行 + usage_limit_reached 兜底；Aging 纯标签 |
-| D2 凭据竞争 | 引入 per-account CredentialEpoch，凭据写回双重校验 (G,E) |
-| D3 并发模型 | account lock 串行 + global slot 按 HTTP 计费；固定获取顺序；Probe 序列持锁但失败即释放 |
-| D4 Probe×熔断 | 双向完全隔离；Probe 仅做事实纠正；半开只由真实业务推进 |
-| D5 时间与恢复 | 绝对时间截止；启动/唤醒重算不重放；不持久化 in-flight；执行租约 |
-| D6 去重 | 键 = (身份, op-class, G)；quota_read 全线可合并；probe_send 不合并；手动刷新 bypass 新鲜度但可 join |
-| D7 低层账号 | Management 禁止对低层账号手动刷新 |
-| D8 refresh_on_startup | 只约束普通刷新，不约束 Probe 启动读取 |
-| D9 同步降级 | last-known-good + degraded_roster 日志标记 |
-| D10 身份不可解析 | 不纳入活动集合，不以文件名降级管理 |
+| 身份模型 | Identity（配置继承）与 AuthInstance（操作单位）分离；Binding/Login/Token 三个 Epoch 各司其职 |
+| G 定义 | (AuthInstanceID, LoginEpoch) 多重集变化即 G++ |
+| Fencing | 所有写回统一校验 ExecutionToken；租约回收即作废 |
+| Roster 来源 | 宿主 API（待验证）> pick candidates（每次免费确认）> 持久化 Provisional（有界放行 Probe） |
+| 同步失败 | 后台业务线有限期 fail-open（30min）后 fail-closed；真实 pick 永不受影响 |
+| 调度 | 三档 + 跨层 Preferred 优先 + optimistic trial lease |
+| Probe 因果 | verify 带 causal barrier，只用 send 后启动的读取；precheck 自由合并 |
+| Probe 幂等 | best-effort-once：副作用 WAL 先行落盘 + verify-first 恢复 + 重复抑制窗口 |
+| 判定 | classifyWindow 纯函数判定表，含倒退/缺失/跳跃异常处理 |
+| Management | 正常 payload 仅最高层；低层零请求零展示 |
+| 持久化 | schema version + 原子写 + .bak 降级 + 副作用写穿 + 无凭据落盘 |
+| 实施 | 8 步：安全边界 → 宿主验证 → 身份/持久化 → quota_read → 刷新 → 调度 → Probe → 收尾 |
