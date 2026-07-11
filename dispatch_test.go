@@ -456,7 +456,7 @@ func TestLogSchedulerDecisionIncludesSelectedAccountContext(t *testing.T) {
 		Handled: true,
 		Reason:  "selected",
 		Ordered: []ScheduledAccount{
-			{AuthID: "auth-1", QueueStatus: QueueStatusAvailable, Available: true},
+			{AuthID: "auth-1", CPAPriority: 8, SchedulerPriority: 3, QueueStatus: QueueStatusAvailable, Available: true},
 		},
 	}
 
@@ -465,5 +465,8 @@ func TestLogSchedulerDecisionIncludesSelectedAccountContext(t *testing.T) {
 	fields := store.Snapshot(now).Logs[0].Fields
 	if fields["auth_id"] != "auth-1" || fields["selected_queue_status"] != string(QueueStatusAvailable) || fields["ordered_count"] != 1 {
 		t.Fatalf("fields = %#v, want selected account context", fields)
+	}
+	if fields["selected_cpa_priority"] != 8 || fields["selected_scheduler_priority"] != 3 {
+		t.Fatalf("priority fields = %#v, want distinct CPA and scheduler priorities", fields)
 	}
 }

@@ -96,6 +96,98 @@ func TestPickRespectsCPAPriorityBeforeExpiry(t *testing.T) {
 	}
 }
 
+func TestPickUsesPluginPriorityWithinAdmittedCPATier(t *testing.T) {
+	now := time.Date(2026, 7, 11, 9, 0, 0, 0, time.UTC)
+	low := weeklyAccount("plugin-low", 99, now.Add(time.Hour), false)
+	high := weeklyAccount("plugin-high", 0, now.Add(72*time.Hour), false)
+	high.Annotation.SchedulerPriority = 10
+	snapshot := StateSnapshot{Config: DefaultConfig(), Now: now, Accounts: []AccountState{low, high}}
+	req := pluginapi.SchedulerPickRequest{
+		Provider: "codex",
+		Candidates: []pluginapi.SchedulerAuthCandidate{
+			{ID: "plugin-low", Provider: "codex", Priority: 0, Status: "active"},
+			{ID: "plugin-high", Provider: "codex", Priority: 0, Status: "active"},
+		},
+	}
+
+	decision := PickCodexAccount(req, snapshot, now)
+	if decision.AuthID != "plugin-high" {
+		t.Fatalf("decision = %#v, want plugin-high", decision)
+	}
+	if decision.Ordered[0].CPAPriority != 0 || decision.Ordered[0].SchedulerPriority != 10 {
+		t.Fatalf("selected priorities = %#v", decision.Ordered[0])
+	}
+}
+
+func TestPickScansLowerPluginTierWhenHigherTierExhausted(t *testing.T) {
+	now := time.Date(2026, 7, 11, 9, 0, 0, 0, time.UTC)
+	highA := weeklyAccount("exhausted-high-a", 0, now.Add(24*time.Hour), true)
+	highA.Quota.FiveHour.ResetAt = now.Add(time.Hour)
+	highA.Annotation.SchedulerPriority = 1
+	highB := weeklyAccount("exhausted-high-b", 0, now.Add(48*time.Hour), true)
+	highB.Quota.FiveHour.ResetAt = now.Add(2 * time.Hour)
+	highB.Annotation.SchedulerPriority = 1
+	low := weeklyAccount("available-low-plugin-tier", 0, now.Add(72*time.Hour), false)
+	snapshot := StateSnapshot{Config: DefaultConfig(), Now: now, Accounts: []AccountState{highA, highB, low}}
+
+	decision := PickCodexAccount(requestWithCandidates(highA.AuthID, highB.AuthID, low.AuthID), snapshot, now)
+	if decision.AuthID != "available-low-plugin-tier" || decision.DelegateBuiltin != "" {
+		t.Fatalf("decision = %#v", decision)
+	}
+}
+
+func TestBuildOrderedAccountsKeepsOnlyMaximumCPATier(t *testing.T) {
+	now := time.Date(2026, 7, 11, 9, 0, 0, 0, time.UTC)
+	highA := weeklyAccount("high-a", 0, now.Add(48*time.Hour), false)
+	highB := weeklyAccount("high-b", 0, now.Add(24*time.Hour), false)
+	low := weeklyAccount("low", 0, now.Add(time.Hour), false)
+	snapshot := StateSnapshot{Config: DefaultConfig(), Now: now, Accounts: []AccountState{highA, highB, low}}
+	req := pluginapi.SchedulerPickRequest{Provider: "codex", Candidates: []pluginapi.SchedulerAuthCandidate{
+		{ID: "low", Provider: "codex", Priority: 1},
+		{ID: "high-a", Provider: "codex", Priority: 5},
+		{ID: "high-b", Provider: "codex", Priority: 5},
+	}}
+
+	ordered := BuildOrderedAccounts(req, snapshot, now)
+	if len(ordered) != 2 || ordered[0].AuthID != "high-b" || ordered[1].AuthID != "high-a" {
+		t.Fatalf("ordered = %#v", ordered)
+	}
+	for _, account := range ordered {
+		if account.CPAPriority != 5 {
+			t.Fatalf("account = %#v, want CPA priority 5", account)
+		}
+	}
+}
+
+func TestBuildOrderedAccountsUsesMaximumTierEntryForDuplicateAuthID(t *testing.T) {
+	now := time.Date(2026, 7, 11, 9, 0, 0, 0, time.UTC)
+	account := weeklyAccount("duplicate", 0, now.Add(time.Hour), false)
+	snapshot := StateSnapshot{Config: DefaultConfig(), Now: now, Accounts: []AccountState{account}}
+	req := pluginapi.SchedulerPickRequest{Provider: "codex", Candidates: []pluginapi.SchedulerAuthCandidate{
+		{ID: account.AuthID, Provider: "codex", Priority: 1},
+		{ID: account.AuthID, Provider: "codex", Priority: 5},
+	}}
+
+	ordered := BuildOrderedAccounts(req, snapshot, now)
+	if len(ordered) != 1 || ordered[0].CPAPriority != 5 {
+		t.Fatalf("ordered = %#v, want duplicate represented at maximum CPA priority", ordered)
+	}
+}
+
+func TestMissingPluginPriorityDefaultsToZero(t *testing.T) {
+	now := time.Date(2026, 7, 11, 9, 0, 0, 0, time.UTC)
+	account := weeklyAccount("default-priority", 99, now.Add(time.Hour), false)
+	snapshot := StateSnapshot{Config: DefaultConfig(), Now: now, Accounts: []AccountState{account}}
+	req := pluginapi.SchedulerPickRequest{Provider: "codex", Candidates: []pluginapi.SchedulerAuthCandidate{
+		{ID: account.AuthID, Provider: "codex", Priority: 7},
+	}}
+
+	ordered := BuildOrderedAccounts(req, snapshot, now)
+	if len(ordered) != 1 || ordered[0].CPAPriority != 7 || ordered[0].SchedulerPriority != 0 {
+		t.Fatalf("ordered = %#v, want CPA priority 7 and default scheduler priority 0", ordered)
+	}
+}
+
 func TestPickWeeklyEarliestResetWithinPriority(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	cfg := DefaultConfig()

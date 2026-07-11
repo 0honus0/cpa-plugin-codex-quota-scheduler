@@ -131,7 +131,8 @@ func logSchedulerDecision(store *PluginState, req pluginapi.SchedulerPickRequest
 		if selected, ok := findScheduledAccount(decision.Ordered, decision.AuthID); ok {
 			fields["selected_queue_status"] = string(selected.QueueStatus)
 			fields["selected_sort_time"] = selected.SortTime.Format(time.RFC3339)
-			fields["selected_cpa_priority"] = selected.Priority
+			fields["selected_cpa_priority"] = selected.CPAPriority
+			fields["selected_scheduler_priority"] = selected.SchedulerPriority
 		}
 	} else if decision.DelegateBuiltin != "" {
 		event = "scheduler.fallback"

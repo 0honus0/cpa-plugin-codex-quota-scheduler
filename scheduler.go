@@ -17,7 +17,8 @@ type PickDecision struct {
 
 type ScheduledAccount struct {
 	AuthID            string
-	Priority          int
+	CPAPriority       int
+	SchedulerPriority int
 	Family            AccountFamily
 	QueueStatus       QueueStatus
 	Available         bool
@@ -80,11 +81,7 @@ func PickCodexAccount(req pluginapi.SchedulerPickRequest, snapshot StateSnapshot
 	if len(ordered) == 0 {
 		return PickDecision{Reason: "no_codex_candidates", Ordered: ordered}
 	}
-	activePriority := ordered[0].Priority
 	for _, account := range ordered {
-		if account.Priority != activePriority {
-			break
-		}
 		if account.Available {
 			return PickDecision{
 				AuthID:  account.AuthID,
@@ -107,6 +104,11 @@ func PickCodexAccount(req pluginapi.SchedulerPickRequest, snapshot StateSnapshot
 }
 
 func BuildOrderedAccounts(req pluginapi.SchedulerPickRequest, snapshot StateSnapshot, now time.Time) []ScheduledAccount {
+	admission, ok := HighestPriorityCodexAdmission(req)
+	if !ok {
+		return nil
+	}
+
 	accountsByAuthID := make(map[string]AccountState, len(snapshot.Accounts))
 	for _, account := range snapshot.Accounts {
 		if account.AuthID == "" {
@@ -121,6 +123,12 @@ func BuildOrderedAccounts(req pluginapi.SchedulerPickRequest, snapshot StateSnap
 		if candidate.ID == "" || candidate.Provider != "codex" {
 			continue
 		}
+		if candidate.Priority != admission.Priority {
+			continue
+		}
+		if _, ok := admission.AuthIDs[candidate.ID]; !ok {
+			continue
+		}
 		if _, ok := seen[candidate.ID]; ok {
 			continue
 		}
@@ -130,7 +138,7 @@ func BuildOrderedAccounts(req pluginapi.SchedulerPickRequest, snapshot StateSnap
 		if !ok {
 			ordered = append(ordered, ScheduledAccount{
 				AuthID:            candidate.ID,
-				Priority:          candidate.Priority,
+				CPAPriority:       candidate.Priority,
 				Family:            AccountFamilyUnknown,
 				QueueStatus:       QueueStatusUnavailable,
 				UnavailableReason: "unknown_account",
@@ -141,7 +149,8 @@ func BuildOrderedAccounts(req pluginapi.SchedulerPickRequest, snapshot StateSnap
 		queueStatus, available, reason, sortTime := accountQueueState(account, now)
 		ordered = append(ordered, ScheduledAccount{
 			AuthID:            candidate.ID,
-			Priority:          candidate.Priority,
+			CPAPriority:       candidate.Priority,
+			SchedulerPriority: account.Annotation.SchedulerPriority,
 			Family:            account.Family,
 			QueueStatus:       queueStatus,
 			Available:         available,
@@ -154,8 +163,8 @@ func BuildOrderedAccounts(req pluginapi.SchedulerPickRequest, snapshot StateSnap
 	sort.SliceStable(ordered, func(i, j int) bool {
 		left := ordered[i]
 		right := ordered[j]
-		if left.Priority != right.Priority {
-			return left.Priority > right.Priority
+		if left.SchedulerPriority != right.SchedulerPriority {
+			return left.SchedulerPriority > right.SchedulerPriority
 		}
 		leftRank := queueStatusRank(left.QueueStatus)
 		rightRank := queueStatusRank(right.QueueStatus)

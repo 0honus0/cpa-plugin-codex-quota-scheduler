@@ -107,10 +107,11 @@ type ResetProbeState struct {
 }
 
 type AccountAnnotation struct {
-	Alias   string   `json:"alias,omitempty" yaml:"alias,omitempty"`
-	Notes   string   `json:"notes,omitempty" yaml:"notes,omitempty"`
-	Tags    []string `json:"tags,omitempty" yaml:"tags,omitempty"`
-	GroupID string   `json:"group_id,omitempty" yaml:"group_id,omitempty"`
+	Alias             string   `json:"alias,omitempty" yaml:"alias,omitempty"`
+	Notes             string   `json:"notes,omitempty" yaml:"notes,omitempty"`
+	Tags              []string `json:"tags,omitempty" yaml:"tags,omitempty"`
+	GroupID           string   `json:"group_id,omitempty" yaml:"group_id,omitempty"`
+	SchedulerPriority int      `json:"scheduler_priority,omitempty" yaml:"scheduler_priority,omitempty"`
 }
 
 type GroupAnnotation struct {

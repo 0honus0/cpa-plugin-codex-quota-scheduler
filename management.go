@@ -75,6 +75,7 @@ type StatusAccount struct {
 	GroupNotes                   string             `json:"group_notes,omitempty"`
 	Tags                         []string           `json:"tags,omitempty"`
 	CPAPriority                  int                `json:"cpa_priority"`
+	SchedulerPriority            int                `json:"scheduler_priority"`
 	Family                       AccountFamily      `json:"family"`
 	QueueStatus                  QueueStatus        `json:"queue_status"`
 	Available                    bool               `json:"available"`
@@ -485,7 +486,8 @@ func BuildStatusPayload(snapshot StateSnapshot, ordered []ScheduledAccount) Stat
 			Group:             groupName,
 			GroupNotes:        groupNotes,
 			Tags:              cloneStringSlice(scheduled.Annotation.Tags),
-			CPAPriority:       scheduled.Priority,
+			CPAPriority:       scheduled.CPAPriority,
+			SchedulerPriority: scheduled.SchedulerPriority,
 			Family:            scheduled.Family,
 			QueueStatus:       scheduled.QueueStatus,
 			Available:         scheduled.Available,
@@ -595,14 +597,7 @@ func accountStatusNote(account AccountState, dueReason string, snapshot StateSna
 }
 
 func nextStatusAuthID(ordered []ScheduledAccount) string {
-	if len(ordered) == 0 {
-		return ""
-	}
-	activePriority := ordered[0].Priority
 	for _, scheduled := range ordered {
-		if scheduled.Priority != activePriority {
-			break
-		}
 		if scheduled.Available {
 			return scheduled.AuthID
 		}

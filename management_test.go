@@ -315,12 +315,13 @@ func TestStatusJSONIncludesSchedulerSummary(t *testing.T) {
 	}
 }
 
-func TestStatusNextAuthIDDoesNotScanBelowActivePriority(t *testing.T) {
+func TestStatusNextAuthIDScansLowerPluginPriority(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	store := NewPluginState(DefaultConfig())
-	highBlocked := weeklyAccount("high-blocked", 10, now.Add(24*time.Hour), false)
+	highBlocked := weeklyAccount("high-blocked", 5, now.Add(24*time.Hour), false)
 	highBlocked.Stale = true
-	lowAvailable := weeklyAccount("low-available", 1, now.Add(time.Hour), false)
+	highBlocked.Annotation.SchedulerPriority = 1
+	lowAvailable := weeklyAccount("low-available", 5, now.Add(time.Hour), false)
 	lowAvailable.LastSuccessAt = now
 	store.UpsertQuota(highBlocked)
 	store.UpsertQuota(lowAvailable)
@@ -337,8 +338,11 @@ func TestStatusNextAuthIDDoesNotScanBelowActivePriority(t *testing.T) {
 	if err := json.Unmarshal(resp.Body, &body); err != nil {
 		t.Fatalf("json.Unmarshal returned error: %v; body=%s", err, resp.Body)
 	}
-	if body.NextAuthID != "" {
-		t.Fatalf("NextAuthID = %q, want empty because highest CPA priority tier has no available account", body.NextAuthID)
+	if body.NextAuthID != "low-available" {
+		t.Fatalf("NextAuthID = %q, want lower plugin priority account", body.NextAuthID)
+	}
+	if len(body.Accounts) != 2 || body.Accounts[0].CPAPriority != 5 || body.Accounts[0].SchedulerPriority != 1 {
+		t.Fatalf("Accounts = %#v, want distinct status priorities", body.Accounts)
 	}
 }
 
