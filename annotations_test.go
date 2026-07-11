@@ -28,7 +28,7 @@ func TestAnnotationStoreRoundTrip(t *testing.T) {
 	path := filepath.Join(dir, "annotations.json")
 	state := AnnotationState{
 		Accounts: map[string]AccountAnnotation{
-			"auth:auth-1": {Alias: "Team A 01", Notes: "shared", Tags: []string{"team-a"}, GroupID: "team-a"},
+			"auth:auth-1": {Alias: "Team A 01", Notes: "shared", Tags: []string{"team-a"}, GroupID: "team-a", SchedulerPriority: 7},
 		},
 		Groups: map[string]GroupAnnotation{
 			"team-a": {Name: "Team A", Notes: "weekly pool", Tags: []string{"team"}, Color: "#2563eb"},
@@ -44,12 +44,30 @@ func TestAnnotationStoreRoundTrip(t *testing.T) {
 	if loaded.Accounts["auth:auth-1"].Alias != "Team A 01" {
 		t.Fatalf("loaded annotation = %#v", loaded.Accounts["auth:auth-1"])
 	}
+	if got := loaded.Accounts["auth:auth-1"].SchedulerPriority; got != 7 {
+		t.Fatalf("loaded scheduler priority = %d, want 7", got)
+	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("ReadFile returned error: %v", err)
 	}
 	if len(raw) == 0 || raw[0] != '{' {
 		t.Fatalf("annotation file is not JSON object: %q", raw)
+	}
+}
+
+func TestLoadAnnotationsDefaultsMissingSchedulerPriorityToZero(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "annotations.json")
+	if err := os.WriteFile(path, []byte(`{"accounts":{"auth:auth-1":{"alias":"legacy"}}}`), 0600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	loaded, err := LoadAnnotations(path)
+	if err != nil {
+		t.Fatalf("LoadAnnotations returned error: %v", err)
+	}
+	if got := loaded.Accounts["auth:auth-1"].SchedulerPriority; got != 0 {
+		t.Fatalf("loaded scheduler priority = %d, want 0", got)
 	}
 }
 

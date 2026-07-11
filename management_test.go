@@ -315,6 +315,31 @@ func TestStatusJSONIncludesSchedulerSummary(t *testing.T) {
 	}
 }
 
+func TestStatusJSONKeepsCPAAndSchedulerPrioritiesDistinct(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	account := weeklyAccount("auth-1", 3, now.Add(24*time.Hour), false)
+	account.LastSuccessAt = now
+	account.Annotation.SchedulerPriority = 8
+	store.UpsertQuota(account)
+
+	resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/plugins/codex-quota-scheduler/status",
+		Query:  url.Values{"format": []string{"json"}},
+	}, now)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, resp.Body)
+	}
+	var body StatusPayload
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		t.Fatalf("json.Unmarshal returned error: %v; body=%s", err, resp.Body)
+	}
+	if len(body.Accounts) != 1 || body.Accounts[0].CPAPriority != 3 || body.Accounts[0].SchedulerPriority != 8 {
+		t.Fatalf("accounts = %#v, want cpa_priority=3 and scheduler_priority=8", body.Accounts)
+	}
+}
+
 func TestStatusNextAuthIDScansLowerPluginPriority(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	store := NewPluginState(DefaultConfig())
@@ -428,7 +453,7 @@ func TestStatusHTMLUsesManagementAPIActionsModalProgressAndLogs(t *testing.T) {
 	}
 	html := string(resp.Body)
 	lower := strings.ToLower(html)
-	for _, want := range []string{"quota-bar", "editDialog", "logList", "openEdit", "exportLogs", "codex-quota-scheduler-logs.json", "maxLogEntries", "logRetention", "refreshOneQuota", "refreshStatus", "renderAccounts", "renderMetrics", "metricNextAuthID", "metricMonthlyMode", "metricLastSelected", "managementKey", "loadStatus", "MANAGEMENT_BASE", "/v0/management/plugins/codex-quota-scheduler", "authHeaders()", "localeSelect", "TRANSLATIONS", "codex-quota-scheduler-locale-v1", "Scheduler Settings", "Account Queue", "INLINE_TRANSLATIONS", "Reset credits", "Refresh Quota"} {
+	for _, want := range []string{"quota-bar", "editDialog", "logList", "openEdit", "exportLogs", "codex-quota-scheduler-logs.json", "maxLogEntries", "logRetention", "refreshOneQuota", "refreshStatus", "renderAccounts", "renderMetrics", "metricNextAuthID", "metricMonthlyMode", "metricLastSelected", "managementKey", "loadStatus", "MANAGEMENT_BASE", "/v0/management/plugins/codex-quota-scheduler", "authHeaders()", "localeSelect", "TRANSLATIONS", "codex-quota-scheduler-locale-v1", "Scheduler Settings", "Account Queue", "INLINE_TRANSLATIONS", "Reset credits", "Refresh Quota", `id="editSchedulerPriority"`, "account.schedulerPriority", "scheduler_priority", "Plugin priority", "插件优先级"} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("html missing marker %q: %s", want, html)
 		}
@@ -1217,6 +1242,53 @@ func TestManagementAccountEndpointUpdatesAnnotation(t *testing.T) {
 	got := store.Annotations().Accounts["auth:auth-1"]
 	if got.Alias != "工作账号" || got.GroupID != "team-a" || len(got.Tags) != 2 || got.Notes != "常用" {
 		t.Fatalf("account annotation = %#v", got)
+	}
+}
+
+func TestManagementAccountEndpointUpdatesAndResetsSchedulerPriority(t *testing.T) {
+	dir := t.TempDir()
+	previousDefaultStatePath := defaultStatePath
+	defaultStatePath = func() string { return filepath.Join(dir, "state.json") }
+	t.Cleanup(func() { defaultStatePath = previousDefaultStatePath })
+
+	store := NewPluginState(DefaultConfig())
+	account := weeklyAccount("auth-1", 3, time.Now().Add(24*time.Hour), false)
+	store.UpsertQuota(account)
+	for _, test := range []struct {
+		body string
+		want int
+	}{
+		{body: `{"auth_id":"auth-1","scheduler_priority":8}`, want: 8},
+		{body: `{"auth_id":"auth-1","scheduler_priority":0}`, want: 0},
+	} {
+		resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
+			Method: http.MethodPatch,
+			Path:   "/v0/management/plugins/codex-quota-scheduler/annotations/account",
+			Body:   []byte(test.body),
+		}, time.Now())
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, resp.Body)
+		}
+		if got := store.Annotations().Accounts["auth:auth-1"].SchedulerPriority; got != test.want {
+			t.Fatalf("scheduler priority = %d, want %d", got, test.want)
+		}
+		persisted, err := LoadPluginDiskState(defaultStatePath())
+		if err != nil {
+			t.Fatalf("LoadPluginDiskState returned error: %v", err)
+		}
+		if got := persisted.Accounts["auth:auth-1"].SchedulerPriority; got != test.want {
+			t.Fatalf("persisted scheduler priority = %d, want %d", got, test.want)
+		}
+		if got := store.Snapshot(time.Now()).Accounts[0].Priority; got != 3 {
+			t.Fatalf("CPA priority = %d, want unchanged value 3", got)
+		}
+	}
+	raw, err := os.ReadFile(defaultStatePath())
+	if err != nil {
+		t.Fatalf("ReadFile returned error: %v", err)
+	}
+	if strings.Contains(string(raw), "cpa_priority") {
+		t.Fatalf("annotation PATCH persisted CPA priority: %s", raw)
 	}
 }
 

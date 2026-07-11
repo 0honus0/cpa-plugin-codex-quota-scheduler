@@ -41,3 +41,39 @@ func TestLoadPluginDiskStateResetsLegacyNonChatGPTQuotaEndpoint(t *testing.T) {
 		t.Fatalf("QuotaRefreshInterval = %s, want 30m", state.Config.QuotaRefreshInterval)
 	}
 }
+
+func TestPluginDiskStateRoundTripsSchedulerPriority(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	state := PluginDiskState{
+		Config: DefaultConfig(),
+		Accounts: map[string]AccountAnnotation{
+			"auth:auth-1": {Alias: "priority", SchedulerPriority: 7},
+		},
+	}
+	if err := SavePluginDiskState(path, state); err != nil {
+		t.Fatalf("SavePluginDiskState returned error: %v", err)
+	}
+
+	loaded, err := LoadPluginDiskState(path)
+	if err != nil {
+		t.Fatalf("LoadPluginDiskState returned error: %v", err)
+	}
+	if got := loaded.Accounts["auth:auth-1"].SchedulerPriority; got != 7 {
+		t.Fatalf("loaded scheduler priority = %d, want 7", got)
+	}
+}
+
+func TestLoadPluginDiskStateDefaultsMissingSchedulerPriorityToZero(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte(`{"accounts":{"auth:auth-1":{"alias":"legacy"}}}`), 0600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	loaded, err := LoadPluginDiskState(path)
+	if err != nil {
+		t.Fatalf("LoadPluginDiskState returned error: %v", err)
+	}
+	if got := loaded.Accounts["auth:auth-1"].SchedulerPriority; got != 0 {
+		t.Fatalf("loaded scheduler priority = %d, want 0", got)
+	}
+}
