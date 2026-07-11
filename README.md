@@ -8,6 +8,24 @@ active CPA priority tier, it refreshes Codex quota status, tracks exhausted or
 temporarily unavailable accounts, and picks the next account by availability and
 reset or expiry time.
 
+## v0.1.6 Priority Isolation
+
+Version `0.1.6` loads only the maximum observed CPA priority tier from the
+candidates CPA provides. Set every Codex account managed by this plugin to the
+same CPA priority; `0` is recommended. Lower CPA priority tiers are not loaded,
+refreshed, displayed, or scheduled by the plugin.
+
+This is an operational requirement until CPA's built-in fallback can continue
+past an exhausted maximum auth-priority tier. Track the upstream behavior in
+[CLIProxyAPI issue #4196](https://github.com/router-for-me/CLIProxyAPI/issues/4196)
+and the plugin isolation work in
+[codex-quota-scheduler issue #2](https://github.com/JefferyZhang2019/cpa-plugin-codex-quota-scheduler/issues/2).
+
+Plugin priority is independent of CPA priority and defaults to `0`. Higher
+plugin-priority accounts are considered first, but the plugin falls through
+exhausted internal tiers to the first usable lower plugin-priority tier before
+using fallback. Plugin priority never reads from or writes to CPA.
+
 ## Features
 
 - Scheduler plugin for CPA Codex accounts.
@@ -123,7 +141,9 @@ refreshes only accounts that are due; it does not run a fixed full-account poll.
 `stale_after` remains the maximum cache-age safety threshold. A
 `usage_limit_reached` response immediately marks the selected account
 temporarily exhausted until its reported reset time (or for 2 minutes when no
-reset time is reported) and does not increment the circuit breaker.
+reset time is reported) and does not increment the circuit breaker. Reset
+timestamps already consumed by a successful refresh are one-shot triggers; a
+repeated upstream timestamp cannot create a two-second refresh loop.
 
 ## Management UI
 
@@ -153,6 +173,9 @@ The page provides:
 
 - Scheduler settings.
 - Sorted account queue.
+- Separate CPA priority and plugin priority badges.
+- Per-account plugin priority editing. Plugin priority defaults to `0`, is
+  independent of CPA, and falls through exhausted internal tiers.
 - Quota bars and reset times.
 - Circuit breaker state.
 - Account and group annotations.
@@ -184,13 +207,13 @@ make build
 Build and package the release zip:
 
 ```bash
-make package VERSION=0.1.5
+make package VERSION=0.1.6
 ```
 
 Generate an aggregate checksum file for local release assets:
 
 ```bash
-make checksums VERSION=0.1.5
+make checksums VERSION=0.1.6
 ```
 
 Windows users can also use the PowerShell helper:
@@ -204,21 +227,24 @@ compiler such as MinGW-w64 on `PATH`.
 
 ## GitHub Releases
 
-Version `0.1.5` restores interval-based per-account refreshes inside the active
-window and keeps quota-exhaustion feedback separate from circuit-breaker
+Version `0.1.6` isolates CPA priority admission to the maximum observed tier,
+adds plugin-owned per-account priority with internal exhausted-tier
+fallthrough, and consumes successful reset-trigger refreshes once. Historical
+version `0.1.5` restored interval-based per-account refreshes inside the active
+window and kept quota-exhaustion feedback separate from circuit-breaker
 failures. Version `0.1.4` keeps account cards, logs, refresh actions, scheduler
 status, and reset-probe notices behind the CPA Management key. Version `0.1.3`
 adds the opt-in automatic reset probe for lazy Codex quota windows. Version
 `0.1.2` adds adaptive refresh scheduling and a dynamically updating bilingual
-UI. Version `0.1.1` moves all state-changing and privileged operations
-behind CPA Management API routes and restricts `quota_endpoint` to the expected
+UI. Version `0.1.1` moves all state-changing and privileged operations behind
+CPA Management API routes and restricts `quota_endpoint` to the expected
 ChatGPT quota endpoint. Version `0.1.0` was the first public release version for
 this repository. GitHub Actions builds release assets when a tag matching `v*`
 is pushed. Use a dotted numeric version tag such as:
 
 ```bash
-git tag v0.1.5
-git push origin v0.1.5
+git tag v0.1.6
+git push origin v0.1.6
 ```
 
 The `Build` workflow runs tests and creates the release automatically. Release
@@ -229,21 +255,21 @@ codex-quota-scheduler_<version>_<goos>_<goarch>.zip
 checksums.txt
 ```
 
-For `v0.1.5`, the expected platform assets are:
+For `v0.1.6`, the expected platform assets are:
 
-- `codex-quota-scheduler_0.1.5_darwin_amd64.zip`
-- `codex-quota-scheduler_0.1.5_darwin_arm64.zip`
-- `codex-quota-scheduler_0.1.5_freebsd_amd64.zip`
-- `codex-quota-scheduler_0.1.5_linux_amd64.zip`
-- `codex-quota-scheduler_0.1.5_linux_arm64.zip`
-- `codex-quota-scheduler_0.1.5_windows_amd64.zip`
-- `codex-quota-scheduler_0.1.5_windows_arm64.zip`
+- `codex-quota-scheduler_0.1.6_darwin_amd64.zip`
+- `codex-quota-scheduler_0.1.6_darwin_arm64.zip`
+- `codex-quota-scheduler_0.1.6_freebsd_amd64.zip`
+- `codex-quota-scheduler_0.1.6_linux_amd64.zip`
+- `codex-quota-scheduler_0.1.6_linux_arm64.zip`
+- `codex-quota-scheduler_0.1.6_windows_amd64.zip`
+- `codex-quota-scheduler_0.1.6_windows_arm64.zip`
 - `checksums.txt`
 
 `checksums.txt` uses sha256sum format:
 
 ```text
-<sha256>  codex-quota-scheduler_0.1.5_darwin_arm64.zip
+<sha256>  codex-quota-scheduler_0.1.6_darwin_arm64.zip
 ```
 
 ## Management API

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -180,5 +181,95 @@ func TestHandleMethodSchedulerPickFallbackEnvelope(t *testing.T) {
 	}
 	if !resp.Handled || resp.DelegateBuiltin != pluginapi.SchedulerBuiltinFillFirst {
 		t.Fatalf("expected fill-first fallback, got %+v", resp)
+	}
+}
+
+func TestSixAccountIncidentUsesPluginPriorityFallthroughWhenCPAPrioritiesMatch(t *testing.T) {
+	now := time.Date(2026, 7, 11, 9, 0, 0, 0, time.UTC)
+	exhaustedA := weeklyAccount("exhausted-a", 0, now.Add(24*time.Hour), true)
+	exhaustedA.Quota.FiveHour.ResetAt = now.Add(time.Hour)
+	exhaustedA.Annotation.SchedulerPriority = 1
+	exhaustedB := weeklyAccount("exhausted-b", 0, now.Add(48*time.Hour), true)
+	exhaustedB.Quota.FiveHour.ResetAt = now.Add(2 * time.Hour)
+	exhaustedB.Annotation.SchedulerPriority = 1
+	usableA := weeklyAccount("usable-a", 0, now.Add(6*time.Hour), false)
+	usableB := weeklyAccount("usable-b", 0, now.Add(12*time.Hour), false)
+	usableC := weeklyAccount("usable-c", 0, now.Add(18*time.Hour), false)
+	usableD := weeklyAccount("usable-d", 0, now.Add(30*time.Hour), false)
+
+	snapshot := StateSnapshot{Config: DefaultConfig(), Now: now, Accounts: []AccountState{
+		exhaustedA,
+		exhaustedB,
+		usableA,
+		usableB,
+		usableC,
+		usableD,
+	}}
+	req := pluginapi.SchedulerPickRequest{Provider: "codex", Candidates: []pluginapi.SchedulerAuthCandidate{
+		{ID: exhaustedA.AuthID, Provider: "codex", Priority: 0},
+		{ID: exhaustedB.AuthID, Provider: "codex", Priority: 0},
+		{ID: usableA.AuthID, Provider: "codex", Priority: 0},
+		{ID: usableB.AuthID, Provider: "codex", Priority: 0},
+		{ID: usableC.AuthID, Provider: "codex", Priority: 0},
+		{ID: usableD.AuthID, Provider: "codex", Priority: 0},
+	}}
+
+	decision := PickCodexAccount(req, snapshot, now)
+	if !decision.Handled || decision.AuthID != usableA.AuthID || decision.DelegateBuiltin != "" {
+		t.Fatalf("decision = %#v, want first usable plugin-priority-0 account without fallback", decision)
+	}
+	if len(decision.Ordered) != 6 {
+		t.Fatalf("ordered account count = %d, want 6: %#v", len(decision.Ordered), decision.Ordered)
+	}
+	if decision.Ordered[0].SchedulerPriority != 1 || decision.Ordered[1].SchedulerPriority != 1 {
+		t.Fatalf("first plugin tier = %#v, want two plugin-priority-1 accounts", decision.Ordered[:2])
+	}
+	if decision.Ordered[0].Available || decision.Ordered[1].Available {
+		t.Fatalf("first plugin tier unexpectedly usable: %#v", decision.Ordered[:2])
+	}
+	if decision.Ordered[2].AuthID != usableA.AuthID || decision.Ordered[2].SchedulerPriority != 0 || !decision.Ordered[2].Available {
+		t.Fatalf("first usable lower plugin tier account = %#v, want %q", decision.Ordered[2], usableA.AuthID)
+	}
+}
+
+func TestSixAccountIncidentMixedCPAPrioritiesExposeOnlyMaximumTier(t *testing.T) {
+	now := time.Date(2026, 7, 11, 9, 0, 0, 0, time.UTC)
+	exhaustedA := weeklyAccount("exhausted-a", 1, now.Add(24*time.Hour), true)
+	exhaustedA.Quota.FiveHour.ResetAt = now.Add(time.Hour)
+	exhaustedB := weeklyAccount("exhausted-b", 1, now.Add(48*time.Hour), true)
+	exhaustedB.Quota.FiveHour.ResetAt = now.Add(2 * time.Hour)
+	usableA := weeklyAccount("usable-a", 0, now.Add(6*time.Hour), false)
+	usableB := weeklyAccount("usable-b", 0, now.Add(12*time.Hour), false)
+	usableC := weeklyAccount("usable-c", 0, now.Add(18*time.Hour), false)
+	usableD := weeklyAccount("usable-d", 0, now.Add(30*time.Hour), false)
+
+	snapshot := StateSnapshot{Config: DefaultConfig(), Now: now, Accounts: []AccountState{
+		exhaustedA,
+		exhaustedB,
+		usableA,
+		usableB,
+		usableC,
+		usableD,
+	}}
+	req := pluginapi.SchedulerPickRequest{Provider: "codex", Candidates: []pluginapi.SchedulerAuthCandidate{
+		{ID: exhaustedA.AuthID, Provider: "codex", Priority: 1},
+		{ID: exhaustedB.AuthID, Provider: "codex", Priority: 1},
+		{ID: usableA.AuthID, Provider: "codex", Priority: 0},
+		{ID: usableB.AuthID, Provider: "codex", Priority: 0},
+		{ID: usableC.AuthID, Provider: "codex", Priority: 0},
+		{ID: usableD.AuthID, Provider: "codex", Priority: 0},
+	}}
+
+	decision := PickCodexAccount(req, snapshot, now)
+	if !decision.Handled || decision.AuthID != "" || decision.DelegateBuiltin != pluginapi.SchedulerBuiltinFillFirst {
+		t.Fatalf("decision = %#v, want fill-first fallback from exhausted maximum CPA tier", decision)
+	}
+	if len(decision.Ordered) != 2 {
+		t.Fatalf("ordered account count = %d, want only 2 maximum-tier accounts: %#v", len(decision.Ordered), decision.Ordered)
+	}
+	for _, account := range decision.Ordered {
+		if account.CPAPriority != 1 || account.Available {
+			t.Fatalf("ordered account = %#v, want unavailable CPA-priority-1 account", account)
+		}
 	}
 }
