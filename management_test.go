@@ -470,6 +470,57 @@ func TestStatusHTMLUsesManagementAPIActionsModalProgressAndLogs(t *testing.T) {
 	}
 }
 
+func TestStatusHTMLStaticCardShowsDistinctPriorityBadges(t *testing.T) {
+	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	store.SetAnnotations(AnnotationState{
+		Accounts: map[string]AccountAnnotation{
+			"auth:auth-1": {SchedulerPriority: 8},
+		},
+	})
+	account := weeklyAccount("auth-1", 3, now.Add(24*time.Hour), false)
+	account.LastSuccessAt = now
+	store.UpsertQuota(account)
+
+	resp := HandleManagementRequest(store, pluginapi.ManagementRequest{Method: http.MethodGet, Path: "/status"}, now)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, resp.Body)
+	}
+	html := string(resp.Body)
+	for _, want := range []string{
+		`<span class="badge">CPA 优先级 3</span>`,
+		`<span class="badge">插件优先级 8</span>`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("static account card missing priority badge %q: %s", want, html)
+		}
+	}
+}
+
+func TestStatusPageValidatesSchedulerPriorityBeforePatch(t *testing.T) {
+	page := renderStatusPageForTest(t, NewPluginState(DefaultConfig()))
+	for _, want := range []string{
+		"valueAsNumber",
+		"Number.isSafeInteger(schedulerPriority)",
+		"error.schedulerPriorityInteger",
+		"Plugin priority must be a safe integer.",
+		"插件优先级必须是安全整数。",
+		"scheduler_priority:schedulerPriority",
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("page missing scheduler priority validation marker %q", want)
+		}
+	}
+	if strings.Contains(page, "Number.parseInt(document.getElementById('editSchedulerPriority').value,10)||0") {
+		t.Fatal("page still coerces invalid scheduler priority to zero")
+	}
+	validation := strings.Index(page, "if(!Number.isSafeInteger(schedulerPriority))")
+	patch := strings.Index(page, "requestManagement('/annotations/account'")
+	if validation < 0 || patch < 0 || validation > patch {
+		t.Fatalf("scheduler priority validation must return before PATCH: validation=%d patch=%d", validation, patch)
+	}
+}
+
 func TestStatusPageUsesCollapsedSettingsAndNoHardReload(t *testing.T) {
 	store := NewPluginState(DefaultConfig())
 	page := renderStatusPageForTest(t, store)
@@ -1356,7 +1407,7 @@ func TestResourceExportImportRoundTrip(t *testing.T) {
 	store := NewPluginState(cfg)
 	store.SetAnnotations(AnnotationState{
 		Accounts: map[string]AccountAnnotation{
-			"auth:auth-1": {Alias: "A", Tags: []string{"team"}, GroupID: "1"},
+			"auth:auth-1": {Alias: "A", Tags: []string{"team"}, GroupID: "1", SchedulerPriority: 9},
 		},
 		Groups: map[string]GroupAnnotation{
 			"1": {Name: "group1"},
@@ -1388,6 +1439,9 @@ func TestResourceExportImportRoundTrip(t *testing.T) {
 	}
 	if got := imported.Annotations().Accounts["auth:auth-1"].Alias; got != "A" {
 		t.Fatalf("imported account alias = %q, want A", got)
+	}
+	if got := imported.Annotations().Accounts["auth:auth-1"].SchedulerPriority; got != 9 {
+		t.Fatalf("imported scheduler priority = %d, want 9", got)
 	}
 }
 
