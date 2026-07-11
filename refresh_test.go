@@ -623,10 +623,14 @@ func TestRefreshDueOnceDoesNotRepeatSuccessfulRefreshForObservedPastReset(t *tes
 		AuthIndex:     "idx-1",
 		Provider:      "codex",
 		Quota:         ParsedQuota{FiveHour: &QuotaWindow{Kind: WindowFiveHour, ResetAt: resetAt}},
-		LastSuccessAt: resetAt.Add(-time.Hour),
+		LastSuccessAt: resetAt,
 	})
 
 	refresher := newAdmittedQuotaRefresherForTest(host, store, func() time.Time { return currentNow })
+	account := accountByAuthID(t, store.Snapshot(currentNow), "auth-1")
+	if due, reason := accountRefreshDue(account, cfg, currentNow); !due || reason != "five_hour_reset_due" {
+		t.Fatalf("pre-refresh due=%t reason=%q, want true five_hour_reset_due", due, reason)
+	}
 	if err := refresher.RefreshDueOnce(); err != nil {
 		t.Fatalf("first RefreshDueOnce returned error: %v", err)
 	}

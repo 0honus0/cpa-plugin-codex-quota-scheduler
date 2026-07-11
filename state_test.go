@@ -338,12 +338,52 @@ func TestAccountRefreshDueIgnoresResetConsumedBySuccess(t *testing.T) {
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	cfg := DefaultConfig()
 	cfg.QuotaRefreshInterval = 30 * time.Minute
-	account := weeklyAccount("auth-1", 1, now.Add(24*time.Hour), true)
-	account.LastSuccessAt = now.Add(-time.Minute)
-	account.Quota.FiveHour.ResetAt = now.Add(-10 * time.Minute)
-	due, reason := accountRefreshDue(account, cfg, now)
-	if due || reason != "" {
-		t.Fatalf("due=%t reason=%q", due, reason)
+	sources := []struct {
+		name   string
+		reason string
+		apply  func(*AccountState, time.Time)
+	}{
+		{name: "five-hour", reason: "five_hour_reset_due", apply: func(account *AccountState, resetAt time.Time) {
+			account.Quota.FiveHour = &QuotaWindow{Kind: WindowFiveHour, ResetAt: resetAt}
+		}},
+		{name: "long-window", reason: "long_window_reset_due", apply: func(account *AccountState, resetAt time.Time) {
+			account.Quota.LongWindow = &QuotaWindow{Kind: WindowWeekly, ResetAt: resetAt}
+		}},
+		{name: "temporary", reason: "temporary_reset_due", apply: func(account *AccountState, resetAt time.Time) {
+			account.TemporaryExhausted = true
+			account.TemporaryResetAt = resetAt
+		}},
+	}
+	tests := []struct {
+		name          string
+		resetAt       time.Time
+		lastSuccessAt time.Time
+		wantDue       bool
+		wantReason    bool
+	}{
+		{name: "pending past trigger is due", resetAt: now.Add(-2 * time.Minute), lastSuccessAt: now.Add(-2 * time.Minute), wantDue: true, wantReason: true},
+		{name: "success after trigger consumes", resetAt: now.Add(-10 * time.Minute), lastSuccessAt: now.Add(-time.Minute)},
+		{name: "success at trigger consumes", resetAt: now.Add(-10 * time.Minute), lastSuccessAt: now.Add(-9 * time.Minute)},
+		{name: "future trigger remains pending but not due", resetAt: now.Add(10 * time.Minute), lastSuccessAt: now.Add(-time.Minute)},
+		{name: "zero reset is ignored", lastSuccessAt: now.Add(-time.Minute)},
+	}
+	for _, source := range sources {
+		source := source
+		for _, tt := range tests {
+			tt := tt
+			t.Run(source.name+"/"+tt.name, func(t *testing.T) {
+				account := AccountState{AuthID: "auth-1", LastSuccessAt: tt.lastSuccessAt}
+				source.apply(&account, tt.resetAt)
+				due, reason := accountRefreshDue(account, cfg, now)
+				wantReason := ""
+				if tt.wantReason {
+					wantReason = source.reason
+				}
+				if due != tt.wantDue || reason != wantReason {
+					t.Fatalf("due=%t reason=%q wantDue=%t wantReason=%q", due, reason, tt.wantDue, wantReason)
+				}
+			})
+		}
 	}
 }
 
@@ -351,15 +391,48 @@ func TestNextRefreshDueAtIgnoresConsumedReset(t *testing.T) {
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	cfg := DefaultConfig()
 	cfg.QuotaRefreshInterval = 30 * time.Minute
-	store := NewPluginState(cfg)
-	store.RecordCodexActivity(now)
-	account := weeklyAccount("auth-1", 1, now.Add(24*time.Hour), true)
-	account.LastSuccessAt = now.Add(-time.Minute)
-	account.Quota.FiveHour.ResetAt = now.Add(-10 * time.Minute)
-	store.UpsertQuota(account)
-	want := account.LastSuccessAt.Add(cfg.QuotaRefreshInterval)
-	if got := store.NextRefreshDueAt(now); !got.Equal(want) {
-		t.Fatalf("next=%s want=%s", got, want)
+	sources := []struct {
+		name  string
+		apply func(*AccountState, time.Time)
+	}{
+		{name: "five-hour", apply: func(account *AccountState, resetAt time.Time) {
+			account.Quota.FiveHour = &QuotaWindow{Kind: WindowFiveHour, ResetAt: resetAt}
+		}},
+		{name: "long-window", apply: func(account *AccountState, resetAt time.Time) {
+			account.Quota.LongWindow = &QuotaWindow{Kind: WindowWeekly, ResetAt: resetAt}
+		}},
+		{name: "temporary", apply: func(account *AccountState, resetAt time.Time) {
+			account.TemporaryExhausted = true
+			account.TemporaryResetAt = resetAt
+		}},
+	}
+	tests := []struct {
+		name          string
+		resetAt       time.Time
+		lastSuccessAt time.Time
+		want          time.Time
+	}{
+		{name: "pending past trigger is due now", resetAt: now.Add(-2 * time.Minute), lastSuccessAt: now.Add(-2 * time.Minute), want: now},
+		{name: "success after trigger consumes", resetAt: now.Add(-10 * time.Minute), lastSuccessAt: now.Add(-time.Minute), want: now.Add(29 * time.Minute)},
+		{name: "success at trigger consumes", resetAt: now.Add(-10 * time.Minute), lastSuccessAt: now.Add(-9 * time.Minute), want: now.Add(21 * time.Minute)},
+		{name: "future trigger remains pending", resetAt: now.Add(10 * time.Minute), lastSuccessAt: now.Add(-time.Minute), want: now.Add(11 * time.Minute)},
+		{name: "zero reset is ignored", lastSuccessAt: now.Add(-time.Minute), want: now.Add(29 * time.Minute)},
+	}
+	for _, source := range sources {
+		source := source
+		for _, tt := range tests {
+			tt := tt
+			t.Run(source.name+"/"+tt.name, func(t *testing.T) {
+				store := NewPluginState(cfg)
+				store.RecordCodexActivity(now)
+				account := AccountState{AuthID: "auth-1", LastSuccessAt: tt.lastSuccessAt}
+				source.apply(&account, tt.resetAt)
+				store.UpsertQuota(account)
+				if got := store.NextRefreshDueAt(now); !got.Equal(tt.want) {
+					t.Fatalf("next=%s want=%s", got, tt.want)
+				}
+			})
+		}
 	}
 }
 
