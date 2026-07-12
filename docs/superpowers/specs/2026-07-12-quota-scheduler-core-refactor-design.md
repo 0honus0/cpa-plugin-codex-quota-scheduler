@@ -1,3 +1,39 @@
+# Codex Quota Scheduler Core Refactor Design
+
+## Status
+
+Approved and frozen on 2026-07-12. This is the Superpowers-formatted authoritative design for implementation stages S0 through S7.
+
+## Source and preservation rule
+
+This document adapts the jointly reviewed Decision Spec v5 into the repository's Superpowers design location. The frozen specification below is preserved in full. Formatting metadata in this preface clarifies workflow only and does not weaken, replace, or reinterpret any normative rule.
+
+## Goal
+
+Refactor the plugin into three independent controllers backed by one coordinated request layer, while preserving the Management security boundary, admitting only the highest CPA priority tier, keeping scheduler pick free of I/O, and making refresh, Probe, identity, persistence, and crash recovery behavior executable through invariant-driven tests.
+
+## Scope
+
+- Implement stages S0 through S7 serially.
+- Preserve INV-01 through INV-46, all frozen numeric defaults, state machines, decision tables, capability branches, and the full Mock test design.
+- Use test-driven development and machine-verifiable stage gates.
+- Route implementation ambiguities through the frozen deviation protocol instead of revising this design.
+
+## Non-goals
+
+- Modifying CPA source code.
+- Treating scheduler candidates as an authoritative roster.
+- Reopening approved product or architecture decisions through a new brainstorming cycle.
+- Publishing, pushing, tagging, releasing, or mutating remote issues as part of this documentation conversion.
+
+## Authority and conflict resolution
+
+The frozen rules below remain the single source of truth. During implementation, resolve conflicts in this order: invariants, state machines and decision tables, normative prose, then examples. If that order cannot decide the issue, prefer no outbound request, discard unsafe writeback, and wait or back off; record the result in `docs/deviations.md`.
+
+---
+
+## Frozen Decision Specification v5
+
 # Codex Quota Scheduler 重构决策规格（Decision Spec v5 · FINAL）
 
 > **文档地位**：唯一生效规格（single source of truth），自包含，无历史版本依赖。与《目标设计文档》冲突时以本文件为准。
