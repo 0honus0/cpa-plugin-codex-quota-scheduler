@@ -1342,7 +1342,7 @@ func TestStartRecomputesDelayAfterAsyncRefreshSchedulesRetry(t *testing.T) {
 	}
 }
 
-func TestStartDoesNotBusyLoopWhenDueRefreshMakesNoProgress(t *testing.T) {
+func TestStartDormantDoesNotRefreshOrBusyLoop(t *testing.T) {
 	now := time.Now()
 	cfg := DefaultConfig()
 	cfg.QuotaRefreshInterval = time.Hour
@@ -1358,12 +1358,9 @@ func TestStartDoesNotBusyLoopWhenDueRefreshMakesNoProgress(t *testing.T) {
 	refresher.Start()
 	defer refresher.Stop()
 
-	if !waitUntil(500*time.Millisecond, func() bool { return host.listCallCount() >= 1 }) {
-		t.Fatalf("ListAuths calls = %d, want initial due refresh", host.listCallCount())
-	}
-	time.Sleep(120 * time.Millisecond)
-	if got := host.listCallCount(); got > 2 {
-		t.Fatalf("ListAuths calls = %d, want no tight loop when due refresh makes no progress", got)
+	time.Sleep(150 * time.Millisecond)
+	if got := host.listCallCount(); got != 0 {
+		t.Fatalf("ListAuths calls = %d, want dormant normal refresh to remain stopped", got)
 	}
 }
 

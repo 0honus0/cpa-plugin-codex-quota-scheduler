@@ -28,8 +28,10 @@ type MonthlyMode string
 type FallbackMode string
 
 type Config struct {
-	HandleEnabled                   bool
-	QuotaRefreshInterval            time.Duration
+	HandleEnabled        bool
+	QuotaRefreshInterval time.Duration
+	// StaleAfter classifies cache age and permits pick-time recovery. It does
+	// not own a normal-refresh deadline.
 	StaleAfter                      time.Duration
 	MonthlyMode                     MonthlyMode
 	Fallback                        FallbackMode

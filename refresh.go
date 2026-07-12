@@ -68,6 +68,7 @@ type QuotaRefresher struct {
 	wg                sync.WaitGroup
 	coordinator       *Coordinator
 	legacyTxn         *LegacyRefreshTxn
+	refreshController *RefreshController
 	fenceMu           sync.Mutex
 	nextFence         uint64
 	txnIntent         *Intent
@@ -159,9 +160,10 @@ func NewQuotaRefresher(host HostClient, state *PluginState, now func() time.Time
 		now = time.Now
 	}
 	r := &QuotaRefresher{
-		host:  host,
-		state: state,
-		now:   now,
+		host:              host,
+		state:             state,
+		now:               now,
+		refreshController: NewRefreshController(state.Config().QuotaRefreshInterval, state.Config().RefreshActiveWindow),
 	}
 	r.legacyTxn = &LegacyRefreshTxn{refresher: r}
 	r.coordinator = NewCoordinator(CoordinatorOptions{
@@ -551,24 +553,26 @@ func (r *QuotaRefresher) Start() {
 		}()
 
 		for {
-			interval := r.nextRefreshLoopDelay()
-			if interval <= 0 {
-				r.RefreshDueSoon()
-				interval = minDuration(r.state.Config().QuotaRefreshInterval, time.Second)
+			interval, scheduled := r.nextRefreshLoopDelay()
+			var timer *time.Timer
+			var timerC <-chan time.Time
+			if scheduled {
+				timer = time.NewTimer(interval)
+				timerC = timer.C
 			}
-			timer := time.NewTimer(interval)
 			select {
-			case <-timer.C:
+			case <-timerC:
+				r.refreshController.OnDeadline(r.now())
 				r.RefreshDueSoon()
 			case <-wake:
-				if !timer.Stop() {
+				if timer != nil && !timer.Stop() {
 					select {
 					case <-timer.C:
 					default:
 					}
 				}
 			case <-stop:
-				if !timer.Stop() {
+				if timer != nil && !timer.Stop() {
 					select {
 					case <-timer.C:
 					default:
@@ -580,16 +584,20 @@ func (r *QuotaRefresher) Start() {
 	}()
 }
 
-func (r *QuotaRefresher) nextRefreshLoopDelay() time.Duration {
+func (r *QuotaRefresher) nextRefreshLoopDelay() (time.Duration, bool) {
 	now := r.now()
-	interval := r.state.Config().QuotaRefreshInterval
-	if dueAt := r.state.NextRefreshDueAt(now); !dueAt.IsZero() {
-		delay := dueAt.Sub(now)
-		if delay < interval {
-			return delay
-		}
+	deadline := r.refreshController.NextDeadline(now)
+	if legacy := r.state.NextRefreshDueAt(now); !legacy.IsZero() && (deadline.IsZero() || legacy.Before(deadline)) {
+		deadline = legacy
 	}
-	return interval
+	if deadline.IsZero() {
+		return 0, false
+	}
+	delay := deadline.Sub(now)
+	if delay < 0 {
+		delay = 0
+	}
+	return delay, true
 }
 
 func (r *QuotaRefresher) wakeRefreshLoop() {
@@ -694,6 +702,35 @@ func (r *QuotaRefresher) RefreshDueCandidatesSoon(req pluginapi.SchedulerPickReq
 	r.refreshDueSoon(version, func() error {
 		return r.refreshDueCandidatesOnce(version)
 	})
+}
+
+func (r *QuotaRefresher) OnSchedulerPick(req pluginapi.SchedulerPickRequest, version uint64, now time.Time) {
+	if r == nil || r.refreshController == nil || !r.runtimeAuthorized() {
+		return
+	}
+	snapshot := r.state.Snapshot(now)
+	known := knownAccountAuthIDs(snapshot)
+	cache := CacheSnapshot{Accounts: snapshot.Accounts, StaleAfter: snapshot.Config.StaleAfter}
+	for authID := range snapshot.CPAAdmission.AuthIDs {
+		if _, ok := known[authID]; !ok {
+			cache.Initial = true
+			break
+		}
+	}
+	for _, account := range snapshot.Accounts {
+		if account.LastSuccessAt.IsZero() {
+			cache.Initial = true
+		}
+		if !account.LastSuccessAt.IsZero() && now.Sub(account.LastSuccessAt) > snapshot.Config.StaleAfter {
+			cache.StaleRecovery = true
+			break
+		}
+	}
+	intents := r.refreshController.OnPick(now, cache)
+	r.wakeRefreshLoop()
+	if len(intents) != 0 {
+		r.RefreshDueCandidatesSoon(req, version)
+	}
 }
 
 func (r *QuotaRefresher) refreshDueSoon(version uint64, refresh func() error) {

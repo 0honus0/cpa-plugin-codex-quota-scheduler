@@ -356,7 +356,7 @@ func (s *PluginState) RefreshActive(now time.Time) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	cfg := NormalizeConfig(s.cfg)
-	return !s.lastCodexActivityAt.IsZero() && !now.After(s.lastCodexActivityAt.Add(cfg.RefreshActiveWindow))
+	return !s.lastCodexActivityAt.IsZero() && now.Before(s.lastCodexActivityAt.Add(cfg.RefreshActiveWindow))
 }
 
 func (s *PluginState) RecordRefreshFailure(authID, authIndex string, kind RefreshFailureKind, message string, now time.Time) (AccountState, bool) {
@@ -570,7 +570,6 @@ func (s *PluginState) NextRefreshDueAt(now time.Time) time.Time {
 			continue
 		}
 		if account.LastSuccessAt.IsZero() {
-			consider(now)
 			continue
 		}
 		if cfg.EnableResetProbe {
@@ -580,8 +579,6 @@ func (s *PluginState) NextRefreshDueAt(now time.Time) time.Time {
 				}
 			}
 		}
-		consider(account.LastSuccessAt.Add(cfg.QuotaRefreshInterval))
-		consider(account.LastSuccessAt.Add(cfg.StaleAfter))
 		if account.Quota.FiveHour != nil && !account.Quota.FiveHour.ResetAt.IsZero() {
 			triggerAt := account.Quota.FiveHour.ResetAt.Add(cfg.RefreshAfterResetDelay)
 			if refreshTriggerPending(account.LastSuccessAt, triggerAt) {

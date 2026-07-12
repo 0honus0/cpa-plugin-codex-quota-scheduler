@@ -413,10 +413,10 @@ func TestNextRefreshDueAtIgnoresConsumedReset(t *testing.T) {
 		want          time.Time
 	}{
 		{name: "pending past trigger is due now", resetAt: now.Add(-2 * time.Minute), lastSuccessAt: now.Add(-2 * time.Minute), want: now},
-		{name: "success after trigger consumes", resetAt: now.Add(-10 * time.Minute), lastSuccessAt: now.Add(-time.Minute), want: now.Add(29 * time.Minute)},
-		{name: "success at trigger consumes", resetAt: now.Add(-10 * time.Minute), lastSuccessAt: now.Add(-9 * time.Minute), want: now.Add(21 * time.Minute)},
+		{name: "success after trigger consumes", resetAt: now.Add(-10 * time.Minute), lastSuccessAt: now.Add(-time.Minute)},
+		{name: "success at trigger consumes", resetAt: now.Add(-10 * time.Minute), lastSuccessAt: now.Add(-9 * time.Minute)},
 		{name: "future trigger remains pending", resetAt: now.Add(10 * time.Minute), lastSuccessAt: now.Add(-time.Minute), want: now.Add(11 * time.Minute)},
-		{name: "zero reset is ignored", lastSuccessAt: now.Add(-time.Minute), want: now.Add(29 * time.Minute)},
+		{name: "zero reset is ignored", lastSuccessAt: now.Add(-time.Minute)},
 	}
 	for _, source := range sources {
 		source := source
@@ -638,7 +638,7 @@ func TestQuotaRefreshIntervalMakesSuccessfulAccountDue(t *testing.T) {
 	}
 }
 
-func TestNextRefreshDueAtUsesQuotaRefreshInterval(t *testing.T) {
+func TestNextRefreshDueAtDoesNotOwnQuotaRefreshInterval(t *testing.T) {
 	now := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
 	cfg := DefaultConfig()
 	cfg.QuotaRefreshInterval = 30 * time.Minute
@@ -648,9 +648,8 @@ func TestNextRefreshDueAtUsesQuotaRefreshInterval(t *testing.T) {
 	store.UpsertQuota(AccountState{AuthID: "auth-1", LastSuccessAt: now.Add(-10 * time.Minute)})
 
 	next := store.NextRefreshDueAt(now)
-	want := now.Add(20 * time.Minute)
-	if !next.Equal(want) {
-		t.Fatalf("NextRefreshDueAt = %s, want %s", next, want)
+	if !next.IsZero() {
+		t.Fatalf("NextRefreshDueAt = %s, want zero; RefreshController owns interval", next)
 	}
 }
 

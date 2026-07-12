@@ -97,7 +97,7 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 	}
 	if requestIncludesCodex(req) {
 		globalState.RecordCodexActivity(now)
-		refreshGlobalRefresherDueSoon(req, admissionVersion)
+		refreshGlobalRefresherDueSoon(req, admissionVersion, now)
 	}
 	decision := schedulerPickSnapshot(req, globalState.Snapshot(now), now)
 	if decision.AuthID != "" {
@@ -244,11 +244,11 @@ func refreshGlobalRefresherOneSoon(authID string) {
 	}
 }
 
-func refreshGlobalRefresherDueSoon(req pluginapi.SchedulerPickRequest, admissionVersion uint64) {
+func refreshGlobalRefresherDueSoon(req pluginapi.SchedulerPickRequest, admissionVersion uint64, now time.Time) {
 	refresherMu.Lock()
 	refresher := globalRefresher
 	refresherMu.Unlock()
 	if refresher != nil {
-		refresher.RefreshDueCandidatesSoon(req, admissionVersion)
+		refresher.OnSchedulerPick(req, admissionVersion, now)
 	}
 }

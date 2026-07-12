@@ -73,6 +73,16 @@ func TestDefaultConfigAdaptiveRefreshDefaults(t *testing.T) {
 	}
 }
 
+func TestStaleAfterRemainsClassificationOnlyConfig(t *testing.T) {
+	cfg, err := DecodeConfig([]byte("quota_refresh_interval: 30m\nstale_after: 31m\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.StaleAfter != 31*time.Minute {
+		t.Fatalf("StaleAfter = %s", cfg.StaleAfter)
+	}
+}
+
 func TestDefaultConfigDisablesResetProbe(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg.EnableResetProbe {
