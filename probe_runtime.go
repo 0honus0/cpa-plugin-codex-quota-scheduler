@@ -14,12 +14,6 @@ type probeReadPayload struct {
 	Binding RuntimeBinding
 	Windows []ProbeWindowKind
 }
-type probeSendPayload struct {
-	Binding     RuntimeBinding
-	Credentials CodexCredentials
-	Windows     []ProbeWindowKind
-	AttemptID   string
-}
 type probeReadResult struct {
 	Quota       ParsedQuota
 	Credentials CodexCredentials
@@ -96,6 +90,41 @@ func (r *QuotaRefresher) persistProbeWindows() error {
 	return err
 }
 
+func (r *QuotaRefresher) reconcileProbeOrphans(persisted PersistentState, active map[AuthInstanceID]struct{}) error {
+	keys := map[AuthInstanceID]struct{}{}
+	for i := range persisted.ProbeWindows {
+		keys[i] = struct{}{}
+	}
+	for i := range persisted.ProbeAttempts {
+		keys[i] = struct{}{}
+	}
+	var firstErr error
+	for i := range keys {
+		if _, ok := active[i]; ok {
+			continue
+		}
+		r.probeController.Advance(i, ProbeEvent{Kind: ProbeEventInstanceRemoved, Now: r.now()})
+		_, err := r.runtimeStore.Update(func(s *PersistentState) error { delete(s.ProbeWindows, i); delete(s.ProbeAttempts, i); return nil })
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func activeProbeBindings(roster HostRosterSnapshot, bindings map[string]RuntimeBinding) (map[string]RuntimeBinding, map[AuthInstanceID]struct{}) {
+	tier := highestTierSet(roster)
+	byID := map[string]RuntimeBinding{}
+	instances := map[AuthInstanceID]struct{}{}
+	for id, b := range bindings {
+		if _, ok := tier[id]; ok && b.Instance != 0 {
+			byID[id] = b
+			instances[b.Instance] = struct{}{}
+		}
+	}
+	return byID, instances
+}
+
 func (r *QuotaRefresher) RunProbeDueOnce(ctx context.Context) error {
 	if r.probeController == nil {
 		return errors.New("probe runtime unavailable")
@@ -111,26 +140,18 @@ func (r *QuotaRefresher) RunProbeDueOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	active := highestTierSet(r.runtimeRoster())
-	var firstErr error
 	r.bindings.mu.RLock()
 	bindings := make(map[string]RuntimeBinding, len(r.bindings.bindings))
 	for id, b := range r.bindings.bindings {
 		bindings[id] = b
 	}
 	r.bindings.mu.RUnlock()
+	bindings, activeInstances := activeProbeBindings(r.runtimeRoster(), bindings)
+	var firstErr error
+	if err := r.reconcileProbeOrphans(persisted, activeInstances); err != nil {
+		firstErr = err
+	}
 	for authID, b := range bindings {
-		if _, ok := active[authID]; !ok {
-			r.probeController.Advance(b.Instance, ProbeEvent{Kind: ProbeEventInstanceRemoved, Now: now})
-			if _, err := r.runtimeStore.Update(func(s *PersistentState) error {
-				delete(s.ProbeAttempts, b.Instance)
-				s.ProbeWindows = r.probeController.Snapshot()
-				return nil
-			}); err != nil {
-				return err
-			}
-			continue
-		}
 		if attempt, ok := persisted.ProbeAttempts[b.Instance]; ok && (attempt.Phase == ProbeAttemptSending || attempt.Phase == ProbeAttemptSent || attempt.Phase == ProbeAttemptSentUnknown) {
 			continue // recovery owns every nonterminal send, suppression expiry never authorizes resend
 		}
@@ -176,7 +197,10 @@ func (r *QuotaRefresher) RunProbeDueOnce(ctx context.Context) error {
 			return nil
 		})
 		if claimErr != nil {
-			return claimErr
+			if firstErr == nil {
+				firstErr = claimErr
+			}
+			continue
 		}
 		if claimed.ProbeAttempts[b.Instance].AttemptID != attempt.AttemptID || attempt.Phase != ProbeAttemptPrepared {
 			continue
@@ -200,27 +224,31 @@ func (r *QuotaRefresher) RunProbeRecoveryOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	active := highestTierSet(r.runtimeRoster())
+	r.bindings.mu.RLock()
+	allBindings := make(map[string]RuntimeBinding, len(r.bindings.bindings))
+	for id, b := range r.bindings.bindings {
+		allBindings[id] = b
+	}
+	r.bindings.mu.RUnlock()
+	bindings, activeInstances := activeProbeBindings(r.runtimeRoster(), allBindings)
+	persisted, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		return err
+	}
 	var firstErr error
+	if err = r.reconcileProbeOrphans(persisted, activeInstances); err != nil {
+		firstErr = err
+	}
 	for _, intent := range intents {
 		var authID string
 		var binding RuntimeBinding
-		r.bindings.mu.RLock()
-		for id, b := range r.bindings.bindings {
+		for id, b := range bindings {
 			if b.Instance == intent.Instance {
 				authID, binding = id, b
 				break
 			}
 		}
-		r.bindings.mu.RUnlock()
 		if authID == "" || binding.AuthBlocked {
-			continue
-		}
-		if _, ok := active[authID]; !ok {
-			if err := r.probeWAL.Complete(intent.Instance); err != nil {
-				return err
-			}
-			r.probeController.Advance(intent.Instance, ProbeEvent{Kind: ProbeEventInstanceRemoved, Now: r.now()})
 			continue
 		}
 		windows, _ := intent.Payload.([]ProbeWindowKind)
@@ -233,7 +261,10 @@ func (r *QuotaRefresher) RunProbeRecoveryOnce(ctx context.Context) error {
 		intent.Fingerprint = binding.Fingerprint
 		st, snapErr := r.runtimeStore.PersistentSnapshot()
 		if snapErr != nil {
-			return snapErr
+			if firstErr == nil {
+				firstErr = snapErr
+			}
+			continue
 		}
 		intent.Payload = probeSequencePayload{Binding: binding, Windows: windows, Attempt: st.ProbeAttempts[intent.Instance], Recovery: true}
 		result := r.coordinator.SubmitTyped(intent).Await(ctx)
@@ -245,7 +276,9 @@ func (r *QuotaRefresher) RunProbeRecoveryOnce(ctx context.Context) error {
 		}
 	}
 	if err := r.persistProbeWindows(); err != nil {
-		return err
+		if firstErr == nil {
+			firstErr = err
+		}
 	}
 	return firstErr
 }
@@ -440,45 +473,6 @@ func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *
 			return res
 		}
 		res.Value = probeReadResult{Quota: quota, Credentials: credentials}
-	case OperationProbeSend:
-		p := intent.Payload.(probeSendPayload)
-		fence, err := r.probeFence.Next()
-		if err != nil {
-			res.Err = err
-			return res
-		}
-		now := r.now()
-		attempt := ProbeAttempt{Instance: intent.Instance, AttemptID: p.AttemptID, Windows: p.Windows, SendFenceSeq: fence, CreatedAt: now, VerifyNotBefore: now.Add(3 * time.Second), SuppressUntil: now.Add(10 * time.Minute)}
-		if err = r.probeWAL.PersistSending(attempt); err != nil {
-			res.Err = err
-			return res
-		}
-		held.MarkProbeSent(attempt.SuppressUntil)
-		err = held.DoHTTP(ctx, func(context.Context) error {
-			return r.probeWAL.ExecuteSend(func() error {
-				resp, e := r.host.Do(pluginapi.HTTPRequest{Method: http.MethodPost, URL: codexResetProbeEndpoint, Headers: http.Header{"Authorization": []string{"Bearer " + p.Credentials.AccessToken}, "Chatgpt-Account-Id": []string{p.Credentials.ChatGPTAccountID}, "Content-Type": []string{"application/json"}}, Body: resetProbePayloadBytes()})
-				if e != nil {
-					return e
-				}
-				if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-					return fmt.Errorf("probe status %d", resp.StatusCode)
-				}
-				return nil
-			})
-		})
-		if err != nil {
-			res.Err = err
-			return res
-		}
-		if err = r.probeWAL.PersistSent(intent.Instance, r.now()); err != nil {
-			res.Err = err
-			return res
-		}
-		if err = held.WaitPropagation(ctx, 3*time.Second); err != nil {
-			res.Err = err
-			return res
-		}
-		res.Value = fence
 	}
 	return res
 }

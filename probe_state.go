@@ -86,6 +86,9 @@ func (c *ProbeController) NextDeadline() time.Time {
 	var out time.Time
 	for _, ws := range c.windows {
 		for _, w := range ws {
+			if w.State != ProbeWaitingReset && w.State != ProbeRetryWait && w.State != ProbeAnomalyHold {
+				continue
+			}
 			if !w.Deadline.IsZero() && (out.IsZero() || w.Deadline.Before(out)) {
 				out = w.Deadline
 			}
@@ -138,6 +141,7 @@ func (c *ProbeController) Advance(i AuthInstanceID, e ProbeEvent) []Intent {
 		case ProbeEventDeadline:
 			if (w.State == ProbeWaitingReset || w.State == ProbeRetryWait || w.State == ProbeAnomalyHold) && !w.Deadline.After(e.Now) {
 				w.State = ProbePendingCheck
+				w.Deadline = time.Time{}
 				ws[k] = w
 				out = append(out, Intent{Instance: i, Class: OperationProbePrecheck, Source: SourceProbePrecheck, Payload: []ProbeWindowKind{k}})
 			}

@@ -98,6 +98,12 @@ func TestProbeDeadlineConsumedOnceWithoutSpin(t *testing.T) {
 	if w.State != ProbePendingCheck {
 		t.Fatalf("state=%s", w.State)
 	}
+	if !w.Deadline.IsZero() {
+		t.Fatalf("consumed deadline retained: %v", w.Deadline)
+	}
+	if next := c.NextDeadline(); !next.IsZero() {
+		t.Fatalf("pending check remained timer-visible: %v", next)
+	}
 }
 
 func TestProbeRecoveryWaitsForGraceAndNeverResendsDuringSuppression(t *testing.T) { //inv:INV-27,INV-36

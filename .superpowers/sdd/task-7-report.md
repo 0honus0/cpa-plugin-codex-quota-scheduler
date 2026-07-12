@@ -125,3 +125,19 @@ The initial S6 commit exposed only primitives and was not an active cutover. The
 - Probe/typed race suite: pass.
 - S1, S2, S2.5, S3, S4, S5, S6 gates: pass.
 - Full `go test ./...`, `go vet ./...`, and `git diff --check`: pass; diff-check emitted only CRLF conversion warnings.
+
+## Final scheduler/orphan review correction
+
+- Deadline transitions now clear the consumed deadline in the same controller mutation that enters PendingCheck. `NextDeadline` considers only WaitingReset, RetryWait, and AnomalyHold, so PendingCheck and other non-timed states cannot produce an expired zero-delay timer.
+- A production propagation test holds the sequence lease at the three-second wait, verifies the scheduler deadline is zero, repeatedly invokes the due path, and proves no additional HTTP work starts before verify/release.
+- Due and recovery now reconcile the union of all persisted ProbeWindows and ProbeAttempts keys against the current confirmed highest-tier binding-instance set before per-instance work. Restarted, removed, demoted, and binding-less orphan records are durably deleted without requests.
+- Once iteration begins, orphan cleanup, durable claim, recovery snapshot, completion, and final persistence errors preserve the first error while safe work continues for other confirmed instances. Two-instance due and recovery regressions inject a phase failure and prove the peer instance still sends/verifies or completes recovery.
+- Removed the superseded production `probe_send` payload/executor branch. Normal production orchestration is exclusively `probe_sequence`; standalone typed read classes remain for recovery/coordinator compatibility.
+
+### Final scheduler/orphan verification
+
+- Focused deadline, propagation, orphan restart/demotion, two-instance continuation, and dead-handler regressions: pass.
+- Probe suite, K-point recovery, Mock A/E, and unmodified S3 coordinator suite: pass.
+- Probe/typed race suite: pass.
+- S1, S2, S2.5, S3, S4, S5, and S6 gates: pass.
+- Full `go test ./...`, `go vet ./...`, and `git diff --check`: pass; CRLF conversion warnings only.

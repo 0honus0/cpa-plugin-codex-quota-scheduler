@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -230,5 +232,222 @@ func TestProbeAttemptIDsMonotonicWithFrozenClock(t *testing.T) {
 	}
 	if snap.ProbeAttemptSeq <= first {
 		t.Fatalf("attempt sequence did not advance: first=%d second=%d", first, snap.ProbeAttemptSeq)
+	}
+}
+
+func TestProductionDueConsumesSchedulerDeadlineDuringPropagation(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
+	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":80,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(-time.Hour).Format(time.RFC3339)))
+	active := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(4*time.Hour).Format(time.RFC3339)))
+	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)}, quota: [][]byte{lazy, active}}
+	cfg := DefaultConfig()
+	cfg.EnableResetProbe = true
+	state := NewPluginState(cfg)
+	state.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 9, AuthIDs: map[string]struct{}{"a": {}}})
+	state.UpsertQuota(AccountState{AuthID: "a", AuthIndex: "idx", Quota: ParsedQuota{FiveHour: &QuotaWindow{ResetAt: now.Add(-time.Hour), UsedPercent: ptrFloat(80)}}})
+	roster := HostRosterSnapshot{Capability: CapabilityA, Entries: []RosterEntry{{ID: "a", AuthIndex: "idx", Provider: "codex", Priority: intPtr(9)}}}
+	adapter := &rosterCredentialHost{host: host, roster: roster}
+	r, err := NewProductionQuotaRefresher(host, state, adapter, roster, filepath.Join(t.TempDir(), "state.json"), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.bindings = r.bindings
+	if _, _, err = r.BootstrapBinding(context.Background(), "a"); err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	r.coordinator.opts.PropagationWait = func(context.Context, time.Duration) error {
+		select {
+		case <-entered:
+		default:
+			close(entered)
+		}
+		<-release
+		return nil
+	}
+	done := make(chan error, 1)
+	go func() { done <- r.RunProbeDueOnce(context.Background()) }()
+	<-entered
+	if next := r.probeController.NextDeadline(); !next.IsZero() {
+		t.Fatalf("expired deadline visible during propagation: %v", next)
+	}
+	for i := 0; i < 4; i++ {
+		if err := r.RunProbeDueOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	host.mu.Lock()
+	calls := len(host.urls)
+	host.mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("timer spin started extra work before propagation completed: calls=%d", calls)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProbeRestartAndDemotionDeleteOrphanState(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
+	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)}}
+	cfg := DefaultConfig()
+	cfg.EnableResetProbe = true
+	state := NewPluginState(cfg)
+	roster := HostRosterSnapshot{Capability: CapabilityA, Entries: []RosterEntry{{ID: "a", AuthIndex: "idx", Provider: "codex", Priority: intPtr(9)}}}
+	path := filepath.Join(t.TempDir(), "state.json")
+	adapter := &rosterCredentialHost{host: host, roster: roster}
+	r, err := NewProductionQuotaRefresher(host, state, adapter, roster, path, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.bindings = r.bindings
+	b, _, err := r.BootstrapBinding(context.Background(), "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = r.runtimeStore.Update(func(s *PersistentState) error {
+		s.ProbeWindows[999] = map[ProbeWindowKind]ProbeWindow{ProbeWindowFiveHour: {State: ProbeRetryWait, Deadline: now}}
+		s.ProbeAttempts[999] = ProbeAttempt{Instance: 999, AttemptID: "orphan", Phase: ProbeAttemptSent, SendFenceSeq: 2, VerifyNotBefore: now}
+		s.ProbeWindows[b.Instance] = map[ProbeWindowKind]ProbeWindow{ProbeWindowFiveHour: {State: ProbeRetryWait, Deadline: now.Add(time.Hour)}}
+		s.ProbeAttempts[b.Instance] = ProbeAttempt{Instance: b.Instance, AttemptID: "demoted", Phase: ProbeAttemptSent, SendFenceSeq: 3, VerifyNotBefore: now}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter2 := &rosterCredentialHost{host: host, roster: roster}
+	restart, err := NewProductionQuotaRefresher(host, state, adapter2, roster, path, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter2.bindings = restart.bindings
+	restart.rosterMu.Lock()
+	restart.roster = HostRosterSnapshot{Capability: CapabilityA, Entries: []RosterEntry{{ID: "b", AuthIndex: "bidx", Provider: "codex", Priority: intPtr(10)}}}
+	restart.rosterMu.Unlock()
+	if err = restart.RunProbeRecoveryOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := restart.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.ProbeWindows) != 0 || len(snap.ProbeAttempts) != 0 {
+		t.Fatalf("orphan state retained after restart/demotion: windows=%v attempts=%v", snap.ProbeWindows, snap.ProbeAttempts)
+	}
+	host.mu.Lock()
+	calls := len(host.urls)
+	host.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("orphan cleanup issued requests: %v", host.urls)
+	}
+}
+
+func TestProbeDueFailureContinuesOtherConfirmedInstance(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
+	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":80,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(-time.Hour).Format(time.RFC3339)))
+	active := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(4*time.Hour).Format(time.RFC3339)))
+	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "x.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)}, quota: [][]byte{[]byte(`bad`), lazy, active}}
+	cfg := DefaultConfig()
+	cfg.EnableResetProbe = true
+	state := NewPluginState(cfg)
+	state.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 9, AuthIDs: map[string]struct{}{"a": {}, "b": {}}})
+	for _, id := range []string{"a", "b"} {
+		state.UpsertQuota(AccountState{AuthID: id, AuthIndex: "idx-" + id, Quota: ParsedQuota{FiveHour: &QuotaWindow{ResetAt: now.Add(-time.Hour), UsedPercent: ptrFloat(80)}}})
+	}
+	roster := HostRosterSnapshot{Capability: CapabilityA, Entries: []RosterEntry{{ID: "a", AuthIndex: "idx-a", Provider: "codex", Priority: intPtr(9)}, {ID: "b", AuthIndex: "idx-b", Provider: "codex", Priority: intPtr(9)}}}
+	adapter := &rosterCredentialHost{host: host, roster: roster}
+	r, err := NewProductionQuotaRefresher(host, state, adapter, roster, filepath.Join(t.TempDir(), "state.json"), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.bindings = r.bindings
+	for _, id := range []string{"a", "b"} {
+		if _, _, err = r.BootstrapBinding(context.Background(), id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.coordinator.opts.PropagationWait = func(context.Context, time.Duration) error { return nil }
+	if err = r.RunProbeDueOnce(context.Background()); err == nil {
+		t.Fatal("first instance failure was not surfaced")
+	}
+	host.mu.Lock()
+	posts := 0
+	for _, u := range host.urls {
+		if u == codexResetProbeEndpoint {
+			posts++
+		}
+	}
+	host.mu.Unlock()
+	if posts != 1 {
+		t.Fatalf("other confirmed instance was starved: urls=%v", host.urls)
+	}
+}
+
+func TestProbeRecoveryFailureContinuesOtherConfirmedInstance(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
+	active := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(4*time.Hour).Format(time.RFC3339)))
+	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "x.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)}, quota: [][]byte{[]byte(`bad`), active}}
+	cfg := DefaultConfig()
+	cfg.EnableResetProbe = true
+	state := NewPluginState(cfg)
+	roster := HostRosterSnapshot{Capability: CapabilityA, Entries: []RosterEntry{{ID: "a", AuthIndex: "idx-a", Provider: "codex", Priority: intPtr(9)}, {ID: "b", AuthIndex: "idx-b", Provider: "codex", Priority: intPtr(9)}}}
+	path := filepath.Join(t.TempDir(), "state.json")
+	adapter := &rosterCredentialHost{host: host, roster: roster}
+	r, err := NewProductionQuotaRefresher(host, state, adapter, roster, path, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.bindings = r.bindings
+	var bs []RuntimeBinding
+	for _, id := range []string{"a", "b"} {
+		b, _, e := r.BootstrapBinding(context.Background(), id)
+		if e != nil {
+			t.Fatal(e)
+		}
+		bs = append(bs, b)
+	}
+	_, err = r.runtimeStore.Update(func(s *PersistentState) error {
+		s.ReservedCeiling = 100
+		for n, b := range bs {
+			s.ProbeWindows[b.Instance] = map[ProbeWindowKind]ProbeWindow{ProbeWindowFiveHour: {State: ProbeSentUnknown, Baseline: ResetProbeBaseline(now.Add(-time.Hour), 80, 5*time.Hour)}}
+			s.ProbeAttempts[b.Instance] = ProbeAttempt{Instance: b.Instance, AttemptID: fmt.Sprintf("r%d", n), Windows: []ProbeWindowKind{ProbeWindowFiveHour}, Phase: ProbeAttemptSentUnknown, SendFenceSeq: uint64(n + 1), CreatedAt: now.Add(-time.Hour), VerifyNotBefore: now}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter2 := &rosterCredentialHost{host: host, roster: roster}
+	restart, err := NewProductionQuotaRefresher(host, state, adapter2, roster, path, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter2.bindings = restart.bindings
+	if err = restart.RunProbeRecoveryOnce(context.Background()); err == nil {
+		t.Fatal("recovery failure was not surfaced")
+	}
+	snap, err := restart.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.ProbeAttempts) != 1 {
+		t.Fatalf("other recovery was starved: attempts=%v urls=%v windows=%v", snap.ProbeAttempts, host.urls, snap.ProbeWindows)
+	}
+}
+
+func TestProductionProbeHasNoSplitSendExecutor(t *testing.T) {
+	raw, err := os.ReadFile("probe_runtime.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(raw)
+	if strings.Contains(source, "case OperationProbeSend:") || strings.Contains(source, "type probeSendPayload struct") {
+		t.Fatal("superseded split probe-send production executor remains")
 	}
 }
