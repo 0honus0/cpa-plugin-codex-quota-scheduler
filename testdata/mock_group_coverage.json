@@ -1,0 +1,11 @@
+{
+  "schema": "section-12-v1",
+  "groups": {
+    "A": ["auth_transaction", "identity_persist", "probe_recovery", "typed_intent"],
+    "B": ["selection"],
+    "C": ["probe_state"],
+    "D": ["boundary", "identity_security"],
+    "E": ["coordinator", "refresh", "typed_interleavings"]
+  },
+  "uncovered": []
+}

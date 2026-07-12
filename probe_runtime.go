@@ -126,6 +126,12 @@ func activeProbeBindings(roster HostRosterSnapshot, bindings map[string]RuntimeB
 }
 
 func (r *QuotaRefresher) RunProbeDueOnce(ctx context.Context) error {
+	refresherMu.Lock()
+	rosterController := globalRosterController
+	refresherMu.Unlock()
+	if rosterController != nil {
+		_, _ = rosterController.WakeForProbe(ctx)
+	}
 	if r.probeController == nil {
 		return errors.New("probe runtime unavailable")
 	}

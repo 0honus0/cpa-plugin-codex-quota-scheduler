@@ -156,6 +156,23 @@ repeated upstream timestamp cannot create a two-second refresh loop.
 
 ## Management UI
 
+### Authoritative roster lifecycle
+
+Only the highest CPA priority tier reported by the host is active; accounts at
+lower CPA priorities are not loaded into scheduler or Management payloads.
+Using equal CPA priorities (preferably `0`) is recommended when all Codex
+accounts should participate.
+
+When the host cannot confirm priorities (Capability B), restart recovery keeps
+normal refresh Dormant and Probe windows in `WaitingRoster`. The
+`probe_on_provisional_roster` setting is an explicit risk option and defaults to
+`false`; provisional data never becomes authoritative merely because an account
+appears among scheduler candidates. A later successful authoritative roster
+sync automatically recovers Capability B to Capability A.
+
+Normal quota refresh makes no real requests while Dormant. Probe scheduling is
+independent and may pre-wake roster synchronization before a due window.
+
 Open the resource page from CPA's plugin resources, or visit:
 
 ```text

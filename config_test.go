@@ -39,6 +39,16 @@ func TestDecodeConfigDefaults(t *testing.T) {
 	}
 }
 
+func TestProbeOnProvisionalRosterIsExplicitRiskOption(t *testing.T) {
+	if DefaultConfig().ProbeOnProvisionalRoster {
+		t.Fatal("risk option must default off")
+	}
+	cfg, err := DecodeConfig([]byte("probe_on_provisional_roster: true\n"))
+	if err != nil || !cfg.ProbeOnProvisionalRoster {
+		t.Fatalf("cfg=%#v err=%v", cfg, err)
+	}
+}
+
 func TestPluginRegistrationUsesV016SourceVersion(t *testing.T) {
 	if got := PluginRegistration().Metadata.Version; got != "0.1.6" {
 		t.Fatalf("plugin registration version = %q, want 0.1.6", got)

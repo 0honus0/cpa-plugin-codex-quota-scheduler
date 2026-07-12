@@ -37,6 +37,7 @@ type Config struct {
 	Fallback                        FallbackMode
 	EnableUsageFeedback             bool
 	EnableResetProbe                bool
+	ProbeOnProvisionalRoster        bool
 	MaxRefreshConcurrency           int
 	QuotaEndpoint                   string
 	RefreshActiveWindow             time.Duration
@@ -70,6 +71,7 @@ type rawConfig struct {
 	Fallback                        string `yaml:"fallback"`
 	EnableUsageFeedback             *bool  `yaml:"enable_usage_feedback"`
 	EnableResetProbe                *bool  `yaml:"enable_reset_probe"`
+	ProbeOnProvisionalRoster        *bool  `yaml:"probe_on_provisional_roster"`
 	MaxRefreshConcurrency           *int   `yaml:"max_refresh_concurrency"`
 	QuotaEndpoint                   string `yaml:"quota_endpoint"`
 	RefreshActiveWindow             string `yaml:"refresh_active_window"`
@@ -201,6 +203,9 @@ func DecodeConfig(raw []byte) (Config, error) {
 	}
 	if decoded.EnableResetProbe != nil {
 		cfg.EnableResetProbe = *decoded.EnableResetProbe
+	}
+	if decoded.ProbeOnProvisionalRoster != nil {
+		cfg.ProbeOnProvisionalRoster = *decoded.ProbeOnProvisionalRoster
 	}
 	if decoded.MaxRefreshConcurrency != nil {
 		if *decoded.MaxRefreshConcurrency <= 0 {

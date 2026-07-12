@@ -135,7 +135,12 @@ try {
     }
 
     if ($Stage -eq "S7") {
-        Invoke-ExactGoTest -TestName "TestStartupCapabilityBRecoversThroughRosterSynchronization"
+        if ($baseline.Count -ne 0 -or $actual.Count -ne 0) { Write-Error "S7 requires zero ABI pick-closure violations"; exit 1 }
+        & go test ./... -run 'Test(SuiteRosterManagement|InvariantTraceability|StartupCapabilityBRecoversThroughRosterSynchronization|RosterCandidatesHaveNoRosterSideEffects|S2KPointRegistryMatchesSource|S6KPointRegistryMatchesSource|MockGroup(A|B|C|D|E))' -count=1
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        if (-not (Test-Path "testdata/mock_group_coverage.json")) { Write-Error "S7 mock coverage matrix is missing"; exit 1 }
+        Write-Output "S7 roster lifecycle, traceability, K-point, pick-I/O, sensitive-state, and Mock A-E gates passed"
+        exit 0
     }
 }
 finally {

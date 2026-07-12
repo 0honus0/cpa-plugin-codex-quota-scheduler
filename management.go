@@ -52,6 +52,7 @@ type SettingsPayload struct {
 	StaleAfter                      string      `json:"stale_after"`
 	EnableUsageFeedback             bool        `json:"enable_usage_feedback"`
 	EnableResetProbe                bool        `json:"enable_reset_probe"`
+	ProbeOnProvisionalRoster        bool        `json:"probe_on_provisional_roster"`
 	MaxRefreshConcurrency           int         `json:"max_refresh_concurrency"`
 	QuotaEndpoint                   string      `json:"quota_endpoint"`
 	RefreshActiveWindow             string      `json:"refresh_active_window"`
@@ -237,6 +238,7 @@ func SettingsFromConfig(cfg Config) SettingsPayload {
 		StaleAfter:                      cfg.StaleAfter.String(),
 		EnableUsageFeedback:             cfg.EnableUsageFeedback,
 		EnableResetProbe:                cfg.EnableResetProbe,
+		ProbeOnProvisionalRoster:        cfg.ProbeOnProvisionalRoster,
 		MaxRefreshConcurrency:           cfg.MaxRefreshConcurrency,
 		QuotaEndpoint:                   cfg.QuotaEndpoint,
 		RefreshActiveWindow:             cfg.RefreshActiveWindow.String(),
@@ -276,6 +278,7 @@ func ConfigFromSettings(base Config, payload SettingsPayload) (Config, error) {
 	cfg.HandleEnabled = payload.HandleEnabled
 	cfg.EnableUsageFeedback = payload.EnableUsageFeedback
 	cfg.EnableResetProbe = payload.EnableResetProbe
+	cfg.ProbeOnProvisionalRoster = payload.ProbeOnProvisionalRoster
 	if payload.MaxRefreshConcurrency <= 0 {
 		return Config{}, jsonError("max_refresh_concurrency must be positive")
 	}
@@ -366,11 +369,13 @@ func saveSettingsPayload(store *PluginState, payload SettingsPayload) pluginapi.
 	if err != nil {
 		return jsonManagementResponse(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
-	store.ReplaceConfig(cfg)
-	currentConfig.Store(cfg)
-	if err := SaveUserData(semanticStatePaths(defaultStatePath()).UserData, diskStateFromStore(store)); err != nil {
+	disk := diskStateFromStore(store)
+	disk.Config = cfg
+	if err := SaveUserData(semanticStatePaths(defaultStatePath()).UserData, disk); err != nil {
 		return jsonManagementResponse(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
+	store.ReplaceConfig(cfg)
+	currentConfig.Store(cfg)
 	return jsonManagementResponse(http.StatusOK, SettingsFromConfig(cfg))
 }
 

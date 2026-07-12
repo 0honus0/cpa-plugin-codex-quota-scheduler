@@ -132,19 +132,29 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 		// work disabled rather than falling back to the legacy external-call path.
 		globalRefresher = nil
 	}
+	globalRosterController = NewRosterController(RosterControllerOptions{
+		Host: ABIHostAuthLister{},
+		Publish: func(ctx context.Context, active ActiveRoster) error {
+			snapshot := HostRosterSnapshot{Capability: active.Capability, Entries: append([]RosterEntry(nil), active.Entries...), ConfirmedAt: active.ConfirmedAt}
+			hostRosterLatest.Store(&snapshot)
+			if production == nil {
+				return ErrCapabilityB
+			}
+			return production.PublishAuthoritativeRoster(ctx, snapshot)
+		},
+		ProbeOnProvisional: globalState.Config().ProbeOnProvisionalRoster,
+	})
 	managementRefreshSoon = refreshGlobalRefresherSoon
 	managementRefreshOneSoon = refreshGlobalRefresherOneSoon
 	refresherMu.Unlock()
-	// Host callback readiness during init is not guaranteed. Probe in the
-	// background and publish CapabilityB on any immediate failure.
+	// The controller is the sole roster synchronization owner. Host callback
+	// readiness during init is not guaranteed, so startup remains asynchronous.
 	go func() {
-		snapshot := detectStartupHostRoster(context.Background(), ABIHostAuthLister{}, time.Now(), time.After)
-		hostRosterLatest.Store(&snapshot)
 		refresherMu.Lock()
-		runtime := globalRefresher
+		controller := globalRosterController
 		refresherMu.Unlock()
-		if runtime != nil {
-			_ = runtime.PublishAuthoritativeRoster(context.Background(), snapshot)
+		if controller != nil {
+			_, _ = controller.Startup(context.Background())
 		}
 	}()
 	plugin.abi_version = C.uint32_t(pluginabi.ABIVersion)
@@ -211,6 +221,7 @@ func cliproxyPluginFree(ptr unsafe.Pointer, len C.size_t) {
 func cliproxyPluginShutdown() {
 	refresherMu.Lock()
 	refresher := globalRefresher
+	globalRosterController = nil
 	refresherMu.Unlock()
 	if refresher != nil {
 		refresher.Stop()

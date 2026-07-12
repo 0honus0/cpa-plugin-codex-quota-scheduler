@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -13,13 +14,14 @@ import (
 )
 
 var (
-	currentConfig         atomic.Value
-	globalState           = NewPluginState(DefaultConfig())
-	globalTrials          = NewTrialRegistry()
-	globalEvidenceIntents = make(chan EvidenceIntent, 64)
-	evidenceConsumerOnce  sync.Once
-	refresherMu           sync.Mutex
-	globalRefresher       *QuotaRefresher
+	currentConfig          atomic.Value
+	globalState            = NewPluginState(DefaultConfig())
+	globalTrials           = NewTrialRegistry()
+	globalEvidenceIntents  = make(chan EvidenceIntent, 64)
+	evidenceConsumerOnce   sync.Once
+	refresherMu            sync.Mutex
+	globalRefresher        *QuotaRefresher
+	globalRosterController *RosterController
 )
 
 type envelope struct {
@@ -192,6 +194,12 @@ func handleUsageHandle(raw []byte) ([]byte, error) {
 		}
 	}
 	now := time.Now()
+	refresherMu.Lock()
+	rosterController := globalRosterController
+	refresherMu.Unlock()
+	if rosterController != nil {
+		go func() { _, _ = rosterController.WakeForActivity(context.Background()) }()
+	}
 	HandleUsageFeedback(globalState, record, now)
 	evidenceKind := EvidenceUnknown
 	quotaLimitFeedback := false
@@ -226,6 +234,12 @@ func handleManagementHandle(raw []byte) ([]byte, error) {
 		if err := json.Unmarshal(raw, &req); err != nil {
 			return nil, err
 		}
+	}
+	refresherMu.Lock()
+	rosterController := globalRosterController
+	refresherMu.Unlock()
+	if rosterController != nil {
+		_, _ = rosterController.WakeForManagement(context.Background())
 	}
 	return okEnvelope(HandleManagementRequest(globalState, req, time.Now()))
 }
