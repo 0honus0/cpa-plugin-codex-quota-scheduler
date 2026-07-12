@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -12,8 +13,22 @@ type OperationClass string
 
 const (
 	OperationLegacyRefresh OperationClass = "legacy_refresh"
-	LegacyRefreshSource                   = "legacy_refresh_txn"
-	legacyLeaseDuration                   = 2 * time.Minute
+	OperationQuotaRead     OperationClass = "quota_read"
+	OperationProbePrecheck OperationClass = "probe_precheck"
+	OperationProbeVerify   OperationClass = "probe_verify"
+	// Retained only for the held S3 normal-refresh adapter; typed Probe cannot
+	// submit this source. Its wire value stays stable for the unmodified S3 ABI.
+	LegacyEnvelopeSource         = "legacy_refresh_txn"
+	LegacyRefreshSource          = LegacyEnvelopeSource
+	SourceSchedulerInitial       = "scheduler_initial"
+	SourceSchedulerInterval      = "scheduler_interval"
+	SourceSchedulerStaleRecovery = "scheduler_stale_recovery"
+	SourceManualRefresh          = "manual_refresh"
+	SourceProbeStartup           = "probe_startup"
+	SourceProbePrecheck          = "probe_precheck"
+	SourceProbeActivation        = "probe_activation"
+	SourceProbeVerify            = "probe_verify"
+	legacyLeaseDuration          = 2 * time.Minute
 )
 
 type Intent struct {
@@ -23,6 +38,8 @@ type Intent struct {
 	Class        OperationClass
 	Source       string
 	StartedAfter uint64
+	ReadStartSeq uint64
+	AttemptID    string
 	Token        ExecutionToken
 	Login        LoginEpoch
 	Fingerprint  CredentialFingerprint
@@ -47,6 +64,7 @@ type OperationResult struct {
 	Fingerprint    CredentialFingerprint
 	ProbeSendPhase bool
 	SuppressUntil  time.Time
+	ReadStartSeq   uint64
 	Disposition    ResultDisposition
 	Journal        *LegacyEffectJournal
 	CallbackFailed bool
@@ -128,6 +146,20 @@ func (h *HeldLease) MarkProbeSent(suppressUntil time.Time) {
 	h.probeMu.Unlock()
 }
 
+func (h *HeldLease) WaitPropagation(ctx context.Context, d time.Duration) error {
+	if h.coordinator.opts.PropagationWait != nil {
+		return h.coordinator.opts.PropagationWait(ctx, d)
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (h *HeldLease) probeState() (bool, time.Time) {
 	h.probeMu.Lock()
 	defer h.probeMu.Unlock()
@@ -139,6 +171,8 @@ type CoordinatorOptions struct {
 	LeaseDuration      time.Duration
 	Now                func() time.Time
 	AfterFunc          func(time.Duration, func())
+	AllocateReadSeq    func() (uint64, error)
+	PropagationWait    func(context.Context, time.Duration) error
 	Execute            func(context.Context, Intent, *HeldLease) OperationResult
 	Validate           func(Intent, OperationResult) bool
 	Apply              func(Intent, OperationResult) error
@@ -165,8 +199,11 @@ type operationKey struct {
 	instance   AuthInstanceID
 	class      OperationClass
 	generation TierGeneration
+	attemptID  string
+	nonce      uint64
 }
 type coordinatorJob struct {
+	key         operationKey
 	intent      Intent
 	future      *futureState
 	ctx         context.Context
@@ -212,6 +249,20 @@ type Coordinator struct {
 	closeOnce   sync.Once
 	lifecycleMu sync.Mutex
 	closing     bool
+	typedMu     sync.Mutex
+	typedReads  map[AuthInstanceID][]*typedReadEntry
+	typedNonce  atomic.Uint64
+}
+
+type typedReadEntry struct {
+	future    Future[OperationResult]
+	seq       atomic.Uint64
+	done      atomic.Bool
+	attemptID string
+}
+type typedPayload struct {
+	value any
+	entry *typedReadEntry
 }
 
 func NewCoordinator(opts CoordinatorOptions) *Coordinator {
@@ -227,9 +278,60 @@ func NewCoordinator(opts CoordinatorOptions) *Coordinator {
 	if opts.AfterFunc == nil {
 		opts.AfterFunc = func(d time.Duration, fn func()) { time.AfterFunc(d, fn) }
 	}
-	c := &Coordinator{opts: opts, commands: make(chan any, 128), closed: make(chan struct{}), httpSlots: make(chan struct{}, opts.MaxHTTPSlots)}
+	c := &Coordinator{opts: opts, commands: make(chan any, 128), closed: make(chan struct{}), httpSlots: make(chan struct{}, opts.MaxHTTPSlots), typedReads: map[AuthInstanceID][]*typedReadEntry{}}
 	go c.loop()
 	return c
+}
+
+func (c *Coordinator) SubmitTyped(intent Intent) Future[OperationResult] {
+	if isTypedRead(intent.Class) {
+		c.typedMu.Lock()
+		entries := c.typedReads[intent.Instance][:0]
+		for _, entry := range c.typedReads[intent.Instance] {
+			if !entry.done.Load() {
+				entries = append(entries, entry)
+			}
+		}
+		c.typedReads[intent.Instance] = entries
+		for _, entry := range entries {
+			seq := entry.seq.Load()
+			attemptOK := true
+			if intent.Class == OperationProbeVerify {
+				attemptOK = entry.attemptID == "" || entry.attemptID == intent.AttemptID
+			}
+			if !entry.done.Load() && seq > intent.StartedAfter && attemptOK {
+				if intent.Class == OperationProbeVerify && entry.attemptID == "" {
+					entry.attemptID = intent.AttemptID
+				}
+				f := entry.future
+				c.typedMu.Unlock()
+				return f
+			}
+		}
+		entry := &typedReadEntry{attemptID: intent.AttemptID}
+		intent.AttemptID = fmt.Sprintf("read-%d", c.typedNonce.Add(1))
+		intent.Payload = typedPayload{value: intent.Payload, entry: entry}
+		f := c.Submit(intent)
+		entry.future = f
+		c.typedReads[intent.Instance] = append(c.typedReads[intent.Instance], entry)
+		c.typedMu.Unlock()
+		return f
+	}
+	if intent.Class == OperationProbeSend {
+		intent.AttemptID = fmt.Sprintf("%s#%d", intent.AttemptID, c.typedNonce.Add(1))
+	}
+	return c.Submit(intent)
+}
+
+func isTypedRead(class OperationClass) bool {
+	return class == OperationQuotaRead || class == OperationProbePrecheck || class == OperationProbeVerify
+}
+func formalSource(source string) bool {
+	switch source {
+	case LegacyEnvelopeSource, SourceSchedulerInitial, SourceSchedulerInterval, SourceSchedulerStaleRecovery, SourceManualRefresh, SourceProbeStartup, SourceProbePrecheck, SourceProbeActivation, SourceProbeVerify:
+		return true
+	}
+	return false
 }
 
 func (c *Coordinator) Submit(intent Intent) Future[OperationResult] {
@@ -326,11 +428,32 @@ func (c *Coordinator) loop() {
 			}
 		})
 		go func() {
+			var readEntry *typedReadEntry
+			if payload, ok := job.intent.Payload.(typedPayload); ok {
+				readEntry = payload.entry
+				job.intent.Payload = payload.value
+				if c.opts.AllocateReadSeq != nil {
+					seq, err := c.opts.AllocateReadSeq()
+					if err != nil {
+						select {
+						case c.commands <- resultCommand{key: key, job: job, result: OperationResult{Token: job.intent.Token, Err: err}}:
+						case <-c.closed:
+						}
+						return
+					}
+					job.intent.ReadStartSeq = seq
+					readEntry.seq.Store(seq)
+				}
+			}
 			res := OperationResult{Token: job.intent.Token, Generation: job.intent.Generation}
 			if c.opts.Execute == nil {
 				res.Err = fmt.Errorf("coordinator executor is not configured")
 			} else {
 				res = c.opts.Execute(ctx, job.intent, job.held)
+			}
+			res.ReadStartSeq = job.intent.ReadStartSeq
+			if readEntry != nil {
+				readEntry.done.Store(true)
 			}
 			select {
 			case c.commands <- resultCommand{key, job, res}:
@@ -349,13 +472,15 @@ func (c *Coordinator) loop() {
 		q := queue[instance]
 		for len(q) > 0 {
 			job := q[0]
-			if job.intent.StartedAfter > completedFence[instance] {
+			// completedFence gates the S3 legacy execution-token queue only.
+			// Typed reads use the distinct actual ReadStartSeq barrier.
+			if !isTypedRead(job.intent.Class) && job.intent.StartedAfter > completedFence[instance] {
 				queue[instance] = q
 				return
 			}
 			q = q[1:]
 			queue[instance] = q
-			start(operationKey{job.intent.Instance, job.intent.Class, job.intent.Generation}, job)
+			start(job.key, job)
 			return
 		}
 		delete(queue, instance)
@@ -382,18 +507,22 @@ func (c *Coordinator) loop() {
 		case raw := <-c.commands:
 			switch cmd := raw.(type) {
 			case submitCommand:
-				key := operationKey{cmd.intent.Instance, cmd.intent.Class, cmd.intent.Generation}
+				nonce := uint64(0)
+				if cmd.intent.Class == OperationProbeSend {
+					nonce = c.typedNonce.Add(1)
+				}
+				key := operationKey{instance: cmd.intent.Instance, class: cmd.intent.Class, generation: cmd.intent.Generation, attemptID: cmd.intent.AttemptID, nonce: nonce}
 				if existing := inflight[key]; existing != nil {
 					cmd.reply <- Future[OperationResult]{existing.future}
 					continue
 				}
 				f := &futureState{done: make(chan struct{})}
-				if !accepting || (cmd.intent.Source != LegacyRefreshSource && cmd.intent.Source != ProbeSource) {
+				if !accepting || !formalSource(cmd.intent.Source) || (cmd.intent.Source == LegacyEnvelopeSource && cmd.intent.Class != OperationLegacyRefresh) {
 					completeFuture(f, OperationResult{Err: errors.New("legacy coordinator is draining"), Disposition: ResultCancelled})
 					cmd.reply <- Future[OperationResult]{f}
 					continue
 				}
-				job := &coordinatorJob{intent: cmd.intent, future: f}
+				job := &coordinatorJob{key: key, intent: cmd.intent, future: f}
 				inflight[key] = job
 				queue[cmd.intent.Instance] = append(queue[cmd.intent.Instance], job)
 				cmd.reply <- Future[OperationResult]{f}
@@ -535,7 +664,7 @@ func (c *Coordinator) loop() {
 				waiter := &drainWaiter{command: cmd}
 				for instance, jobs := range queue {
 					for _, job := range jobs {
-						key := operationKey{job.intent.Instance, job.intent.Class, job.intent.Generation}
+						key := job.key
 						if inflight[key] == job {
 							delete(inflight, key)
 						}

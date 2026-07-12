@@ -22,11 +22,12 @@ const (
 )
 
 type ProbeWindow struct {
-	State      ProbeWindowState `json:"state"`
-	Baseline   ProbeBaseline    `json:"baseline"`
-	Deadline   time.Time        `json:"deadline,omitempty"`
-	RetryCount int              `json:"retry_count,omitempty"`
-	AttemptID  string           `json:"attempt_id,omitempty"`
+	State              ProbeWindowState `json:"state"`
+	Baseline           ProbeBaseline    `json:"baseline"`
+	Deadline           time.Time        `json:"deadline,omitempty"`
+	RetryCount         int              `json:"retry_count,omitempty"`
+	AttemptID          string           `json:"attempt_id,omitempty"`
+	AuthBlockedAtLogin LoginEpoch       `json:"auth_blocked_at_login,omitempty"`
 }
 type ProbeEventKind string
 
@@ -52,6 +53,52 @@ type ProbeController struct {
 	now     time.Time
 	windows map[AuthInstanceID]map[ProbeWindowKind]ProbeWindow
 	seq     uint64
+}
+
+func (c *ProbeController) Load(all map[AuthInstanceID]map[ProbeWindowKind]ProbeWindow) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.windows = map[AuthInstanceID]map[ProbeWindowKind]ProbeWindow{}
+	for i, ws := range all {
+		c.windows[i] = map[ProbeWindowKind]ProbeWindow{}
+		for k, w := range ws {
+			if validPersistentProbeState(w.State) {
+				c.windows[i][k] = w
+			}
+		}
+	}
+}
+func (c *ProbeController) Snapshot() map[AuthInstanceID]map[ProbeWindowKind]ProbeWindow {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := map[AuthInstanceID]map[ProbeWindowKind]ProbeWindow{}
+	for i, ws := range c.windows {
+		out[i] = map[ProbeWindowKind]ProbeWindow{}
+		for k, w := range ws {
+			out[i][k] = w
+		}
+	}
+	return out
+}
+func (c *ProbeController) NextDeadline() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out time.Time
+	for _, ws := range c.windows {
+		for _, w := range ws {
+			if !w.Deadline.IsZero() && (out.IsZero() || w.Deadline.Before(out)) {
+				out = w.Deadline
+			}
+		}
+	}
+	return out
+}
+func validPersistentProbeState(s ProbeWindowState) bool {
+	switch s {
+	case ProbeIdle, ProbeWaitingReset, ProbePendingCheck, ProbeSentAwaitingVerify, ProbeSentUnknown, ProbeRetryWait, ProbeConfirmed, ProbeAuthBlocked, ProbeAnomalyHold, ProbeWaitingRoster:
+		return true
+	}
+	return false
 }
 
 func NewProbeController(now time.Time) *ProbeController {
@@ -92,7 +139,7 @@ func (c *ProbeController) Advance(i AuthInstanceID, e ProbeEvent) []Intent {
 			if (w.State == ProbeWaitingReset || w.State == ProbeRetryWait || w.State == ProbeAnomalyHold) && !w.Deadline.After(e.Now) {
 				w.State = ProbePendingCheck
 				ws[k] = w
-				out = append(out, Intent{Instance: i, Class: OperationProbeRead, Source: ProbeSource, Payload: []ProbeWindowKind{k}})
+				out = append(out, Intent{Instance: i, Class: OperationProbePrecheck, Source: SourceProbePrecheck, Payload: []ProbeWindowKind{k}})
 			}
 		case ProbeEventPrecheckResult, ProbeEventVerifyResult:
 			if (e.Kind == ProbeEventPrecheckResult && w.State != ProbePendingCheck) || (e.Kind == ProbeEventVerifyResult && w.State != ProbeSentAwaitingVerify && w.State != ProbeSentUnknown) {
@@ -119,7 +166,7 @@ func (c *ProbeController) Advance(i AuthInstanceID, e ProbeEvent) []Intent {
 					c.seq++
 					w.State = ProbeSentAwaitingVerify
 					w.AttemptID = fmt.Sprintf("probe-%d", c.seq)
-					out = append(out, Intent{Instance: i, Class: OperationProbeSend, Source: ProbeSource, Payload: []ProbeWindowKind{k}})
+					out = append(out, Intent{Instance: i, Class: OperationProbeSend, Source: SourceProbeActivation, Payload: []ProbeWindowKind{k}})
 				} else {
 					w.State = ProbeRetryWait
 					w.RetryCount++
@@ -127,6 +174,7 @@ func (c *ProbeController) Advance(i AuthInstanceID, e ProbeEvent) []Intent {
 				}
 			default:
 				w.State = ProbeRetryWait
+				w.RetryCount++
 				w.Deadline = e.Now.Add(probeBackoff(w.RetryCount))
 			}
 			ws[k] = w

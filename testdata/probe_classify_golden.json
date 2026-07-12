@@ -5,7 +5,7 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "after",
-    "expected": "usage_only"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "none",
@@ -13,7 +13,7 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "none",
@@ -21,7 +21,7 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "none",
@@ -29,7 +29,7 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "none",
@@ -37,7 +37,7 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "none",
@@ -45,7 +45,7 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "none",
@@ -53,7 +53,7 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "none",
@@ -61,2314 +61,10 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "none",
-    "offset": 0,
-    "length": "5h",
-    "usage": "cleared",
-    "delay": "before",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "5h",
-    "usage": "cleared",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "5h",
-    "usage": "cleared",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "5h",
-    "usage": "cleared",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "5h",
-    "usage": "cleared",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "5h",
-    "usage": "cleared",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "5h",
-    "usage": "cleared",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "5h",
-    "usage": "cleared",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "5h",
-    "usage": "cleared",
-    "delay": "edge",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "5h",
-    "usage": "cleared",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "5h",
-    "usage": "cleared",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "5h",
-    "usage": "cleared",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "5h",
-    "usage": "cleared",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "5h",
-    "usage": "cleared",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "5h",
-    "usage": "cleared",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "5h",
-    "usage": "cleared",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "5h",
-    "usage": "decreased",
-    "delay": "after",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "5h",
-    "usage": "decreased",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "5h",
-    "usage": "decreased",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "5h",
-    "usage": "decreased",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "5h",
-    "usage": "decreased",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "5h",
-    "usage": "decreased",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "5h",
-    "usage": "decreased",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "5h",
-    "usage": "decreased",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "5h",
-    "usage": "decreased",
-    "delay": "before",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "5h",
-    "usage": "decreased",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "5h",
-    "usage": "decreased",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "5h",
-    "usage": "decreased",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "5h",
-    "usage": "decreased",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "5h",
-    "usage": "decreased",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "5h",
-    "usage": "decreased",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "5h",
-    "usage": "decreased",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "5h",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "5h",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "5h",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "5h",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "5h",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "5h",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "5h",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "5h",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "5h",
-    "usage": "refilled",
-    "delay": "after",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "5h",
-    "usage": "refilled",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "5h",
-    "usage": "refilled",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "5h",
-    "usage": "refilled",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "5h",
-    "usage": "refilled",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "5h",
-    "usage": "refilled",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "5h",
-    "usage": "refilled",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "5h",
-    "usage": "refilled",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "5h",
-    "usage": "refilled",
-    "delay": "before",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "5h",
-    "usage": "refilled",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "5h",
-    "usage": "refilled",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "5h",
-    "usage": "refilled",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "5h",
-    "usage": "refilled",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "5h",
-    "usage": "refilled",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "5h",
-    "usage": "refilled",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "5h",
-    "usage": "refilled",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "5h",
-    "usage": "refilled",
-    "delay": "edge",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "5h",
-    "usage": "refilled",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "5h",
-    "usage": "refilled",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "5h",
-    "usage": "refilled",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "5h",
-    "usage": "refilled",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "5h",
-    "usage": "refilled",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "5h",
-    "usage": "refilled",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "5h",
-    "usage": "refilled",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "5h",
-    "usage": "same",
-    "delay": "after",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "5h",
-    "usage": "same",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "5h",
-    "usage": "same",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "5h",
-    "usage": "same",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "5h",
-    "usage": "same",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "5h",
-    "usage": "same",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "5h",
-    "usage": "same",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "5h",
-    "usage": "same",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "5h",
-    "usage": "same",
-    "delay": "before",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "5h",
-    "usage": "same",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "5h",
-    "usage": "same",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "5h",
-    "usage": "same",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "5h",
-    "usage": "same",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "5h",
-    "usage": "same",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "5h",
-    "usage": "same",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "5h",
-    "usage": "same",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "5h",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "5h",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "5h",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "5h",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "5h",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "5h",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "5h",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "5h",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "7d",
-    "usage": "cleared",
-    "delay": "after",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "7d",
-    "usage": "cleared",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "7d",
-    "usage": "cleared",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "7d",
-    "usage": "cleared",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "7d",
-    "usage": "cleared",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "7d",
-    "usage": "cleared",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "7d",
-    "usage": "cleared",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "7d",
-    "usage": "cleared",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "7d",
-    "usage": "cleared",
-    "delay": "before",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "7d",
-    "usage": "cleared",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "7d",
-    "usage": "cleared",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "7d",
-    "usage": "cleared",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "7d",
-    "usage": "cleared",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "7d",
-    "usage": "cleared",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "7d",
-    "usage": "cleared",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "7d",
-    "usage": "cleared",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "7d",
-    "usage": "cleared",
-    "delay": "edge",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "7d",
-    "usage": "cleared",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "7d",
-    "usage": "cleared",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "7d",
-    "usage": "cleared",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "7d",
-    "usage": "cleared",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "7d",
-    "usage": "cleared",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "7d",
-    "usage": "cleared",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "7d",
-    "usage": "cleared",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "7d",
-    "usage": "decreased",
-    "delay": "after",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "7d",
-    "usage": "decreased",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "7d",
-    "usage": "decreased",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "7d",
-    "usage": "decreased",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "7d",
-    "usage": "decreased",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "7d",
-    "usage": "decreased",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "7d",
-    "usage": "decreased",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "7d",
-    "usage": "decreased",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "7d",
-    "usage": "decreased",
-    "delay": "before",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "7d",
-    "usage": "decreased",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "7d",
-    "usage": "decreased",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "7d",
-    "usage": "decreased",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "7d",
-    "usage": "decreased",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "7d",
-    "usage": "decreased",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "7d",
-    "usage": "decreased",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "7d",
-    "usage": "decreased",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "7d",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "7d",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "7d",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "7d",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "7d",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "7d",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "7d",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "7d",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "7d",
-    "usage": "refilled",
-    "delay": "after",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "7d",
-    "usage": "refilled",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "7d",
-    "usage": "refilled",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "7d",
-    "usage": "refilled",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "7d",
-    "usage": "refilled",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "7d",
-    "usage": "refilled",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "7d",
-    "usage": "refilled",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "7d",
-    "usage": "refilled",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "7d",
-    "usage": "refilled",
-    "delay": "before",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "7d",
-    "usage": "refilled",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "7d",
-    "usage": "refilled",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "7d",
-    "usage": "refilled",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "7d",
-    "usage": "refilled",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "7d",
-    "usage": "refilled",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "7d",
-    "usage": "refilled",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "7d",
-    "usage": "refilled",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "7d",
-    "usage": "refilled",
-    "delay": "edge",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "7d",
-    "usage": "refilled",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "7d",
-    "usage": "refilled",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "7d",
-    "usage": "refilled",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "7d",
-    "usage": "refilled",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "7d",
-    "usage": "refilled",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "7d",
-    "usage": "refilled",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "7d",
-    "usage": "refilled",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "7d",
-    "usage": "same",
-    "delay": "after",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "7d",
-    "usage": "same",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "7d",
-    "usage": "same",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "7d",
-    "usage": "same",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "7d",
-    "usage": "same",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "7d",
-    "usage": "same",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "7d",
-    "usage": "same",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "7d",
-    "usage": "same",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "7d",
-    "usage": "same",
-    "delay": "before",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "7d",
-    "usage": "same",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "7d",
-    "usage": "same",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "7d",
-    "usage": "same",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "7d",
-    "usage": "same",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "7d",
-    "usage": "same",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "7d",
-    "usage": "same",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "7d",
-    "usage": "same",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "7d",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "7d",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "7d",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "7d",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "7d",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "7d",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "7d",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "7d",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "unknown",
-    "usage": "cleared",
-    "delay": "after",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "unknown",
-    "usage": "cleared",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "unknown",
-    "usage": "cleared",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "unknown",
-    "usage": "cleared",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "unknown",
-    "usage": "cleared",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "unknown",
-    "usage": "cleared",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "unknown",
-    "usage": "cleared",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "unknown",
-    "usage": "cleared",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "unknown",
-    "usage": "cleared",
-    "delay": "before",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "unknown",
-    "usage": "cleared",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "unknown",
-    "usage": "cleared",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "unknown",
-    "usage": "cleared",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "unknown",
-    "usage": "cleared",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "unknown",
-    "usage": "cleared",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "unknown",
-    "usage": "cleared",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "unknown",
-    "usage": "cleared",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "unknown",
-    "usage": "cleared",
-    "delay": "edge",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "unknown",
-    "usage": "cleared",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "unknown",
-    "usage": "cleared",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "unknown",
-    "usage": "cleared",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "unknown",
-    "usage": "cleared",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "unknown",
-    "usage": "cleared",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "unknown",
-    "usage": "cleared",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "unknown",
-    "usage": "cleared",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "unknown",
-    "usage": "decreased",
-    "delay": "after",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "unknown",
-    "usage": "decreased",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "unknown",
-    "usage": "decreased",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "unknown",
-    "usage": "decreased",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "unknown",
-    "usage": "decreased",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "unknown",
-    "usage": "decreased",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "unknown",
-    "usage": "decreased",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "unknown",
-    "usage": "decreased",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "unknown",
-    "usage": "decreased",
-    "delay": "before",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "unknown",
-    "usage": "decreased",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "unknown",
-    "usage": "decreased",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "unknown",
-    "usage": "decreased",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "unknown",
-    "usage": "decreased",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "unknown",
-    "usage": "decreased",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "unknown",
-    "usage": "decreased",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "unknown",
-    "usage": "decreased",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "unknown",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "unknown",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "unknown",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "unknown",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "unknown",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "unknown",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "unknown",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "unknown",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "unknown",
-    "usage": "refilled",
-    "delay": "after",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "unknown",
-    "usage": "refilled",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "unknown",
-    "usage": "refilled",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "unknown",
-    "usage": "refilled",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "unknown",
-    "usage": "refilled",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "unknown",
-    "usage": "refilled",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "unknown",
-    "usage": "refilled",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "unknown",
-    "usage": "refilled",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "unknown",
-    "usage": "refilled",
-    "delay": "before",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "unknown",
-    "usage": "refilled",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "unknown",
-    "usage": "refilled",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "unknown",
-    "usage": "refilled",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "unknown",
-    "usage": "refilled",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "unknown",
-    "usage": "refilled",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "unknown",
-    "usage": "refilled",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "unknown",
-    "usage": "refilled",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "unknown",
-    "usage": "refilled",
-    "delay": "edge",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "unknown",
-    "usage": "refilled",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "unknown",
-    "usage": "refilled",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "unknown",
-    "usage": "refilled",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "unknown",
-    "usage": "refilled",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "unknown",
-    "usage": "refilled",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "unknown",
-    "usage": "refilled",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "unknown",
-    "usage": "refilled",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "unknown",
-    "usage": "same",
-    "delay": "after",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "unknown",
-    "usage": "same",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "unknown",
-    "usage": "same",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "unknown",
-    "usage": "same",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "unknown",
-    "usage": "same",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "unknown",
-    "usage": "same",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "unknown",
-    "usage": "same",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "unknown",
-    "usage": "same",
-    "delay": "after",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "unknown",
-    "usage": "same",
-    "delay": "before",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "unknown",
-    "usage": "same",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "unknown",
-    "usage": "same",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "unknown",
-    "usage": "same",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "unknown",
-    "usage": "same",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "unknown",
-    "usage": "same",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "unknown",
-    "usage": "same",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "unknown",
-    "usage": "same",
-    "delay": "before",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 0,
-    "length": "unknown",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "usage_only"
-  },
-  {
-    "baseline": "none",
-    "offset": 1,
-    "length": "unknown",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 2,
-    "length": "unknown",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 3,
-    "length": "unknown",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 4,
-    "length": "unknown",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 5,
-    "length": "unknown",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 6,
-    "length": "unknown",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "none",
-    "offset": 7,
-    "length": "unknown",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "reset"
-  },
-  {
-    "baseline": "reset",
-    "offset": 0,
-    "length": "5h",
-    "usage": "cleared",
-    "delay": "after",
-    "expected": "activated_inferred"
-  },
-  {
-    "baseline": "reset",
-    "offset": 1,
-    "length": "5h",
-    "usage": "cleared",
-    "delay": "after",
-    "expected": "anomaly"
-  },
-  {
-    "baseline": "reset",
-    "offset": 2,
-    "length": "5h",
-    "usage": "cleared",
-    "delay": "after",
-    "expected": "activated_inferred"
-  },
-  {
-    "baseline": "reset",
-    "offset": 3,
-    "length": "5h",
-    "usage": "cleared",
-    "delay": "after",
-    "expected": "activated_inferred"
-  },
-  {
-    "baseline": "reset",
-    "offset": 4,
-    "length": "5h",
-    "usage": "cleared",
-    "delay": "after",
-    "expected": "activated_new"
-  },
-  {
-    "baseline": "reset",
-    "offset": 5,
-    "length": "5h",
-    "usage": "cleared",
-    "delay": "after",
-    "expected": "activated_new"
-  },
-  {
-    "baseline": "reset",
-    "offset": 6,
-    "length": "5h",
-    "usage": "cleared",
-    "delay": "after",
-    "expected": "activated_new"
-  },
-  {
-    "baseline": "reset",
-    "offset": 7,
-    "length": "5h",
-    "usage": "cleared",
-    "delay": "after",
-    "expected": "anomaly"
-  },
-  {
-    "baseline": "reset",
     "offset": 0,
     "length": "5h",
     "usage": "cleared",
@@ -2376,143 +72,143 @@
     "expected": "not_due_yet"
   },
   {
-    "baseline": "reset",
+    "baseline": "none",
     "offset": 1,
     "length": "5h",
     "usage": "cleared",
     "delay": "before",
-    "expected": "anomaly"
+    "expected": "still_lazy"
   },
   {
-    "baseline": "reset",
+    "baseline": "none",
     "offset": 2,
+    "length": "5h",
+    "usage": "cleared",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "5h",
+    "usage": "cleared",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
     "length": "5h",
     "usage": "cleared",
     "delay": "before",
     "expected": "not_due_yet"
   },
   {
-    "baseline": "reset",
-    "offset": 3,
+    "baseline": "none",
+    "offset": 5,
     "length": "5h",
     "usage": "cleared",
     "delay": "before",
     "expected": "not_due_yet"
   },
   {
-    "baseline": "reset",
-    "offset": 4,
-    "length": "5h",
-    "usage": "cleared",
-    "delay": "before",
-    "expected": "activated_new"
-  },
-  {
-    "baseline": "reset",
-    "offset": 5,
-    "length": "5h",
-    "usage": "cleared",
-    "delay": "before",
-    "expected": "activated_new"
-  },
-  {
-    "baseline": "reset",
+    "baseline": "none",
     "offset": 6,
     "length": "5h",
     "usage": "cleared",
     "delay": "before",
-    "expected": "activated_new"
+    "expected": "not_due_yet"
   },
   {
-    "baseline": "reset",
+    "baseline": "none",
     "offset": 7,
     "length": "5h",
     "usage": "cleared",
     "delay": "before",
-    "expected": "anomaly"
+    "expected": "not_due_yet"
   },
   {
-    "baseline": "reset",
+    "baseline": "none",
     "offset": 0,
     "length": "5h",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "activated_inferred"
+    "expected": "not_due_yet"
   },
   {
-    "baseline": "reset",
+    "baseline": "none",
     "offset": 1,
     "length": "5h",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "anomaly"
+    "expected": "still_lazy"
   },
   {
-    "baseline": "reset",
+    "baseline": "none",
     "offset": 2,
     "length": "5h",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "activated_inferred"
+    "expected": "still_lazy"
   },
   {
-    "baseline": "reset",
+    "baseline": "none",
     "offset": 3,
     "length": "5h",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "activated_inferred"
+    "expected": "still_lazy"
   },
   {
-    "baseline": "reset",
+    "baseline": "none",
     "offset": 4,
     "length": "5h",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "activated_new"
+    "expected": "not_due_yet"
   },
   {
-    "baseline": "reset",
+    "baseline": "none",
     "offset": 5,
     "length": "5h",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "activated_new"
+    "expected": "not_due_yet"
   },
   {
-    "baseline": "reset",
+    "baseline": "none",
     "offset": 6,
     "length": "5h",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "activated_new"
+    "expected": "not_due_yet"
   },
   {
-    "baseline": "reset",
+    "baseline": "none",
     "offset": 7,
     "length": "5h",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "anomaly"
+    "expected": "not_due_yet"
   },
   {
-    "baseline": "reset",
+    "baseline": "none",
     "offset": 0,
+    "length": "5h",
+    "usage": "decreased",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
     "length": "5h",
     "usage": "decreased",
     "delay": "after",
     "expected": "still_lazy"
   },
   {
-    "baseline": "reset",
-    "offset": 1,
-    "length": "5h",
-    "usage": "decreased",
-    "delay": "after",
-    "expected": "anomaly"
-  },
-  {
-    "baseline": "reset",
+    "baseline": "none",
     "offset": 2,
     "length": "5h",
     "usage": "decreased",
@@ -2520,6 +216,2310 @@
     "expected": "still_lazy"
   },
   {
+    "baseline": "none",
+    "offset": 3,
+    "length": "5h",
+    "usage": "decreased",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "5h",
+    "usage": "decreased",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "5h",
+    "usage": "decreased",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "5h",
+    "usage": "decreased",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "5h",
+    "usage": "decreased",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "5h",
+    "usage": "decreased",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "5h",
+    "usage": "decreased",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "5h",
+    "usage": "decreased",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "5h",
+    "usage": "decreased",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "5h",
+    "usage": "decreased",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "5h",
+    "usage": "decreased",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "5h",
+    "usage": "decreased",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "5h",
+    "usage": "decreased",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "5h",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "5h",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "5h",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "5h",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "5h",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "5h",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "5h",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "5h",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "5h",
+    "usage": "refilled",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "5h",
+    "usage": "refilled",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "5h",
+    "usage": "refilled",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "5h",
+    "usage": "refilled",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "5h",
+    "usage": "refilled",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "5h",
+    "usage": "refilled",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "5h",
+    "usage": "refilled",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "5h",
+    "usage": "refilled",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "5h",
+    "usage": "refilled",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "5h",
+    "usage": "refilled",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "5h",
+    "usage": "refilled",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "5h",
+    "usage": "refilled",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "5h",
+    "usage": "refilled",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "5h",
+    "usage": "refilled",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "5h",
+    "usage": "refilled",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "5h",
+    "usage": "refilled",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "5h",
+    "usage": "refilled",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "5h",
+    "usage": "refilled",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "5h",
+    "usage": "refilled",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "5h",
+    "usage": "refilled",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "5h",
+    "usage": "refilled",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "5h",
+    "usage": "refilled",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "5h",
+    "usage": "refilled",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "5h",
+    "usage": "refilled",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "5h",
+    "usage": "same",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "5h",
+    "usage": "same",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "5h",
+    "usage": "same",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "5h",
+    "usage": "same",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "5h",
+    "usage": "same",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "5h",
+    "usage": "same",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "5h",
+    "usage": "same",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "5h",
+    "usage": "same",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "5h",
+    "usage": "same",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "5h",
+    "usage": "same",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "5h",
+    "usage": "same",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "5h",
+    "usage": "same",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "5h",
+    "usage": "same",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "5h",
+    "usage": "same",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "5h",
+    "usage": "same",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "5h",
+    "usage": "same",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "5h",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "5h",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "5h",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "5h",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "5h",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "5h",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "5h",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "5h",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "7d",
+    "usage": "cleared",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "7d",
+    "usage": "cleared",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "7d",
+    "usage": "cleared",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "7d",
+    "usage": "cleared",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "7d",
+    "usage": "cleared",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "7d",
+    "usage": "cleared",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "7d",
+    "usage": "cleared",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "7d",
+    "usage": "cleared",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "7d",
+    "usage": "cleared",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "7d",
+    "usage": "cleared",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "7d",
+    "usage": "cleared",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "7d",
+    "usage": "cleared",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "7d",
+    "usage": "cleared",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "7d",
+    "usage": "cleared",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "7d",
+    "usage": "cleared",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "7d",
+    "usage": "cleared",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "7d",
+    "usage": "cleared",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "7d",
+    "usage": "cleared",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "7d",
+    "usage": "cleared",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "7d",
+    "usage": "cleared",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "7d",
+    "usage": "cleared",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "7d",
+    "usage": "cleared",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "7d",
+    "usage": "cleared",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "7d",
+    "usage": "cleared",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "7d",
+    "usage": "decreased",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "7d",
+    "usage": "decreased",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "7d",
+    "usage": "decreased",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "7d",
+    "usage": "decreased",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "7d",
+    "usage": "decreased",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "7d",
+    "usage": "decreased",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "7d",
+    "usage": "decreased",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "7d",
+    "usage": "decreased",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "7d",
+    "usage": "decreased",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "7d",
+    "usage": "decreased",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "7d",
+    "usage": "decreased",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "7d",
+    "usage": "decreased",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "7d",
+    "usage": "decreased",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "7d",
+    "usage": "decreased",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "7d",
+    "usage": "decreased",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "7d",
+    "usage": "decreased",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "7d",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "7d",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "7d",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "7d",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "7d",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "7d",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "7d",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "7d",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "7d",
+    "usage": "refilled",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "7d",
+    "usage": "refilled",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "7d",
+    "usage": "refilled",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "7d",
+    "usage": "refilled",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "7d",
+    "usage": "refilled",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "7d",
+    "usage": "refilled",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "7d",
+    "usage": "refilled",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "7d",
+    "usage": "refilled",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "7d",
+    "usage": "refilled",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "7d",
+    "usage": "refilled",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "7d",
+    "usage": "refilled",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "7d",
+    "usage": "refilled",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "7d",
+    "usage": "refilled",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "7d",
+    "usage": "refilled",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "7d",
+    "usage": "refilled",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "7d",
+    "usage": "refilled",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "7d",
+    "usage": "refilled",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "7d",
+    "usage": "refilled",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "7d",
+    "usage": "refilled",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "7d",
+    "usage": "refilled",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "7d",
+    "usage": "refilled",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "7d",
+    "usage": "refilled",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "7d",
+    "usage": "refilled",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "7d",
+    "usage": "refilled",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "7d",
+    "usage": "same",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "7d",
+    "usage": "same",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "7d",
+    "usage": "same",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "7d",
+    "usage": "same",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "7d",
+    "usage": "same",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "7d",
+    "usage": "same",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "7d",
+    "usage": "same",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "7d",
+    "usage": "same",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "7d",
+    "usage": "same",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "7d",
+    "usage": "same",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "7d",
+    "usage": "same",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "7d",
+    "usage": "same",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "7d",
+    "usage": "same",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "7d",
+    "usage": "same",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "7d",
+    "usage": "same",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "7d",
+    "usage": "same",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "7d",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "7d",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "7d",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "7d",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "7d",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "7d",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "7d",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "7d",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "unknown",
+    "usage": "cleared",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "unknown",
+    "usage": "cleared",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "unknown",
+    "usage": "cleared",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "unknown",
+    "usage": "cleared",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "unknown",
+    "usage": "cleared",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "unknown",
+    "usage": "cleared",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "unknown",
+    "usage": "cleared",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "unknown",
+    "usage": "cleared",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "unknown",
+    "usage": "cleared",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "unknown",
+    "usage": "cleared",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "unknown",
+    "usage": "cleared",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "unknown",
+    "usage": "cleared",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "unknown",
+    "usage": "cleared",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "unknown",
+    "usage": "cleared",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "unknown",
+    "usage": "cleared",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "unknown",
+    "usage": "cleared",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "unknown",
+    "usage": "cleared",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "unknown",
+    "usage": "cleared",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "unknown",
+    "usage": "cleared",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "unknown",
+    "usage": "cleared",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "unknown",
+    "usage": "cleared",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "unknown",
+    "usage": "cleared",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "unknown",
+    "usage": "cleared",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "unknown",
+    "usage": "cleared",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "unknown",
+    "usage": "decreased",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "unknown",
+    "usage": "decreased",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "unknown",
+    "usage": "decreased",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "unknown",
+    "usage": "decreased",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "unknown",
+    "usage": "decreased",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "unknown",
+    "usage": "decreased",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "unknown",
+    "usage": "decreased",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "unknown",
+    "usage": "decreased",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "unknown",
+    "usage": "decreased",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "unknown",
+    "usage": "decreased",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "unknown",
+    "usage": "decreased",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "unknown",
+    "usage": "decreased",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "unknown",
+    "usage": "decreased",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "unknown",
+    "usage": "decreased",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "unknown",
+    "usage": "decreased",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "unknown",
+    "usage": "decreased",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "unknown",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "unknown",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "unknown",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "unknown",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "unknown",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "unknown",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "unknown",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "unknown",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "unknown",
+    "usage": "refilled",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "unknown",
+    "usage": "refilled",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "unknown",
+    "usage": "refilled",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "unknown",
+    "usage": "refilled",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "unknown",
+    "usage": "refilled",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "unknown",
+    "usage": "refilled",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "unknown",
+    "usage": "refilled",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "unknown",
+    "usage": "refilled",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "unknown",
+    "usage": "refilled",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "unknown",
+    "usage": "refilled",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "unknown",
+    "usage": "refilled",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "unknown",
+    "usage": "refilled",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "unknown",
+    "usage": "refilled",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "unknown",
+    "usage": "refilled",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "unknown",
+    "usage": "refilled",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "unknown",
+    "usage": "refilled",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "unknown",
+    "usage": "refilled",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "unknown",
+    "usage": "refilled",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "unknown",
+    "usage": "refilled",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "unknown",
+    "usage": "refilled",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "unknown",
+    "usage": "refilled",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "unknown",
+    "usage": "refilled",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "unknown",
+    "usage": "refilled",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "unknown",
+    "usage": "refilled",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "unknown",
+    "usage": "same",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "unknown",
+    "usage": "same",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "unknown",
+    "usage": "same",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "unknown",
+    "usage": "same",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "unknown",
+    "usage": "same",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "unknown",
+    "usage": "same",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "unknown",
+    "usage": "same",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "unknown",
+    "usage": "same",
+    "delay": "after",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "unknown",
+    "usage": "same",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "unknown",
+    "usage": "same",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "unknown",
+    "usage": "same",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "unknown",
+    "usage": "same",
+    "delay": "before",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "unknown",
+    "usage": "same",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "unknown",
+    "usage": "same",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "unknown",
+    "usage": "same",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "unknown",
+    "usage": "same",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 0,
+    "length": "unknown",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 1,
+    "length": "unknown",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 2,
+    "length": "unknown",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 3,
+    "length": "unknown",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "still_lazy"
+  },
+  {
+    "baseline": "none",
+    "offset": 4,
+    "length": "unknown",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 5,
+    "length": "unknown",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 6,
+    "length": "unknown",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "none",
+    "offset": 7,
+    "length": "unknown",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "reset",
+    "offset": 0,
+    "length": "5h",
+    "usage": "cleared",
+    "delay": "after",
+    "expected": "activated_inferred"
+  },
+  {
+    "baseline": "reset",
+    "offset": 1,
+    "length": "5h",
+    "usage": "cleared",
+    "delay": "after",
+    "expected": "anomaly"
+  },
+  {
+    "baseline": "reset",
+    "offset": 2,
+    "length": "5h",
+    "usage": "cleared",
+    "delay": "after",
+    "expected": "ambiguous"
+  },
+  {
+    "baseline": "reset",
+    "offset": 3,
+    "length": "5h",
+    "usage": "cleared",
+    "delay": "after",
+    "expected": "ambiguous"
+  },
+  {
+    "baseline": "reset",
+    "offset": 4,
+    "length": "5h",
+    "usage": "cleared",
+    "delay": "after",
+    "expected": "ambiguous"
+  },
+  {
+    "baseline": "reset",
+    "offset": 5,
+    "length": "5h",
+    "usage": "cleared",
+    "delay": "after",
+    "expected": "activated_new"
+  },
+  {
+    "baseline": "reset",
+    "offset": 6,
+    "length": "5h",
+    "usage": "cleared",
+    "delay": "after",
+    "expected": "activated_new"
+  },
+  {
+    "baseline": "reset",
+    "offset": 7,
+    "length": "5h",
+    "usage": "cleared",
+    "delay": "after",
+    "expected": "anomaly"
+  },
+  {
+    "baseline": "reset",
+    "offset": 0,
+    "length": "5h",
+    "usage": "cleared",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "reset",
+    "offset": 1,
+    "length": "5h",
+    "usage": "cleared",
+    "delay": "before",
+    "expected": "anomaly"
+  },
+  {
+    "baseline": "reset",
+    "offset": 2,
+    "length": "5h",
+    "usage": "cleared",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "reset",
+    "offset": 3,
+    "length": "5h",
+    "usage": "cleared",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "reset",
+    "offset": 4,
+    "length": "5h",
+    "usage": "cleared",
+    "delay": "before",
+    "expected": "not_due_yet"
+  },
+  {
+    "baseline": "reset",
+    "offset": 5,
+    "length": "5h",
+    "usage": "cleared",
+    "delay": "before",
+    "expected": "activated_new"
+  },
+  {
+    "baseline": "reset",
+    "offset": 6,
+    "length": "5h",
+    "usage": "cleared",
+    "delay": "before",
+    "expected": "activated_new"
+  },
+  {
+    "baseline": "reset",
+    "offset": 7,
+    "length": "5h",
+    "usage": "cleared",
+    "delay": "before",
+    "expected": "anomaly"
+  },
+  {
+    "baseline": "reset",
+    "offset": 0,
+    "length": "5h",
+    "usage": "cleared",
+    "delay": "edge",
+    "expected": "activated_inferred"
+  },
+  {
+    "baseline": "reset",
+    "offset": 1,
+    "length": "5h",
+    "usage": "cleared",
+    "delay": "edge",
+    "expected": "anomaly"
+  },
+  {
+    "baseline": "reset",
+    "offset": 2,
+    "length": "5h",
+    "usage": "cleared",
+    "delay": "edge",
+    "expected": "ambiguous"
+  },
+  {
+    "baseline": "reset",
+    "offset": 3,
+    "length": "5h",
+    "usage": "cleared",
+    "delay": "edge",
+    "expected": "ambiguous"
+  },
+  {
+    "baseline": "reset",
+    "offset": 4,
+    "length": "5h",
+    "usage": "cleared",
+    "delay": "edge",
+    "expected": "ambiguous"
+  },
+  {
+    "baseline": "reset",
+    "offset": 5,
+    "length": "5h",
+    "usage": "cleared",
+    "delay": "edge",
+    "expected": "activated_new"
+  },
+  {
+    "baseline": "reset",
+    "offset": 6,
+    "length": "5h",
+    "usage": "cleared",
+    "delay": "edge",
+    "expected": "activated_new"
+  },
+  {
+    "baseline": "reset",
+    "offset": 7,
+    "length": "5h",
+    "usage": "cleared",
+    "delay": "edge",
+    "expected": "anomaly"
+  },
+  {
+    "baseline": "reset",
+    "offset": 0,
+    "length": "5h",
+    "usage": "decreased",
+    "delay": "after",
+    "expected": "ambiguous"
+  },
+  {
+    "baseline": "reset",
+    "offset": 1,
+    "length": "5h",
+    "usage": "decreased",
+    "delay": "after",
+    "expected": "anomaly"
+  },
+  {
+    "baseline": "reset",
+    "offset": 2,
+    "length": "5h",
+    "usage": "decreased",
+    "delay": "after",
+    "expected": "still_lazy"
+  },
+  {
     "baseline": "reset",
     "offset": 3,
     "length": "5h",
@@ -2533,7 +2533,7 @@
     "length": "5h",
     "usage": "decreased",
     "delay": "after",
-    "expected": "activated_new"
+    "expected": "still_lazy"
   },
   {
     "baseline": "reset",
@@ -2597,7 +2597,7 @@
     "length": "5h",
     "usage": "decreased",
     "delay": "before",
-    "expected": "activated_new"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "reset",
@@ -2626,6 +2626,22 @@
   {
     "baseline": "reset",
     "offset": 0,
+    "length": "5h",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "ambiguous"
+  },
+  {
+    "baseline": "reset",
+    "offset": 1,
+    "length": "5h",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "anomaly"
+  },
+  {
+    "baseline": "reset",
+    "offset": 2,
     "length": "5h",
     "usage": "decreased",
     "delay": "edge",
@@ -2633,22 +2649,6 @@
   },
   {
     "baseline": "reset",
-    "offset": 1,
-    "length": "5h",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "anomaly"
-  },
-  {
-    "baseline": "reset",
-    "offset": 2,
-    "length": "5h",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "still_lazy"
-  },
-  {
-    "baseline": "reset",
     "offset": 3,
     "length": "5h",
     "usage": "decreased",
@@ -2661,7 +2661,7 @@
     "length": "5h",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "activated_new"
+    "expected": "still_lazy"
   },
   {
     "baseline": "reset",
@@ -2709,7 +2709,7 @@
     "length": "5h",
     "usage": "refilled",
     "delay": "after",
-    "expected": "activated_inferred"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -2717,7 +2717,7 @@
     "length": "5h",
     "usage": "refilled",
     "delay": "after",
-    "expected": "activated_inferred"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -2725,7 +2725,7 @@
     "length": "5h",
     "usage": "refilled",
     "delay": "after",
-    "expected": "activated_new"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -2789,7 +2789,7 @@
     "length": "5h",
     "usage": "refilled",
     "delay": "before",
-    "expected": "activated_new"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "reset",
@@ -2837,7 +2837,7 @@
     "length": "5h",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "activated_inferred"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -2845,7 +2845,7 @@
     "length": "5h",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "activated_inferred"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -2853,7 +2853,7 @@
     "length": "5h",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "activated_new"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -2885,7 +2885,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "after",
-    "expected": "still_lazy"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -2917,7 +2917,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "after",
-    "expected": "activated_new"
+    "expected": "still_lazy"
   },
   {
     "baseline": "reset",
@@ -2981,7 +2981,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "before",
-    "expected": "activated_new"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "reset",
@@ -3010,6 +3010,22 @@
   {
     "baseline": "reset",
     "offset": 0,
+    "length": "5h",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "ambiguous"
+  },
+  {
+    "baseline": "reset",
+    "offset": 1,
+    "length": "5h",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "anomaly"
+  },
+  {
+    "baseline": "reset",
+    "offset": 2,
     "length": "5h",
     "usage": "same",
     "delay": "edge",
@@ -3017,22 +3033,6 @@
   },
   {
     "baseline": "reset",
-    "offset": 1,
-    "length": "5h",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "anomaly"
-  },
-  {
-    "baseline": "reset",
-    "offset": 2,
-    "length": "5h",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "still_lazy"
-  },
-  {
-    "baseline": "reset",
     "offset": 3,
     "length": "5h",
     "usage": "same",
@@ -3045,7 +3045,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "edge",
-    "expected": "activated_new"
+    "expected": "still_lazy"
   },
   {
     "baseline": "reset",
@@ -3093,7 +3093,7 @@
     "length": "7d",
     "usage": "cleared",
     "delay": "after",
-    "expected": "activated_inferred"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -3101,7 +3101,7 @@
     "length": "7d",
     "usage": "cleared",
     "delay": "after",
-    "expected": "activated_inferred"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -3109,7 +3109,7 @@
     "length": "7d",
     "usage": "cleared",
     "delay": "after",
-    "expected": "activated_new"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -3173,7 +3173,7 @@
     "length": "7d",
     "usage": "cleared",
     "delay": "before",
-    "expected": "activated_new"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "reset",
@@ -3221,7 +3221,7 @@
     "length": "7d",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "activated_inferred"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -3229,7 +3229,7 @@
     "length": "7d",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "activated_inferred"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -3237,7 +3237,7 @@
     "length": "7d",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "activated_new"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -3269,7 +3269,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "after",
-    "expected": "still_lazy"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -3301,7 +3301,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "after",
-    "expected": "activated_new"
+    "expected": "still_lazy"
   },
   {
     "baseline": "reset",
@@ -3365,7 +3365,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "before",
-    "expected": "activated_new"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "reset",
@@ -3394,6 +3394,22 @@
   {
     "baseline": "reset",
     "offset": 0,
+    "length": "7d",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "ambiguous"
+  },
+  {
+    "baseline": "reset",
+    "offset": 1,
+    "length": "7d",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "anomaly"
+  },
+  {
+    "baseline": "reset",
+    "offset": 2,
     "length": "7d",
     "usage": "decreased",
     "delay": "edge",
@@ -3401,22 +3417,6 @@
   },
   {
     "baseline": "reset",
-    "offset": 1,
-    "length": "7d",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "anomaly"
-  },
-  {
-    "baseline": "reset",
-    "offset": 2,
-    "length": "7d",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "still_lazy"
-  },
-  {
-    "baseline": "reset",
     "offset": 3,
     "length": "7d",
     "usage": "decreased",
@@ -3429,7 +3429,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "activated_new"
+    "expected": "still_lazy"
   },
   {
     "baseline": "reset",
@@ -3477,7 +3477,7 @@
     "length": "7d",
     "usage": "refilled",
     "delay": "after",
-    "expected": "activated_inferred"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -3485,7 +3485,7 @@
     "length": "7d",
     "usage": "refilled",
     "delay": "after",
-    "expected": "activated_inferred"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -3493,7 +3493,7 @@
     "length": "7d",
     "usage": "refilled",
     "delay": "after",
-    "expected": "activated_new"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -3557,7 +3557,7 @@
     "length": "7d",
     "usage": "refilled",
     "delay": "before",
-    "expected": "activated_new"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "reset",
@@ -3605,7 +3605,7 @@
     "length": "7d",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "activated_inferred"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -3613,7 +3613,7 @@
     "length": "7d",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "activated_inferred"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -3621,7 +3621,7 @@
     "length": "7d",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "activated_new"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -3653,7 +3653,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "after",
-    "expected": "still_lazy"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -3685,7 +3685,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "after",
-    "expected": "activated_new"
+    "expected": "still_lazy"
   },
   {
     "baseline": "reset",
@@ -3749,7 +3749,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "before",
-    "expected": "activated_new"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "reset",
@@ -3778,6 +3778,22 @@
   {
     "baseline": "reset",
     "offset": 0,
+    "length": "7d",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "ambiguous"
+  },
+  {
+    "baseline": "reset",
+    "offset": 1,
+    "length": "7d",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "anomaly"
+  },
+  {
+    "baseline": "reset",
+    "offset": 2,
     "length": "7d",
     "usage": "same",
     "delay": "edge",
@@ -3785,22 +3801,6 @@
   },
   {
     "baseline": "reset",
-    "offset": 1,
-    "length": "7d",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "anomaly"
-  },
-  {
-    "baseline": "reset",
-    "offset": 2,
-    "length": "7d",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "still_lazy"
-  },
-  {
-    "baseline": "reset",
     "offset": 3,
     "length": "7d",
     "usage": "same",
@@ -3813,7 +3813,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "edge",
-    "expected": "activated_new"
+    "expected": "still_lazy"
   },
   {
     "baseline": "reset",
@@ -3861,7 +3861,7 @@
     "length": "unknown",
     "usage": "cleared",
     "delay": "after",
-    "expected": "activated_inferred"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -3869,7 +3869,7 @@
     "length": "unknown",
     "usage": "cleared",
     "delay": "after",
-    "expected": "activated_inferred"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -3877,7 +3877,7 @@
     "length": "unknown",
     "usage": "cleared",
     "delay": "after",
-    "expected": "activated_new"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -3941,7 +3941,7 @@
     "length": "unknown",
     "usage": "cleared",
     "delay": "before",
-    "expected": "activated_new"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "reset",
@@ -3989,7 +3989,7 @@
     "length": "unknown",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "activated_inferred"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -3997,7 +3997,7 @@
     "length": "unknown",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "activated_inferred"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -4005,7 +4005,7 @@
     "length": "unknown",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "activated_new"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -4037,7 +4037,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "after",
-    "expected": "still_lazy"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -4069,7 +4069,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "after",
-    "expected": "activated_new"
+    "expected": "still_lazy"
   },
   {
     "baseline": "reset",
@@ -4133,7 +4133,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "before",
-    "expected": "activated_new"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "reset",
@@ -4162,6 +4162,22 @@
   {
     "baseline": "reset",
     "offset": 0,
+    "length": "unknown",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "ambiguous"
+  },
+  {
+    "baseline": "reset",
+    "offset": 1,
+    "length": "unknown",
+    "usage": "decreased",
+    "delay": "edge",
+    "expected": "anomaly"
+  },
+  {
+    "baseline": "reset",
+    "offset": 2,
     "length": "unknown",
     "usage": "decreased",
     "delay": "edge",
@@ -4169,22 +4185,6 @@
   },
   {
     "baseline": "reset",
-    "offset": 1,
-    "length": "unknown",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "anomaly"
-  },
-  {
-    "baseline": "reset",
-    "offset": 2,
-    "length": "unknown",
-    "usage": "decreased",
-    "delay": "edge",
-    "expected": "still_lazy"
-  },
-  {
-    "baseline": "reset",
     "offset": 3,
     "length": "unknown",
     "usage": "decreased",
@@ -4197,7 +4197,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "activated_new"
+    "expected": "still_lazy"
   },
   {
     "baseline": "reset",
@@ -4245,7 +4245,7 @@
     "length": "unknown",
     "usage": "refilled",
     "delay": "after",
-    "expected": "activated_inferred"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -4253,7 +4253,7 @@
     "length": "unknown",
     "usage": "refilled",
     "delay": "after",
-    "expected": "activated_inferred"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -4261,7 +4261,7 @@
     "length": "unknown",
     "usage": "refilled",
     "delay": "after",
-    "expected": "activated_new"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -4325,7 +4325,7 @@
     "length": "unknown",
     "usage": "refilled",
     "delay": "before",
-    "expected": "activated_new"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "reset",
@@ -4373,7 +4373,7 @@
     "length": "unknown",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "activated_inferred"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -4381,7 +4381,7 @@
     "length": "unknown",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "activated_inferred"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -4389,7 +4389,7 @@
     "length": "unknown",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "activated_new"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -4421,7 +4421,7 @@
     "length": "unknown",
     "usage": "same",
     "delay": "after",
-    "expected": "still_lazy"
+    "expected": "ambiguous"
   },
   {
     "baseline": "reset",
@@ -4453,7 +4453,7 @@
     "length": "unknown",
     "usage": "same",
     "delay": "after",
-    "expected": "activated_new"
+    "expected": "still_lazy"
   },
   {
     "baseline": "reset",
@@ -4517,7 +4517,7 @@
     "length": "unknown",
     "usage": "same",
     "delay": "before",
-    "expected": "activated_new"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "reset",
@@ -4546,6 +4546,22 @@
   {
     "baseline": "reset",
     "offset": 0,
+    "length": "unknown",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "ambiguous"
+  },
+  {
+    "baseline": "reset",
+    "offset": 1,
+    "length": "unknown",
+    "usage": "same",
+    "delay": "edge",
+    "expected": "anomaly"
+  },
+  {
+    "baseline": "reset",
+    "offset": 2,
     "length": "unknown",
     "usage": "same",
     "delay": "edge",
@@ -4553,22 +4569,6 @@
   },
   {
     "baseline": "reset",
-    "offset": 1,
-    "length": "unknown",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "anomaly"
-  },
-  {
-    "baseline": "reset",
-    "offset": 2,
-    "length": "unknown",
-    "usage": "same",
-    "delay": "edge",
-    "expected": "still_lazy"
-  },
-  {
-    "baseline": "reset",
     "offset": 3,
     "length": "unknown",
     "usage": "same",
@@ -4581,7 +4581,7 @@
     "length": "unknown",
     "usage": "same",
     "delay": "edge",
-    "expected": "activated_new"
+    "expected": "still_lazy"
   },
   {
     "baseline": "reset",
@@ -4621,7 +4621,7 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -4629,7 +4629,7 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -4637,7 +4637,7 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -4645,7 +4645,7 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -4653,7 +4653,7 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -4661,7 +4661,7 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -4669,7 +4669,7 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -4685,7 +4685,7 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -4693,7 +4693,7 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -4701,7 +4701,7 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -4709,7 +4709,7 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -4717,7 +4717,7 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -4725,7 +4725,7 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -4733,7 +4733,7 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -4749,7 +4749,7 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -4757,7 +4757,7 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -4765,7 +4765,7 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -4773,7 +4773,7 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -4781,7 +4781,7 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -4789,7 +4789,7 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -4797,7 +4797,7 @@
     "length": "5h",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -4805,7 +4805,7 @@
     "length": "5h",
     "usage": "decreased",
     "delay": "after",
-    "expected": "not_due_yet"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -4813,7 +4813,7 @@
     "length": "5h",
     "usage": "decreased",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -4821,7 +4821,7 @@
     "length": "5h",
     "usage": "decreased",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -4829,7 +4829,7 @@
     "length": "5h",
     "usage": "decreased",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -4837,7 +4837,7 @@
     "length": "5h",
     "usage": "decreased",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -4845,7 +4845,7 @@
     "length": "5h",
     "usage": "decreased",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -4853,7 +4853,7 @@
     "length": "5h",
     "usage": "decreased",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -4861,7 +4861,7 @@
     "length": "5h",
     "usage": "decreased",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -4877,7 +4877,7 @@
     "length": "5h",
     "usage": "decreased",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -4885,7 +4885,7 @@
     "length": "5h",
     "usage": "decreased",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -4893,7 +4893,7 @@
     "length": "5h",
     "usage": "decreased",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -4901,7 +4901,7 @@
     "length": "5h",
     "usage": "decreased",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -4909,7 +4909,7 @@
     "length": "5h",
     "usage": "decreased",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -4917,7 +4917,7 @@
     "length": "5h",
     "usage": "decreased",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -4925,7 +4925,7 @@
     "length": "5h",
     "usage": "decreased",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -4933,7 +4933,7 @@
     "length": "5h",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "not_due_yet"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -4941,7 +4941,7 @@
     "length": "5h",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -4949,7 +4949,7 @@
     "length": "5h",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -4957,7 +4957,7 @@
     "length": "5h",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -4965,7 +4965,7 @@
     "length": "5h",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -4973,7 +4973,7 @@
     "length": "5h",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -4981,7 +4981,7 @@
     "length": "5h",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -4989,7 +4989,7 @@
     "length": "5h",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5005,7 +5005,7 @@
     "length": "5h",
     "usage": "refilled",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5013,7 +5013,7 @@
     "length": "5h",
     "usage": "refilled",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5021,7 +5021,7 @@
     "length": "5h",
     "usage": "refilled",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5029,7 +5029,7 @@
     "length": "5h",
     "usage": "refilled",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5037,7 +5037,7 @@
     "length": "5h",
     "usage": "refilled",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5045,7 +5045,7 @@
     "length": "5h",
     "usage": "refilled",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5053,7 +5053,7 @@
     "length": "5h",
     "usage": "refilled",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5069,7 +5069,7 @@
     "length": "5h",
     "usage": "refilled",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5077,7 +5077,7 @@
     "length": "5h",
     "usage": "refilled",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5085,7 +5085,7 @@
     "length": "5h",
     "usage": "refilled",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5093,7 +5093,7 @@
     "length": "5h",
     "usage": "refilled",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5101,7 +5101,7 @@
     "length": "5h",
     "usage": "refilled",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5109,7 +5109,7 @@
     "length": "5h",
     "usage": "refilled",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5117,7 +5117,7 @@
     "length": "5h",
     "usage": "refilled",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5133,7 +5133,7 @@
     "length": "5h",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5141,7 +5141,7 @@
     "length": "5h",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5149,7 +5149,7 @@
     "length": "5h",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5157,7 +5157,7 @@
     "length": "5h",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5165,7 +5165,7 @@
     "length": "5h",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5173,7 +5173,7 @@
     "length": "5h",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5181,7 +5181,7 @@
     "length": "5h",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5189,7 +5189,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "after",
-    "expected": "not_due_yet"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5197,7 +5197,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5205,7 +5205,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5213,7 +5213,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5221,7 +5221,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5229,7 +5229,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5237,7 +5237,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5245,7 +5245,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5261,7 +5261,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5269,7 +5269,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5277,7 +5277,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5285,7 +5285,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5293,7 +5293,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5301,7 +5301,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5309,7 +5309,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5317,7 +5317,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "edge",
-    "expected": "not_due_yet"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5325,7 +5325,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5333,7 +5333,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5341,7 +5341,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5349,7 +5349,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5357,7 +5357,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5365,7 +5365,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5373,7 +5373,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5389,7 +5389,7 @@
     "length": "7d",
     "usage": "cleared",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5397,7 +5397,7 @@
     "length": "7d",
     "usage": "cleared",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5405,7 +5405,7 @@
     "length": "7d",
     "usage": "cleared",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5413,7 +5413,7 @@
     "length": "7d",
     "usage": "cleared",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5421,7 +5421,7 @@
     "length": "7d",
     "usage": "cleared",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5429,7 +5429,7 @@
     "length": "7d",
     "usage": "cleared",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5437,7 +5437,7 @@
     "length": "7d",
     "usage": "cleared",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5453,7 +5453,7 @@
     "length": "7d",
     "usage": "cleared",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5461,7 +5461,7 @@
     "length": "7d",
     "usage": "cleared",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5469,7 +5469,7 @@
     "length": "7d",
     "usage": "cleared",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5477,7 +5477,7 @@
     "length": "7d",
     "usage": "cleared",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5485,7 +5485,7 @@
     "length": "7d",
     "usage": "cleared",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5493,7 +5493,7 @@
     "length": "7d",
     "usage": "cleared",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5501,7 +5501,7 @@
     "length": "7d",
     "usage": "cleared",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5517,7 +5517,7 @@
     "length": "7d",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5525,7 +5525,7 @@
     "length": "7d",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5533,7 +5533,7 @@
     "length": "7d",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5541,7 +5541,7 @@
     "length": "7d",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5549,7 +5549,7 @@
     "length": "7d",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5557,7 +5557,7 @@
     "length": "7d",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5565,7 +5565,7 @@
     "length": "7d",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5573,7 +5573,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "after",
-    "expected": "not_due_yet"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5581,7 +5581,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5589,7 +5589,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5597,7 +5597,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5605,7 +5605,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5613,7 +5613,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5621,7 +5621,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5629,7 +5629,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5645,7 +5645,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5653,7 +5653,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5661,7 +5661,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5669,7 +5669,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5677,7 +5677,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5685,7 +5685,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5693,7 +5693,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5701,7 +5701,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "not_due_yet"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5709,7 +5709,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5717,7 +5717,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5725,7 +5725,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5733,7 +5733,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5741,7 +5741,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5749,7 +5749,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5757,7 +5757,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5773,7 +5773,7 @@
     "length": "7d",
     "usage": "refilled",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5781,7 +5781,7 @@
     "length": "7d",
     "usage": "refilled",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5789,7 +5789,7 @@
     "length": "7d",
     "usage": "refilled",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5797,7 +5797,7 @@
     "length": "7d",
     "usage": "refilled",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5805,7 +5805,7 @@
     "length": "7d",
     "usage": "refilled",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5813,7 +5813,7 @@
     "length": "7d",
     "usage": "refilled",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5821,7 +5821,7 @@
     "length": "7d",
     "usage": "refilled",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5837,7 +5837,7 @@
     "length": "7d",
     "usage": "refilled",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5845,7 +5845,7 @@
     "length": "7d",
     "usage": "refilled",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5853,7 +5853,7 @@
     "length": "7d",
     "usage": "refilled",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5861,7 +5861,7 @@
     "length": "7d",
     "usage": "refilled",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5869,7 +5869,7 @@
     "length": "7d",
     "usage": "refilled",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5877,7 +5877,7 @@
     "length": "7d",
     "usage": "refilled",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5885,7 +5885,7 @@
     "length": "7d",
     "usage": "refilled",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5901,7 +5901,7 @@
     "length": "7d",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5909,7 +5909,7 @@
     "length": "7d",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5917,7 +5917,7 @@
     "length": "7d",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5925,7 +5925,7 @@
     "length": "7d",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5933,7 +5933,7 @@
     "length": "7d",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5941,7 +5941,7 @@
     "length": "7d",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5949,7 +5949,7 @@
     "length": "7d",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5957,7 +5957,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "after",
-    "expected": "not_due_yet"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5965,7 +5965,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5973,7 +5973,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5981,7 +5981,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -5989,7 +5989,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5997,7 +5997,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6005,7 +6005,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6013,7 +6013,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6029,7 +6029,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6037,7 +6037,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6045,7 +6045,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6053,7 +6053,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6061,7 +6061,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6069,7 +6069,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6077,7 +6077,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6085,7 +6085,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "edge",
-    "expected": "not_due_yet"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6093,7 +6093,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6101,7 +6101,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6109,7 +6109,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6117,7 +6117,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6125,7 +6125,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6133,7 +6133,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6141,7 +6141,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6157,7 +6157,7 @@
     "length": "unknown",
     "usage": "cleared",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6165,7 +6165,7 @@
     "length": "unknown",
     "usage": "cleared",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6173,7 +6173,7 @@
     "length": "unknown",
     "usage": "cleared",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6181,7 +6181,7 @@
     "length": "unknown",
     "usage": "cleared",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6189,7 +6189,7 @@
     "length": "unknown",
     "usage": "cleared",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6197,7 +6197,7 @@
     "length": "unknown",
     "usage": "cleared",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6205,7 +6205,7 @@
     "length": "unknown",
     "usage": "cleared",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6221,7 +6221,7 @@
     "length": "unknown",
     "usage": "cleared",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6229,7 +6229,7 @@
     "length": "unknown",
     "usage": "cleared",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6237,7 +6237,7 @@
     "length": "unknown",
     "usage": "cleared",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6245,7 +6245,7 @@
     "length": "unknown",
     "usage": "cleared",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6253,7 +6253,7 @@
     "length": "unknown",
     "usage": "cleared",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6261,7 +6261,7 @@
     "length": "unknown",
     "usage": "cleared",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6269,7 +6269,7 @@
     "length": "unknown",
     "usage": "cleared",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6285,7 +6285,7 @@
     "length": "unknown",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6293,7 +6293,7 @@
     "length": "unknown",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6301,7 +6301,7 @@
     "length": "unknown",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6309,7 +6309,7 @@
     "length": "unknown",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6317,7 +6317,7 @@
     "length": "unknown",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6325,7 +6325,7 @@
     "length": "unknown",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6333,7 +6333,7 @@
     "length": "unknown",
     "usage": "cleared",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6341,7 +6341,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "after",
-    "expected": "not_due_yet"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6349,7 +6349,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6357,7 +6357,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6365,7 +6365,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6373,7 +6373,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6381,7 +6381,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6389,7 +6389,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6397,7 +6397,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6413,7 +6413,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6421,7 +6421,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6429,7 +6429,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6437,7 +6437,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6445,7 +6445,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6453,7 +6453,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6461,7 +6461,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6469,7 +6469,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "not_due_yet"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6477,7 +6477,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6485,7 +6485,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6493,7 +6493,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6501,7 +6501,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6509,7 +6509,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6517,7 +6517,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6525,7 +6525,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6541,7 +6541,7 @@
     "length": "unknown",
     "usage": "refilled",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6549,7 +6549,7 @@
     "length": "unknown",
     "usage": "refilled",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6557,7 +6557,7 @@
     "length": "unknown",
     "usage": "refilled",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6565,7 +6565,7 @@
     "length": "unknown",
     "usage": "refilled",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6573,7 +6573,7 @@
     "length": "unknown",
     "usage": "refilled",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6581,7 +6581,7 @@
     "length": "unknown",
     "usage": "refilled",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6589,7 +6589,7 @@
     "length": "unknown",
     "usage": "refilled",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6605,7 +6605,7 @@
     "length": "unknown",
     "usage": "refilled",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6613,7 +6613,7 @@
     "length": "unknown",
     "usage": "refilled",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6621,7 +6621,7 @@
     "length": "unknown",
     "usage": "refilled",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6629,7 +6629,7 @@
     "length": "unknown",
     "usage": "refilled",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6637,7 +6637,7 @@
     "length": "unknown",
     "usage": "refilled",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6645,7 +6645,7 @@
     "length": "unknown",
     "usage": "refilled",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6653,7 +6653,7 @@
     "length": "unknown",
     "usage": "refilled",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6669,7 +6669,7 @@
     "length": "unknown",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6677,7 +6677,7 @@
     "length": "unknown",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6685,7 +6685,7 @@
     "length": "unknown",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6693,7 +6693,7 @@
     "length": "unknown",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6701,7 +6701,7 @@
     "length": "unknown",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6709,7 +6709,7 @@
     "length": "unknown",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6717,7 +6717,7 @@
     "length": "unknown",
     "usage": "refilled",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6725,7 +6725,7 @@
     "length": "unknown",
     "usage": "same",
     "delay": "after",
-    "expected": "not_due_yet"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6733,7 +6733,7 @@
     "length": "unknown",
     "usage": "same",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6741,7 +6741,7 @@
     "length": "unknown",
     "usage": "same",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6749,7 +6749,7 @@
     "length": "unknown",
     "usage": "same",
     "delay": "after",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6757,7 +6757,7 @@
     "length": "unknown",
     "usage": "same",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6765,7 +6765,7 @@
     "length": "unknown",
     "usage": "same",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6773,7 +6773,7 @@
     "length": "unknown",
     "usage": "same",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6781,7 +6781,7 @@
     "length": "unknown",
     "usage": "same",
     "delay": "after",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6797,7 +6797,7 @@
     "length": "unknown",
     "usage": "same",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6805,7 +6805,7 @@
     "length": "unknown",
     "usage": "same",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6813,7 +6813,7 @@
     "length": "unknown",
     "usage": "same",
     "delay": "before",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6821,7 +6821,7 @@
     "length": "unknown",
     "usage": "same",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6829,7 +6829,7 @@
     "length": "unknown",
     "usage": "same",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6837,7 +6837,7 @@
     "length": "unknown",
     "usage": "same",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6845,7 +6845,7 @@
     "length": "unknown",
     "usage": "same",
     "delay": "before",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6853,7 +6853,7 @@
     "length": "unknown",
     "usage": "same",
     "delay": "edge",
-    "expected": "not_due_yet"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6861,7 +6861,7 @@
     "length": "unknown",
     "usage": "same",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6869,7 +6869,7 @@
     "length": "unknown",
     "usage": "same",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6877,7 +6877,7 @@
     "length": "unknown",
     "usage": "same",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "still_lazy"
   },
   {
     "baseline": "usage_only",
@@ -6885,7 +6885,7 @@
     "length": "unknown",
     "usage": "same",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6893,7 +6893,7 @@
     "length": "unknown",
     "usage": "same",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6901,7 +6901,7 @@
     "length": "unknown",
     "usage": "same",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6909,6 +6909,6 @@
     "length": "unknown",
     "usage": "same",
     "delay": "edge",
-    "expected": "reset"
+    "expected": "not_due_yet"
   }
 ]

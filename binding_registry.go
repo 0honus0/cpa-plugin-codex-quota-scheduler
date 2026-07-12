@@ -72,6 +72,27 @@ func (r *BindingRegistry) MarkAuthBlocked(authID string) error {
 	return nil
 }
 
+func (r *BindingRegistry) ObserveExternalLogin(authID string, login LoginEpoch, fingerprint CredentialFingerprint) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	b, ok := r.bindings[authID]
+	if !ok {
+		return ErrBindingNotRosterConfirmed
+	}
+	if login <= b.Login {
+		return nil
+	}
+	b.Login = login
+	b.Fingerprint = fingerprint
+	b.AuthBlocked = false
+	committed, err := r.store.UpdateMirrored(func(s *PersistentState) error { s.Bindings[authID] = b; return nil })
+	if err != nil {
+		return err
+	}
+	r.bindings = committed.Bindings
+	return nil
+}
+
 // ObserveAuthoritative performs the INV-33 read-only genesis bootstrap. It
 // accepts bindings only from the S1 authoritative roster snapshot.
 func (r *BindingRegistry) ObserveAuthoritative(ctx context.Context, roster HostRosterSnapshot, authID string, host CredentialHost) (RuntimeBinding, bool, error) {

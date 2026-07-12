@@ -69,6 +69,9 @@ type QuotaRefresher struct {
 	coordinator       *Coordinator
 	legacyTxn         *LegacyRefreshTxn
 	refreshController *RefreshController
+	probeController   *ProbeController
+	probeWAL          *ProbeWAL
+	probeFence        *FenceAllocator
 	fenceMu           sync.Mutex
 	nextFence         uint64
 	txnIntent         *Intent
@@ -91,6 +94,9 @@ func NewProductionQuotaRefresher(host HostClient, state *PluginState, credential
 		return nil, err
 	}
 	r.runtimeStore, r.bindings, r.credentials, r.roster = store, bindings, credentials, roster
+	if err := r.initProbeRuntime(); err != nil {
+		return nil, err
+	}
 	return r, nil
 }
 
@@ -172,6 +178,9 @@ func NewQuotaRefresher(host HostClient, state *PluginState, now func() time.Time
 		LeaseDuration: legacyLeaseDuration,
 		Now:           now,
 		Execute: func(ctx context.Context, intent Intent, held *HeldLease) OperationResult {
+			if intent.Class != OperationLegacyRefresh {
+				return r.runTypedHeld(ctx, intent, held)
+			}
 			return r.legacyTxn.RunHeld(ctx, intent, held)
 		},
 		Validate: func(intent Intent, result OperationResult) bool {
@@ -213,6 +222,9 @@ func NewQuotaRefresher(host HostClient, state *PluginState, now func() time.Time
 			return nil
 		},
 		InheritSentUnknown: func(intent Intent, suppressUntil time.Time) error {
+			if intent.Class == OperationProbeSend && r.probeWAL != nil {
+				return r.probeWAL.PersistSentUnknown(intent.Instance, suppressUntil)
+			}
 			return r.persistLegacySentUnknown(intent, suppressUntil)
 		},
 	})
@@ -259,7 +271,7 @@ func (r *QuotaRefresher) refreshOnce(version uint64) error {
 		return nil
 	}
 
-	r.refreshAuths(eligible, version)
+	r.refreshAuths(eligible, version, SourceSchedulerInitial)
 	return nil
 }
 
@@ -317,7 +329,7 @@ func (r *QuotaRefresher) refreshDueOnce(version uint64) error {
 		return nil
 	}
 
-	r.refreshAuths(eligible, version)
+	r.refreshAuths(eligible, version, SourceSchedulerInterval)
 	return nil
 }
 
@@ -386,7 +398,7 @@ func (r *QuotaRefresher) refreshDueCandidatesOnce(version uint64) error {
 	if len(eligible) == 0 {
 		return nil
 	}
-	r.refreshAuths(eligible, version)
+	r.refreshAuths(eligible, version, SourceSchedulerStaleRecovery)
 	return nil
 }
 
@@ -422,7 +434,7 @@ func hasUnknownCandidate(candidateIDs, knownAuthIDs map[string]struct{}) bool {
 	return false
 }
 
-func (r *QuotaRefresher) refreshAuths(eligible []pluginapi.HostAuthFileEntry, version uint64) {
+func (r *QuotaRefresher) refreshAuths(eligible []pluginapi.HostAuthFileEntry, version uint64, source string) {
 	concurrency := r.state.Config().MaxRefreshConcurrency
 	if concurrency <= 0 {
 		concurrency = 1
@@ -438,7 +450,7 @@ func (r *QuotaRefresher) refreshAuths(eligible []pluginapi.HostAuthFileEntry, ve
 		go func() {
 			defer wg.Done()
 			for auth := range jobs {
-				r.refreshAuthVersioned(auth, version)
+				r.refreshAuthVersionedSource(auth, version, source)
 			}
 		}()
 	}
@@ -485,7 +497,7 @@ func (r *QuotaRefresher) refreshOneAuthIDVersioned(authID string, version uint64
 		if !isRefreshEligible(auth) {
 			return fmt.Errorf("auth %s is not eligible for quota refresh", authID)
 		}
-		r.refreshAuthVersioned(auth, version)
+		r.refreshAuthVersionedSource(auth, version, SourceManualRefresh)
 		return nil
 	}
 	if !r.state.BeginCPAAdmissionCall(authID, version) {
@@ -544,6 +556,9 @@ func (r *QuotaRefresher) Start() {
 	r.running = true
 	r.stopping = false
 	r.mu.Unlock()
+	if r.probeController != nil {
+		r.launchProbe(true)
+	}
 
 	go func() {
 		defer close(done)
@@ -565,6 +580,9 @@ func (r *QuotaRefresher) Start() {
 			case <-timerC:
 				r.refreshController.OnDeadline(r.now())
 				r.RefreshDueSoon()
+				if r.probeController != nil {
+					r.launchProbe(false)
+				}
 			case <-wake:
 				if timer != nil && !timer.Stop() {
 					select {
@@ -585,9 +603,31 @@ func (r *QuotaRefresher) Start() {
 	}()
 }
 
+func (r *QuotaRefresher) launchProbe(recoverFirst bool) {
+	r.mu.Lock()
+	if r.stopping {
+		r.mu.Unlock()
+		return
+	}
+	r.wg.Add(1)
+	r.mu.Unlock()
+	go func() {
+		defer r.wg.Done()
+		if recoverFirst {
+			_ = r.RunProbeRecoveryOnce(context.Background())
+		}
+		_ = r.RunProbeDueOnce(context.Background())
+	}()
+}
+
 func (r *QuotaRefresher) nextRefreshLoopDelay() (time.Duration, bool) {
 	now := r.now()
 	deadline := r.refreshController.NextDeadline(now)
+	if r.probeController != nil {
+		if probe := r.probeController.NextDeadline(); !probe.IsZero() && (deadline.IsZero() || probe.Before(deadline)) {
+			deadline = probe
+		}
+	}
 	if legacy := r.state.NextRefreshDueAt(now); !legacy.IsZero() && (deadline.IsZero() || legacy.Before(deadline)) {
 		deadline = legacy
 	}
@@ -793,11 +833,14 @@ func (r *QuotaRefresher) finishRefresh(previousDue time.Time) {
 func (r *QuotaRefresher) refreshAuth(auth pluginapi.HostAuthFileEntry) {
 	_, version, admitted := r.state.AdmittedCPAPriorityVersioned(auth.ID)
 	if admitted {
-		r.refreshAuthVersioned(auth, version)
+		r.refreshAuthVersionedSource(auth, version, SourceManualRefresh)
 	}
 }
 
 func (r *QuotaRefresher) refreshAuthVersioned(auth pluginapi.HostAuthFileEntry, version uint64) {
+	r.refreshAuthVersionedSource(auth, version, SourceManualRefresh)
+}
+func (r *QuotaRefresher) refreshAuthVersionedSource(auth pluginapi.HostAuthFileEntry, version uint64, source string) {
 	if r.coordinator == nil {
 		return
 	}
@@ -819,7 +862,7 @@ func (r *QuotaRefresher) refreshAuthVersioned(auth pluginapi.HostAuthFileEntry, 
 	}
 	intent := Intent{
 		AuthID: auth.ID, Instance: instance, Generation: generation, Class: OperationLegacyRefresh,
-		Source: LegacyRefreshSource, Token: ExecutionToken{Instance: instance, Admission: admission, Tier: generation, Fence: fence}, Login: login, Fingerprint: fingerprint,
+		Source: source, Token: ExecutionToken{Instance: instance, Admission: admission, Tier: generation, Fence: fence}, Login: login, Fingerprint: fingerprint,
 		Payload: LegacyRefreshPayload{Auth: auth, AdmissionVersion: version},
 	}
 	_ = r.coordinator.Submit(intent).Await(context.Background())

@@ -68,7 +68,7 @@ func generateProbeGolden() []probeGoldenRow {
 			for _, l := range lengths {
 				for _, u := range usages {
 					for _, d := range delays {
-						rows = append(rows, probeGoldenRow{b, o, l, u, d, goldenProbeOracle(b, o, u, d)})
+						rows = append(rows, probeGoldenRow{b, o, l, u, d, goldenProbeOracle(b, o, l, u, d)})
 					}
 				}
 			}
@@ -81,35 +81,9 @@ func generateProbeGolden() []probeGoldenRow {
 	})
 	return rows
 }
-func goldenProbeOracle(b string, o int, u, d string) string {
-	if b == "none" {
-		if o == 0 {
-			return "usage_only"
-		}
-		return "reset"
-	}
-	if b == "usage_only" {
-		if o > 0 {
-			return "reset"
-		}
-		if u == "cleared" || u == "refilled" {
-			return "activated_inferred"
-		}
-		return "not_due_yet"
-	}
-	if o == 1 || o == 7 {
-		return "anomaly"
-	}
-	if o >= 4 {
-		return "activated_new"
-	}
-	if d == "before" {
-		return "not_due_yet"
-	}
-	if u == "cleared" || u == "refilled" {
-		return "activated_inferred"
-	}
-	return "still_lazy"
+func goldenProbeOracle(b string, o int, l, u, d string) string {
+	base, snap, now := materializeGolden(b, o, l, u, d)
+	return string(independentProbeOracle(base, snap, now))
 }
 func TestProbeClassifyGolden(t *testing.T) { //inv:INV-17,INV-19
 	want := generateProbeGolden()
@@ -133,4 +107,127 @@ func TestProbeClassifyGolden(t *testing.T) { //inv:INV-17,INV-19
 	if !reflect.DeepEqual(got, want) {
 		t.Fatal("golden diff; regenerate testdata/probe_classify_golden.json")
 	}
+	for _, row := range got {
+		base, snap, now := materializeGolden(row.Baseline, row.Offset, row.Length, row.Usage, row.Delay)
+		wantKind := independentProbeOracle(base, snap, now)
+		if actual := ClassifyProbeWindow(base, snap, now).Kind; actual != wantKind {
+			t.Fatalf("row=%#v actual=%s oracle=%s", row, actual, wantKind)
+		}
+	}
+}
+
+func materializeGolden(kind string, offset int, length, usage, delay string) (ProbeBaseline, QuotaSnapshot, time.Time) {
+	prev := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := prev.Add(time.Minute)
+	if delay == "before" {
+		now = prev.Add(59 * time.Second)
+	} else if delay == "after" {
+		now = prev.Add(61 * time.Second)
+	}
+	old := 80.0
+	observed := 80.0
+	if usage == "cleared" || usage == "refilled" {
+		observed = 0
+	} else if usage == "decreased" {
+		observed = 40
+	}
+	window := time.Duration(0)
+	if length == "5h" {
+		window = 5 * time.Hour
+	} else if length == "7d" {
+		window = 7 * 24 * time.Hour
+	}
+	base := ProbeBaseline{}
+	if kind == "reset" {
+		base = ResetProbeBaseline(prev, old, window)
+	} else if kind == "usage_only" {
+		base = UsageOnlyProbeBaseline(old, prev.Add(time.Minute))
+	}
+	snap := QuotaSnapshot{Valid: true, Usage: &observed}
+	if offset > 0 {
+		v := prev
+		switch offset {
+		case 1:
+			v = prev.Add(-121 * time.Second)
+		case 2:
+			v = prev.Add(-120 * time.Second)
+		case 3:
+			v = prev
+		case 4:
+			v = prev.Add(120 * time.Second)
+		case 5:
+			v = prev.Add(121 * time.Second)
+		case 6:
+			if window > 0 {
+				v = prev.Add(2 * window)
+			} else {
+				v = prev.Add(120 * 24 * time.Hour)
+			}
+		case 7:
+			if window > 0 {
+				v = prev.Add(2*window + time.Second)
+			} else {
+				v = prev.Add(120*24*time.Hour + time.Second)
+			}
+		}
+		snap.ResetAt = &v
+	}
+	return base, snap, now
+}
+func independentProbeOracle(base ProbeBaseline, snap QuotaSnapshot, now time.Time) ProbeClassificationKind {
+	if !snap.Valid || snap.Usage == nil {
+		return ProbeInvalid
+	}
+	if base.Kind == ProbeBaselineNone {
+		if snap.ResetAt == nil {
+			return ProbeNotDueYet
+		}
+		if snap.ResetAt.After(now) {
+			return ProbeNotDueYet
+		}
+		return ProbeStillLazy
+	}
+	if base.Kind == ProbeBaselineUsageOnly {
+		if snap.ResetAt != nil {
+			if snap.ResetAt.After(now) {
+				return ProbeNotDueYet
+			}
+			return ProbeStillLazy
+		}
+		if *snap.Usage == 0 {
+			return ProbeActivatedInferred
+		}
+		if now.Before(base.NextRecheckAt) {
+			return ProbeNotDueYet
+		}
+		return ProbeStillLazy
+	}
+	if snap.ResetAt != nil && snap.ResetAt.Before(base.ResetAt.Add(-probeSkewTolerance)) {
+		return ProbeAnomaly
+	}
+	if snap.ResetAt != nil {
+		delta := snap.ResetAt.Sub(base.ResetAt)
+		if base.WindowLength > 0 && delta > 2*base.WindowLength {
+			return ProbeAnomaly
+		}
+		if base.WindowLength == 0 && delta > probeMaxPlausibleWindow {
+			return ProbeAnomaly
+		}
+		if snap.ResetAt.After(base.ResetAt.Add(probeSkewTolerance)) {
+			return ProbeActivatedNew
+		}
+	}
+	if now.Before(base.ResetAt.Add(probeRefreshAfterResetDelay)) {
+		return ProbeNotDueYet
+	}
+	if snap.ResetAt == nil {
+		if *snap.Usage == 0 {
+			return ProbeActivatedInferred
+		}
+		return ProbeAmbiguous
+	}
+	if absDuration(snap.ResetAt.Sub(base.ResetAt)) <= probeSkewTolerance && *snap.Usage != 0 {
+		return ProbeStillLazy
+	}
+	return ProbeAmbiguous
 }

@@ -126,8 +126,10 @@ try {
 
     if ($Stage -eq "S6") {
         if ($baseline.Count -ne 0 -or $actual.Count -ne 0) { Write-Error "S6 requires zero ABI pick-closure violations"; exit 1 }
-        & go test ./... -run 'Test(SuiteProbe|MockGroupC|MockGroupAProbeRecovery|ProbeAttemptSeamRuntimeRoundTrip|ProbeClassifyGolden|ProbeAllStateEventsAndDualWindowProduct|ProbeKPointsReachableAndRegistered|S6KPointRegistryMatchesSource)$' -count=1
+        & go test ./... -run 'Test(SuiteCoordinator|MockGroupACoordinatorMigration|MockGroupECoordinatorInterleavings|SuiteProbe|MockGroupC|MockGroupAProbeRecovery|ProbeAttemptSeamRuntimeRoundTrip|ProbeClassifyGolden|ProbeAllStateEventsAndDualWindowProduct|ProbeKPointsReachableAndRegistered|S6KPointRegistryMatchesSource|ProductionProbeRunsWhileNormalRefreshDormant|ProductionProbeKPointCrashRestartVerifyFirst|TypedQuotaReadAllocatesAtActualStartAndBarrierJoin|TypedProbeSendNeverJoinsSameAttempt|TypedPropagationWaitRetainsLeaseWithoutSlot|TypedPropagationLeaseReclaimEntersSentUnknownWithoutResign|MockGroupETypedIntentInterleavings|MockGroupALegacyEnvelopeWithTypedIntent|CompletedFenceAndReadStartSeqRemainDistinct)$' -count=1
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        if (-not (Select-String -Path refresh.go -Pattern 'initProbeRuntime\(' -Quiet) -or -not (Select-String -Path probe_runtime.go -Pattern 'RunProbeDueOnce' -Quiet)) { Write-Error "S6 production Probe runtime is not constructed/called"; exit 1 }
+        if (Select-String -Path probe_state.go,probe_wal.go,probe_runtime.go -Pattern 'Source:\s*ProbeSource' -Quiet) { Write-Error "obsolete broad Probe source remains"; exit 1 }
         Write-Output "S6 dual-window Probe, classifier golden, WAL recovery, and seam-superset gates passed"
         exit 0
     }

@@ -20,7 +20,7 @@ func TestProbeWALSendingRecoversVerifyFirstAndSuppresses(t *testing.T) { //inv:I
 		t.Fatal(err)
 	}
 	got := wal.Recover(now.Add(4 * time.Second))
-	if len(got) != 1 || got[0].Class != OperationProbeRead || got[0].StartedAfter != 7 {
+	if len(got) != 1 || got[0].Class != OperationProbeVerify || got[0].StartedAfter != 7 {
 		t.Fatalf("recovery=%v", got)
 	}
 	state, _ := store.PersistentSnapshot()
@@ -98,5 +98,52 @@ func TestProbeRecoveryWaitsForGraceAndNeverResendsDuringSuppression(t *testing.T
 	got := wal.Recover(now.Add(3 * time.Second))
 	if len(got) != 1 || got[0].Class == OperationProbeSend {
 		t.Fatalf("recovery=%v", got)
+	}
+}
+
+func TestProbeSuppressionEntrancesAndVerifyResults(t *testing.T) { //inv:INV-18,INV-27,INV-36
+	now := time.Unix(8000, 0).UTC()
+	suppress := now.Add(10 * time.Minute)
+	for _, entrance := range []ProbeWindowState{ProbeSentAwaitingVerify, ProbeSentUnknown, ProbeSentAwaitingVerify} {
+		for _, result := range []ProbeClassificationKind{ProbeActivatedNew, ProbeStillLazy, ProbeAmbiguous} {
+			c := NewProbeController(now)
+			base := ResetProbeBaseline(now.Add(-time.Hour), 80, 0)
+			snap := QuotaSnapshot{Valid: true, ResetAt: ptrTime(now.Add(-time.Hour)), Usage: ptrFloat(80)}
+			if result == ProbeActivatedNew {
+				snap.ResetAt = ptrTime(now.Add(time.Hour))
+			} else if result == ProbeAmbiguous {
+				snap.ResetAt = nil
+			}
+			c.SetWindow(1, ProbeWindowFiveHour, ProbeWindow{State: entrance, Baseline: base})
+			c.Advance(1, ProbeEvent{Kind: ProbeEventVerifyResult, Now: now, Snapshots: map[ProbeWindowKind]QuotaSnapshot{ProbeWindowFiveHour: snap}})
+			w, _ := c.Window(1, ProbeWindowFiveHour)
+			if result == ProbeActivatedNew {
+				if w.State != ProbeConfirmed {
+					t.Fatalf("entrance=%s result=%s state=%s", entrance, result, w.State)
+				}
+			} else {
+				if w.State != ProbeRetryWait {
+					t.Fatalf("entrance=%s result=%s state=%s", entrance, result, w.State)
+				}
+				if w.Deadline.Before(suppress) {
+					w.Deadline = suppress
+				}
+				if !w.Deadline.Equal(suppress) {
+					t.Fatalf("suppression=%s", w.Deadline)
+				}
+			}
+		}
+	}
+}
+func TestProbeTimeJumpsProduceAtMostOneSequence(t *testing.T) {
+	now := time.Unix(9000, 0).UTC()
+	for _, jump := range []time.Duration{-time.Second, 0, 72 * time.Hour} {
+		c := NewProbeController(now)
+		c.SetWindow(1, ProbeWindowFiveHour, ProbeWindow{State: ProbeWaitingReset, Deadline: now})
+		first := c.Advance(1, ProbeEvent{Kind: ProbeEventDeadline, Window: ProbeWindowFiveHour, Now: now.Add(jump)})
+		second := c.Advance(1, ProbeEvent{Kind: ProbeEventDeadline, Window: ProbeWindowFiveHour, Now: now.Add(jump)})
+		if len(first) > 1 || len(second) != 0 {
+			t.Fatalf("jump=%s first=%d second=%d", jump, len(first), len(second))
+		}
 	}
 }

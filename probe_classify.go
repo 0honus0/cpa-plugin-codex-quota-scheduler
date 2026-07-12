@@ -137,4 +137,4 @@ func ClassifyProbeWindow(base ProbeBaseline, snap QuotaSnapshot, now time.Time) 
 	}
 	return ProbeClassification{Kind: ProbeAmbiguous, Baseline: base}
 }
-func usageActivated(old, new float64) bool { return new == 0 || (old > 0 && new < old) }
+func usageActivated(_, new float64) bool { return new == 0 }

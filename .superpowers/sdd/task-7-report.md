@@ -68,3 +68,38 @@ Replaced refresh-owned Probe execution with an independent dual-window controlle
 
 - The controller produces coordinator intents and persistence primitives, but runtime orchestration of every HTTP phase remains deliberately separated from S7 roster lifecycle.
 - `LegacyRefreshSource` remains for S3 compatibility tests, while Probe source is now accepted independently; the legacy refresh envelope itself no longer performs Probe calls.
+
+## Corrected production cutover review
+
+The initial S6 commit exposed only primitives and was not an active cutover. The correction extends the S3 coordinator additively under DEV-008 and wires the complete production path:
+
+- `NewProductionQuotaRefresher` loads persistent Probe windows/attempts, constructs `ProbeController`, `ProbeWAL`, and the global `FenceAllocator`, and schedules Probe deadlines independently of normal-refresh mode.
+- Typed coordinator classes are `quota_read`, `probe_precheck`, `probe_send`, and `probe_verify`. Actual `ReadStartSeq` is allocated only when a new read starts after instance-lock waiting. It remains distinct from legacy `completedFence`.
+- Barrier reads join only when `ReadStartSeq > StartedAfter`; verify reads claim an attempt and never join across attempts. Probe sends always receive a unique nonjoin key.
+- Production sequence is GetAuth/read precheck, classification, persistent send fence, fsynced `sending`, Probe HTTP, fsynced `sent`, injectable propagation wait retaining the instance lease while releasing the global slot, then barrier verify and persisted window mutation.
+- Startup recovery consumes persisted sending/sent/SentUnknown attempts through the typed coordinator. Suppression applies to normal and recovery paths; lease reclaim persists SentUnknown and never re-signs the send.
+- Capability-B remains fail-closed/WaitingRoster. AuthBlocked is authoritative in `BindingRegistry`; only a strictly greater externally observed LoginEpoch clears it.
+- Due Probe ignores circuit, exhaustion, temporary-unavailable, and trial state, and the production test asserts circuit counters/state and trial state remain unchanged.
+- Normal held refresh transactions now carry `scheduler_initial`, `scheduler_interval`, `scheduler_stale_recovery`, or `manual_refresh`. The old wire label remains only for `OperationLegacyRefresh` compatibility until that S3 adapter is deleted; typed Probe cannot submit it.
+
+### Corrected oracle and matrices
+
+- All 864 golden rows now materialize semantic tagged baselines, reset timestamps, known/unknown lengths, usage observations, and delay-relative clocks. Every production classifier result is compared to an independent ordered test oracle before JSON equality is accepted.
+- The state suite asserts expected state/existence/intent count for every 10-state × event row and independent expected results for the 10×10 dual-window product.
+- Time jumps cover before, exact cutoff, and many-cutoff jumps without replay. Suppression covers normal/recovery/SentUnknown entry semantics and Activated/StillLazy/Ambiguous verification results.
+
+### Corrected crash and coordinator coverage
+
+- Production K-point tests traverse the real orchestrator for all five Probe WAL/HTTP boundaries, reconstruct from the same runtime state, recover verify-first, and assert at most one Probe POST.
+- Typed Mock E covers a quota read queued before send, actual-start sequence allocation after the send fence, and legal barrier joining. Mock A scenario 7 covers the legacy envelope lease concurrent with typed reads.
+- Propagation tests separately prove lease retained, HTTP slot released, virtual-clock completion, and lease reclaim → SentUnknown/no resign.
+- DEV-008 is recorded in `docs/deviations.md`.
+
+### Corrected verification
+
+- S1, S2, S2.5, S3, S4, S5, S6 gates: pass; original S3 tests unchanged.
+- Focused production Probe/typed coordinator suite: pass.
+- Probe/typed race suite: pass.
+- Full `go test ./...`: pass.
+- `go vet ./...`: pass.
+- `git diff --check`: pass with only CRLF conversion warnings.

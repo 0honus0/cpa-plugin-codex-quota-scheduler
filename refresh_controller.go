@@ -16,9 +16,9 @@ type IntentSource string
 
 const (
 	IntentSourceNone          IntentSource = ""
-	IntentSourceInitial       IntentSource = "normal_refresh_initial"
-	IntentSourceStaleRecovery IntentSource = "normal_refresh_stale_recovery"
-	IntentSourceInterval      IntentSource = "normal_refresh_interval"
+	IntentSourceInitial       IntentSource = "scheduler_initial"
+	IntentSourceStaleRecovery IntentSource = "scheduler_stale_recovery"
+	IntentSourceInterval      IntentSource = "scheduler_interval"
 )
 
 // CacheSnapshot contains only the cache facts used to choose the unique normal

@@ -2,9 +2,7 @@ package main
 
 import "time"
 
-const ProbeSource = "probe"
 const (
-	OperationProbeRead OperationClass = "quota_read"
 	OperationProbeSend OperationClass = "probe_send"
 )
 
@@ -66,6 +64,22 @@ func (w *ProbeWAL) PersistSent(i AuthInstanceID, at time.Time) error {
 	})
 	return err
 }
+func (w *ProbeWAL) PersistSentUnknown(i AuthInstanceID, suppress time.Time) error {
+	_, err := w.store.Update(func(s *PersistentState) error {
+		a := s.ProbeAttempts[i]
+		a.Phase = ProbeAttemptSentUnknown
+		if suppress.After(a.SuppressUntil) {
+			a.SuppressUntil = suppress
+		}
+		s.ProbeAttempts[i] = a
+		return nil
+	})
+	return err
+}
+func (w *ProbeWAL) Complete(i AuthInstanceID) error {
+	_, err := w.store.Update(func(s *PersistentState) error { delete(s.ProbeAttempts, i); return nil })
+	return err
+}
 func (w *ProbeWAL) Recover(now time.Time) []Intent {
 	st, err := w.store.PersistentSnapshot()
 	if err != nil {
@@ -83,7 +97,7 @@ func (w *ProbeWAL) Recover(now time.Time) []Intent {
 			a.Phase = ProbeAttemptSentUnknown
 			_, _ = w.store.Update(func(s *PersistentState) error { s.ProbeAttempts[i] = a; return nil })
 		}
-		out = append(out, Intent{Instance: i, Class: OperationProbeRead, Source: ProbeSource, StartedAfter: a.SendFenceSeq, Payload: a.Windows})
+		out = append(out, Intent{Instance: i, Class: OperationProbeVerify, Source: SourceProbeVerify, StartedAfter: a.SendFenceSeq, Payload: a.Windows})
 	}
 	return out
 }
