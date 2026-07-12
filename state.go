@@ -135,7 +135,7 @@ func (s *PluginState) ExecutionTokenCurrent(authID string, token ExecutionToken)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	account, ok := s.accounts["auth:"+authID]
-	return ok && account.Instance == token.Instance && account.AdmissionEpoch == token.Admission
+	return ok && ValidateWriteback(BindingVersion{Instance: account.Instance, Admission: account.AdmissionEpoch, Tier: account.TierGeneration, Login: account.LoginEpoch, Fingerprint: account.CredentialFingerprint}, WritebackVersion{Token: token, Login: account.LoginEpoch, Fingerprint: account.CredentialFingerprint})
 }
 
 func (s *PluginState) AdmittedCPAPriority(authID string) (int, bool) {

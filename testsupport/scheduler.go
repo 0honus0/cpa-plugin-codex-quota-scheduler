@@ -1,19 +1,26 @@
 package testsupport
 
+import "sync"
+
 type Event struct {
 	Name string
 	Run  func()
 }
 type EventScheduler struct {
+	mu     sync.Mutex
 	max    int
 	events []Event
 }
 
 func NewEventScheduler(max int) *EventScheduler { return &EventScheduler{max: max} }
 func (s *EventScheduler) Queue(name string, fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.events = append(s.events, Event{Name: name, Run: fn})
 }
 func (s *EventScheduler) Interleavings() [][]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	n := len(s.events)
 	if n > s.max {
 		n = s.max

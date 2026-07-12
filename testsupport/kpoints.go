@@ -1,10 +1,16 @@
 package testsupport
 
-import "errors"
+import (
+	"errors"
+	"sync"
+)
 
 var ErrInjectedCrash = errors.New("injected crash")
 
-type KPointRegistry struct{ points map[string]struct{} }
+type KPointRegistry struct {
+	mu     sync.RWMutex
+	points map[string]struct{}
+}
 
 func NewKPointRegistry(names ...string) *KPointRegistry {
 	r := &KPointRegistry{points: map[string]struct{}{}}
@@ -13,9 +19,15 @@ func NewKPointRegistry(names ...string) *KPointRegistry {
 	}
 	return r
 }
-func (r *KPointRegistry) Has(name string) bool { _, ok := r.points[name]; return ok }
+func (r *KPointRegistry) Has(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.points[name]
+	return ok
+}
 
 type CrashController struct {
+	mu       sync.Mutex
 	registry *KPointRegistry
 	armed    map[string]bool
 }
@@ -28,6 +40,8 @@ func NewCrashController(r *KPointRegistry, names ...string) *CrashController {
 	return c
 }
 func (c *CrashController) Hit(name string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.registry == nil || !c.registry.Has(name) {
 		return errors.New("unregistered k-point")
 	}

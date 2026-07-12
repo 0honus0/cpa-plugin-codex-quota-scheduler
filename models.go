@@ -127,31 +127,33 @@ type AnnotationState struct {
 }
 
 type AccountState struct {
-	Identity           AccountIdentity
-	Instance           AuthInstanceID
-	AdmissionEpoch     InstanceAdmissionEpoch
-	BindingEpoch       AuthBindingEpoch
-	LoginEpoch         LoginEpoch
-	TokenEpoch         TokenEpoch
-	AuthID             string
-	AuthIndex          string
-	DisplayName        string
-	Email              string
-	Provider           string
-	Priority           int
-	ChatGPTAccountID   string
-	Family             AccountFamily
-	Quota              ParsedQuota
-	LastRefreshAt      time.Time
-	LastSuccessAt      time.Time
-	LastError          string
-	Stale              bool
-	TemporaryExhausted bool
-	TemporaryResetAt   time.Time
-	Circuit            CircuitBreakerState
-	Refresh            AccountRefreshState
-	ResetProbes        map[WindowKind]ResetProbeState
-	Annotation         AccountAnnotation
+	Identity              AccountIdentity
+	Instance              AuthInstanceID
+	AdmissionEpoch        InstanceAdmissionEpoch
+	BindingEpoch          AuthBindingEpoch
+	LoginEpoch            LoginEpoch
+	TokenEpoch            TokenEpoch
+	TierGeneration        TierGeneration
+	CredentialFingerprint CredentialFingerprint
+	AuthID                string
+	AuthIndex             string
+	DisplayName           string
+	Email                 string
+	Provider              string
+	Priority              int
+	ChatGPTAccountID      string
+	Family                AccountFamily
+	Quota                 ParsedQuota
+	LastRefreshAt         time.Time
+	LastSuccessAt         time.Time
+	LastError             string
+	Stale                 bool
+	TemporaryExhausted    bool
+	TemporaryResetAt      time.Time
+	Circuit               CircuitBreakerState
+	Refresh               AccountRefreshState
+	ResetProbes           map[WindowKind]ResetProbeState
+	Annotation            AccountAnnotation
 }
 
 type CPAAdmissionState struct {

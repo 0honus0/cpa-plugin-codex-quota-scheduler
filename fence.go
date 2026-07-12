@@ -8,6 +8,7 @@ import (
 const FenceBlockSize uint64 = 1 << 20
 
 var ErrFenceOverflow = errors.New("fence sequence overflow")
+var ErrFenceUnsafe = errors.New("fence ceiling is not trustworthy")
 
 type FenceAllocator struct {
 	mu            sync.Mutex
@@ -25,6 +26,9 @@ func (a *FenceAllocator) Next() (uint64, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if !a.initialized {
+		if a.state.FenceUnsafe {
+			return 0, ErrFenceUnsafe
+		}
 		a.next = a.state.ReservedCeiling + 1
 		a.ceiling = a.state.ReservedCeiling
 		a.initialized = true
@@ -33,12 +37,37 @@ func (a *FenceAllocator) Next() (uint64, error) {
 		if a.state.ReservedCeiling > ^uint64(0)-FenceBlockSize {
 			return 0, ErrFenceOverflow
 		}
-		a.state.ReservedCeiling += FenceBlockSize
+		newCeiling := a.state.ReservedCeiling + FenceBlockSize
 		//kpoint:K_FENCE_CEILING_WRITE
-		if err := a.store.WriteThrough(clonePersistentState(a.state)); err != nil {
+		if a.crash != nil {
+			if err := a.crash.Hit("K_FENCE_CEILING_WRITE"); err != nil {
+				return 0, err
+			}
+		}
+		var err error
+		if updater, ok := a.store.(interface {
+			Update(func(*PersistentState) error) error
+		}); ok {
+			err = updater.Update(func(s *PersistentState) error {
+				if s.FenceUnsafe {
+					return ErrFenceUnsafe
+				}
+				if s.ReservedCeiling >= newCeiling {
+					newCeiling = s.ReservedCeiling + FenceBlockSize
+				}
+				s.ReservedCeiling = newCeiling
+				return nil
+			})
+		} else {
+			a.state.ReservedCeiling = newCeiling
+			err = a.store.WriteThrough(clonePersistentState(a.state))
+		}
+		if err != nil {
 			return 0, err
 		}
+		a.state.ReservedCeiling = newCeiling
 		if a.crash != nil {
+			//kpoint:K_FENCE_AFTER_CEILING
 			if err := a.crash.Hit("K_FENCE_AFTER_CEILING"); err != nil {
 				return 0, err
 			}

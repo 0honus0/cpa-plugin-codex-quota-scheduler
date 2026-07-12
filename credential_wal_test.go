@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/jeffery/codex-quota-scheduler/testsupport"
 )
 
 type walStore struct {
@@ -22,13 +25,9 @@ type walHost struct {
 	saveErr error
 	calls   int
 }
-type crashAt string
 
-func (c crashAt) Hit(name string) error {
-	if name == string(c) {
-		return errors.New("crash")
-	}
-	return nil
+func crashController(point string) *testsupport.CrashController {
+	return testsupport.NewCrashController(testsupport.NewKPointRegistry("K_CREDENTIAL_PLANNED_WRITE", "K_CREDENTIAL_AFTER_PLANNED", "K_CREDENTIAL_BEFORE_SAVEAUTH", "K_CREDENTIAL_AFTER_SAVEAUTH", "K_CREDENTIAL_BEFORE_TERMINAL", "K_CREDENTIAL_TERMINAL_WRITE", "K_FENCE_CEILING_WRITE", "K_FENCE_AFTER_CEILING", "K_STATE_BEFORE_RENAME", "K_STATE_AFTER_RENAME"), point)
 }
 
 func (h *walHost) SaveAuth(_ context.Context, _ AuthInstanceID, next HostAuth) error {
@@ -61,7 +60,7 @@ func TestCredentialSaveFailureAndUnknown(t *testing.T) {
 		name string
 		err  error
 		want TransitionPhase
-	}{{"failure", errors.New("denied"), TransitionAborted}, {"unknown", ErrCredentialOutcomeUnknown, TransitionOutcomeUnknown}} {
+	}{{"failure", ErrCredentialRejected, TransitionAborted}, {"unknown", ErrCredentialOutcomeUnknown, TransitionOutcomeUnknown}} {
 		t.Run(tc.name, func(t *testing.T) {
 			prev := HostAuth{Fingerprint: fp("s", "r0", "m")}
 			store := &walStore{}
@@ -73,6 +72,33 @@ func TestCredentialSaveFailureAndUnknown(t *testing.T) {
 				t.Fatalf("phase=%s", got.Phase)
 			}
 		})
+	}
+}
+
+func TestCredentialContextAndTransportErrorsAreUnknown(t *testing.T) {
+	for _, err := range []error{context.DeadlineExceeded, context.Canceled, ErrCredentialOutcomeUnknown} {
+		store := &walStore{}
+		prev := HostAuth{Fingerprint: fp("s", "0", "m")}
+		m := NewCredentialManager(store, &walHost{current: prev, saveErr: err}, time.Now, nil)
+		m.SetChain(1, TransitionChain{Cursor: prev.Fingerprint})
+		got, _ := m.SaveVersioned(context.Background(), 1, HostAuth{Fingerprint: fp("s", "1", "m")}, ExecutionToken{Instance: 1})
+		if got.Phase != TransitionOutcomeUnknown {
+			t.Fatalf("%v phase=%s", err, got.Phase)
+		}
+	}
+}
+
+func TestCredentialPlannedWriteFailureRollsBackMemory(t *testing.T) {
+	prev := HostAuth{Fingerprint: fp("s", "0", "m")}
+	store := &walStore{fail: errors.New("disk")}
+	host := &walHost{current: prev}
+	m := NewCredentialManager(store, host, time.Now, nil)
+	m.SetChain(1, TransitionChain{Cursor: prev.Fingerprint})
+	m.SaveVersioned(context.Background(), 1, HostAuth{Fingerprint: fp("s", "1", "m")}, ExecutionToken{Instance: 1})
+	store.fail = nil
+	got, err := m.SaveVersioned(context.Background(), 1, HostAuth{Fingerprint: fp("s", "2", "m")}, ExecutionToken{Instance: 1})
+	if err != nil || got.SaveSeq != 1 || m.Chain(1).Transitions[0].Prev != prev.Fingerprint {
+		t.Fatalf("got=%+v chain=%+v err=%v", got, m.Chain(1), err)
 	}
 }
 
@@ -115,7 +141,7 @@ func TestCredentialCrashLeavesRecoverableWAL(t *testing.T) {
 		t.Run(point, func(t *testing.T) {
 			store := &walStore{}
 			host := &walHost{current: prev}
-			m := NewCredentialManager(store, host, time.Now, crashAt(point))
+			m := NewCredentialManager(store, host, time.Now, crashController(point))
 			m.SetChain(1, TransitionChain{Cursor: prev.Fingerprint})
 			_, err := m.SaveVersioned(context.Background(), 1, next, ExecutionToken{Instance: 1})
 			if err == nil {
@@ -125,5 +151,24 @@ func TestCredentialCrashLeavesRecoverableWAL(t *testing.T) {
 				t.Fatalf("persisted=%+v", store.states)
 			}
 		})
+	}
+}
+
+func TestFreshManagerReconcilesCrashAfterSaveAuth(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := NewStateStore(path, OSFileHooks(), nil)
+	prev := HostAuth{Fingerprint: fp("s", "0", "m")}
+	next := HostAuth{Fingerprint: fp("s", "1", "m")}
+	host := &walHost{current: prev}
+	m := NewCredentialManager(store, host, time.Now, crashController("K_CREDENTIAL_AFTER_SAVEAUTH"))
+	m.SetChain(1, TransitionChain{Cursor: prev.Fingerprint})
+	if _, err := m.SaveVersioned(context.Background(), 1, next, ExecutionToken{Instance: 1}); err == nil {
+		t.Fatal("crash missing")
+	}
+	freshStore := NewStateStore(path, OSFileHooks(), nil)
+	fresh := NewCredentialManager(freshStore, host, time.Now, nil)
+	report, err := fresh.Reconcile(context.Background(), 1)
+	if err != nil || report.Phase != TransitionApplied {
+		t.Fatalf("report=%+v err=%v", report, err)
 	}
 }

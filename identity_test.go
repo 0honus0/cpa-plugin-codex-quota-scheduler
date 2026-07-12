@@ -42,7 +42,7 @@ func TestCredentialChainExpiryAndAmbiguousReconciliation(t *testing.T) {
 		t.Fatalf("expired kind=%s", got.Kind)
 	}
 	unknown := TransitionChain{Cursor: f0, Transitions: []CredentialTransition{{Prev: f0, Next: f1, Phase: TransitionOutcomeUnknown, CreatedAt: now}}}
-	if got := ClassifyObservedCredentialAt(unknown, fp("x", "y", "z"), now); got.Kind != CredentialAmbiguous {
+	if got := ClassifyObservedCredentialAt(unknown, f1, now); got.Kind != CredentialAmbiguous {
 		t.Fatalf("unknown kind=%s", got.Kind)
 	}
 }
@@ -82,7 +82,78 @@ func TestTransitionChainCapsTwelveGenerations(t *testing.T) {
 		next := fp("s", string(rune('a'+i)), "m")
 		c = c.Append(CredentialTransition{Prev: c.Tail(), Next: next, Phase: TransitionApplied, CreatedAt: now})
 	}
-	if len(c.Transitions) != 12 {
+	if len(c.Transitions) != 11 {
 		t.Fatalf("len=%d", len(c.Transitions))
+	}
+}
+
+func TestCredentialMetadataCanonicalization(t *testing.T) {
+	a := NewCredentialFingerprint("s", "r", `{"b":2,"a":1}`)
+	b := NewCredentialFingerprint("s", "r", " { \"a\" : 1, \"b\" : 2 } ")
+	c := NewCredentialFingerprint("s", "r", `{"a":1,"b":3}`)
+	if a != b {
+		t.Fatal("equivalent metadata hashes differ")
+	}
+	if a == c {
+		t.Fatal("different metadata hashes equal")
+	}
+}
+
+func TestBindingValidatorRejectsEveryStaleComponent(t *testing.T) {
+	f := fp("s", "r", "m")
+	current := BindingVersion{Instance: 1, Admission: 2, Tier: 3, Login: 4, Fingerprint: f}
+	valid := WritebackVersion{Token: ExecutionToken{Instance: 1, Admission: 2, Tier: 3}, Login: 4, Fingerprint: f}
+	if !ValidateWriteback(current, valid) {
+		t.Fatal("valid rejected")
+	}
+	cases := []WritebackVersion{valid, valid, valid, valid, valid}
+	cases[0].Token.Instance++
+	cases[1].Token.Admission++
+	cases[2].Token.Tier++
+	cases[3].Login++
+	cases[4].Fingerprint = fp("s", "x", "m")
+	for i, c := range cases {
+		if ValidateWriteback(current, c) {
+			t.Fatalf("stale component %d accepted", i)
+		}
+	}
+}
+
+func TestTransitionChainGenerationAndTimeBoundaries(t *testing.T) {
+	now := time.Date(2026, 7, 12, 0, 0, 0, 0, time.UTC)
+	c := TransitionChain{Cursor: fp("s", "r0", "m")}
+	for i := 0; i < 12; i++ {
+		c = c.AppendAt(CredentialTransition{Prev: c.Tail(), Next: fp("s", string(rune('a'+i)), "m"), Phase: TransitionApplied, CreatedAt: now}, now)
+	}
+	if c.GenerationCount() != 12 {
+		t.Fatalf("at 12 got %d", c.GenerationCount())
+	}
+	c = c.AppendAt(CredentialTransition{Prev: c.Tail(), Next: fp("s", "last", "m"), Phase: TransitionApplied, CreatedAt: now}, now)
+	if c.GenerationCount() != 12 {
+		t.Fatalf("at 13 got %d", c.GenerationCount())
+	}
+	at24 := TransitionChain{Cursor: fp("s", "x", "m"), Transitions: []CredentialTransition{{Prev: fp("s", "x", "m"), Next: fp("s", "y", "m"), Phase: TransitionApplied, CreatedAt: now.Add(-24 * time.Hour)}}}
+	if ClassifyObservedCredentialAt(at24, fp("s", "y", "m"), now).Kind != CredentialOwnedRotation {
+		t.Fatal("24h boundary expired")
+	}
+	if ClassifyObservedCredentialAt(at24, fp("s", "y", "m"), now.Add(time.Nanosecond)).Kind != CredentialAmbiguous {
+		t.Fatal("over 24h reachable")
+	}
+}
+
+func TestCredentialReachabilityIsContiguousAndAmbiguityScoped(t *testing.T) {
+	now := time.Now()
+	f0, f1, f2, f3 := fp("s", "0", "m"), fp("s", "1", "m"), fp("s", "2", "m"), fp("s", "3", "m")
+	chain := TransitionChain{Cursor: f0, Transitions: []CredentialTransition{{Prev: f0, Next: f1, Phase: TransitionAborted, CreatedAt: now}, {Prev: f1, Next: f2, Phase: TransitionApplied, CreatedAt: now}, {Prev: f2, Next: f3, Phase: TransitionOutcomeUnknown, CreatedAt: now}}}
+	if ClassifyObservedCredentialAt(chain, f2, now).Kind == CredentialOwnedRotation {
+		t.Fatal("walked through aborted edge")
+	}
+	if ClassifyObservedCredentialAt(chain, fp("external", "z", "m"), now).Kind == CredentialAmbiguous {
+		t.Fatal("unrelated unknown caused ambiguity")
+	}
+	chain.Transitions[0].Phase = TransitionApplied
+	chain.Transitions[1].Phase = TransitionOutcomeUnknown
+	if ClassifyObservedCredentialAt(chain, f2, now).Kind != CredentialAmbiguous {
+		t.Fatal("relevant unresolved edge not ambiguous")
 	}
 }

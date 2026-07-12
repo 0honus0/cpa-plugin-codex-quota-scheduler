@@ -17,6 +17,7 @@ type PersistentState struct {
 	ReservedCeiling  uint64                             `json:"reserved_ceiling"`
 	NextSaveSeq      uint64                             `json:"next_save_seq"`
 	CredentialChains map[AuthInstanceID]TransitionChain `json:"credential_chains,omitempty"`
+	FenceUnsafe      bool                               `json:"-"`
 }
 
 func NewPersistentState() PersistentState {
@@ -26,36 +27,49 @@ func clonePersistentState(s PersistentState) PersistentState {
 	raw, _ := json.Marshal(s)
 	var out PersistentState
 	_ = json.Unmarshal(raw, &out)
+	out.FenceUnsafe = s.FenceUnsafe
 	if out.CredentialChains == nil {
 		out.CredentialChains = map[AuthInstanceID]TransitionChain{}
 	}
 	return out
 }
 
-type RecoveryReport struct {
-	Migrated       bool
-	ReadOnly       bool
-	UsedBackup     bool
-	RecoveredEmpty bool
+type RecoveryReport struct{ Migrated, ReadOnly, UsedBackup, RecoveredEmpty, FenceUnsafe bool }
+type FileHooks struct {
+	Observe func(string)
+	Fail    func(string) error
+	Replace func(string, string) error
+	SyncDir func(string) error
 }
-type FileHooks struct{ Observe func(string) }
 
-func OSFileHooks() FileHooks { return FileHooks{} }
-func (h FileHooks) event(s string) {
+func OSFileHooks() FileHooks { return FileHooks{Replace: replaceFileAtomic, SyncDir: syncDirectory} }
+func (h FileHooks) event(op string) error {
 	if h.Observe != nil {
-		h.Observe(s)
+		h.Observe(op)
 	}
+	if h.Fail != nil {
+		return h.Fail(op)
+	}
+	return nil
 }
 
 type StateStore struct {
-	mu       sync.Mutex
-	path     string
-	hooks    FileHooks
-	crash    CrashHitter
-	readOnly bool
+	mu               sync.Mutex
+	path             string
+	hooks            FileHooks
+	crash            CrashHitter
+	readOnly, loaded bool
+	state            PersistentState
 }
 
 func NewStateStore(path string, hooks FileHooks, crash CrashHitter) *StateStore {
+	defaults := OSFileHooks()
+	if hooks.Replace == nil {
+		hooks.Replace = defaults.Replace
+	}
+	if hooks.SyncDir == nil {
+		hooks.SyncDir = defaults.SyncDir
+	}
 	return &StateStore{path: path, hooks: hooks, crash: crash}
 }
 func (s *StateStore) hit(name string) error {
@@ -67,22 +81,31 @@ func (s *StateStore) hit(name string) error {
 func (s *StateStore) Load() (PersistentState, RecoveryReport, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.loadLocked()
+}
+func (s *StateStore) loadLocked() (PersistentState, RecoveryReport, error) {
 	state, err := readPersistentState(s.path)
 	report := RecoveryReport{}
 	if err != nil {
+		primaryErr := err
 		state, err = readPersistentState(s.path + ".bak")
 		if err == nil {
 			report.UsedBackup = true
+		} else if errors.Is(primaryErr, os.ErrNotExist) && errors.Is(err, os.ErrNotExist) {
+			state = NewPersistentState()
 		} else {
 			state = NewPersistentState()
+			state.FenceUnsafe = true
 			report.RecoveredEmpty = true
-			return state, report, nil
+			report.FenceUnsafe = true
+			s.state = state
+			s.loaded = true
+			return clonePersistentState(state), report, nil
 		}
 	}
 	if state.SchemaVersion > CurrentStateSchema {
 		s.readOnly = true
 		report.ReadOnly = true
-		return state, report, nil
 	}
 	if state.SchemaVersion < CurrentStateSchema {
 		state.SchemaVersion = CurrentStateSchema
@@ -91,7 +114,9 @@ func (s *StateStore) Load() (PersistentState, RecoveryReport, error) {
 	if state.CredentialChains == nil {
 		state.CredentialChains = map[AuthInstanceID]TransitionChain{}
 	}
-	return state, report, nil
+	s.state = state
+	s.loaded = true
+	return clonePersistentState(state), report, nil
 }
 func readPersistentState(path string) (PersistentState, error) {
 	raw, err := os.ReadFile(path)
@@ -104,9 +129,36 @@ func readPersistentState(path string) (PersistentState, error) {
 	}
 	return st, nil
 }
+func (s *StateStore) PersistentSnapshot() (PersistentState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.loaded {
+		if _, _, err := s.loadLocked(); err != nil {
+			return PersistentState{}, err
+		}
+	}
+	return clonePersistentState(s.state), nil
+}
+func (s *StateStore) Update(fn func(*PersistentState) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.loaded {
+		if _, _, err := s.loadLocked(); err != nil {
+			return err
+		}
+	}
+	next := clonePersistentState(s.state)
+	if err := fn(&next); err != nil {
+		return err
+	}
+	return s.writeLocked(next)
+}
 func (s *StateStore) WriteThrough(state PersistentState) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.writeLocked(state)
+}
+func (s *StateStore) writeLocked(state PersistentState) error {
 	if s.readOnly {
 		return ErrStateReadOnly
 	}
@@ -123,44 +175,63 @@ func (s *StateStore) WriteThrough(state PersistentState) error {
 	if err = os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
-	tmp := s.path + ".tmp"
+	current, readErr := os.ReadFile(s.path)
+	if readErr != nil {
+		current = raw
+	}
+	if err = s.writeAtomic(s.path+".bak", current, "backup"); err != nil {
+		return err
+	}
+	if err = s.writeAtomic(s.path, raw, "primary"); err != nil {
+		return err
+	}
+	s.state = clonePersistentState(state)
+	s.loaded = true
+	return nil
+}
+func (s *StateStore) writeAtomic(target string, raw []byte, prefix string) error {
+	tmp := target + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
 	}
-	s.hooks.event("temp-write")
-	if _, err = f.Write(raw); err != nil {
-		f.Close()
-		return err
+	cleanup := func(e error) error { _ = f.Close(); return e }
+	if err = s.hooks.event(prefix + "-write"); err != nil {
+		return cleanup(err)
 	}
-	s.hooks.event("temp-fsync")
+	if _, err = f.Write(raw); err != nil {
+		return cleanup(err)
+	}
+	if err = s.hooks.event(prefix + "-fsync"); err != nil {
+		return cleanup(err)
+	}
 	if err = f.Sync(); err != nil {
-		f.Close()
-		return err
+		return cleanup(err)
 	}
 	if err = f.Close(); err != nil {
 		return err
 	}
-	if err = s.hit("K_STATE_BEFORE_RENAME"); err != nil {
+	if prefix == "primary" { //kpoint:K_STATE_BEFORE_RENAME
+		if err = s.hit("K_STATE_BEFORE_RENAME"); err != nil {
+			return err
+		}
+		if err = s.hooks.event("rename-before"); err != nil {
+			return err
+		}
+	}
+	if err = s.hooks.Replace(tmp, target); err != nil {
 		return err
 	}
-	if current, readErr := os.ReadFile(s.path); readErr == nil {
-		_ = os.WriteFile(s.path+".bak", current, 0600)
+	if prefix == "primary" {
+		if err = s.hooks.event("rename-after"); err != nil {
+			return err
+		} //kpoint:K_STATE_AFTER_RENAME
+		if err = s.hit("K_STATE_AFTER_RENAME"); err != nil {
+			return err
+		}
 	}
-	//kpoint:K_STATE_RENAME_BEFORE
-	s.hooks.event("rename-before")
-	if err = os.Rename(tmp, s.path); err != nil {
+	if err = s.hooks.event(prefix + "-dir-fsync"); err != nil {
 		return err
 	}
-	s.hooks.event("rename-after")
-	//kpoint:K_STATE_RENAME_AFTER
-	if _, err = os.Stat(s.path + ".bak"); errors.Is(err, os.ErrNotExist) {
-		_ = os.WriteFile(s.path+".bak", raw, 0600)
-	}
-	s.hooks.event("dir-fsync")
-	if d, openErr := os.Open(dir); openErr == nil {
-		_ = d.Sync()
-		_ = d.Close()
-	}
-	return s.hit("K_STATE_AFTER_RENAME")
+	return s.hooks.SyncDir(filepath.Dir(target))
 }

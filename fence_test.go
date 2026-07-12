@@ -54,7 +54,7 @@ func TestFenceDoesNotIssueWhenCeilingPersistenceFails(t *testing.T) {
 }
 func TestFenceCrashAfterCeilingPersistenceCreatesSafeGap(t *testing.T) {
 	s := &fenceStore{state: NewPersistentState()}
-	a := NewFenceAllocator(s, s.state, crashAt("K_FENCE_AFTER_CEILING"))
+	a := NewFenceAllocator(s, s.state, crashController("K_FENCE_AFTER_CEILING"))
 	if _, err := a.Next(); err == nil {
 		t.Fatal("crash not injected")
 	}

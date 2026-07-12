@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sync"
 	"testing"
 )
 
@@ -34,4 +35,23 @@ func TestCrashControllerUsesRegisteredKPoints(t *testing.T) {
 	if err := crash.Hit("K_UNKNOWN"); err == nil {
 		t.Fatal("unknown point accepted")
 	}
+}
+
+func TestFakeOpenAIEmptyScriptReturnsError(t *testing.T) {
+	if _, err := new(FakeOpenAI).Do(context.Background(), "GET", "x", nil, nil); err == nil {
+		t.Fatal("empty script panicked or succeeded")
+	}
+}
+
+func TestCrashControllerAndSchedulerConcurrentUse(t *testing.T) {
+	r := NewKPointRegistry("K")
+	c := NewCrashController(r, "K")
+	s := NewEventScheduler(3)
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); _ = c.Hit("K"); s.Queue("x", func() {}) }()
+	}
+	wg.Wait()
+	_ = s.Interleavings()
 }

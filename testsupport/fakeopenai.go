@@ -2,6 +2,7 @@ package testsupport
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"sync"
@@ -23,6 +24,9 @@ func (f *FakeOpenAI) Do(_ context.Context, method, url string, _ http.Header, _ 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, HTTPCall{method, url})
+	if len(f.Responses) == 0 {
+		return nil, errors.New("no scripted OpenAI response")
+	}
 	r := f.Responses[0]
 	f.Responses = f.Responses[1:]
 	if r.Err != nil {
