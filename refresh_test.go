@@ -35,6 +35,7 @@ type fakeHostClient struct {
 
 	mu           sync.Mutex
 	listCalls    int
+	getCalls     int
 	logCalls     int
 	httpCalls    int
 	activeHTTP   int
@@ -60,6 +61,9 @@ func (f *fakeHostClient) ListAuths() ([]pluginapi.HostAuthFileEntry, error) {
 }
 
 func (f *fakeHostClient) GetAuth(authIndex string) (pluginapi.HostAuthGetResponse, error) {
+	f.mu.Lock()
+	f.getCalls++
+	f.mu.Unlock()
 	name := authIndex + ".json"
 	for _, auth := range f.authList {
 		if auth.AuthIndex == authIndex && auth.Name != "" {
@@ -206,6 +210,12 @@ func (f *fakeHostClient) listCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.listCalls
+}
+
+func (f *fakeHostClient) getCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.getCalls
 }
 
 func (f *fakeHostClient) logCallCount() int {

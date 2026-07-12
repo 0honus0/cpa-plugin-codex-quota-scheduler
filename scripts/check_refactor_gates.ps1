@@ -110,7 +110,7 @@ try {
             $newViolations | ForEach-Object { Write-Error "new pick-path violation: $_" }
             exit 1
         }
-        & go test ./... -run 'Test(SuiteRefresh|MockGroupERefresh|RefreshSourcePriorityTruthTable|NormalRefreshDeadlineHasSingleControllerOwner|RefreshActiveWindowDeadlineIsExclusive)$' -count=1
+        & go test ./... -run 'Test(SuiteRefresh|MockGroupERefresh|RefreshSourcePriorityTruthTable|NormalRefreshDeadlineHasSingleControllerOwner|RefreshActiveWindowDeadlineIsExclusive|AuxiliaryDeadlineAtActiveCutoffIsNotOwnedByLegacyLoop|ExactCutoffDoesNotAssignLegacyRetryResetOrProbeOwnership)$' -count=1
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         Write-Output "S4 Dormant/Active normal refresh, unique source priority, and failure-isolation gates passed"
         exit 0

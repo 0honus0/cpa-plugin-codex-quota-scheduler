@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -84,7 +85,17 @@ func TestSuiteRefresh(t *testing.T) {
 		start := refreshTestTime(t, "2026-07-12 10:00:00.000000000")
 		cfg := DefaultConfig()
 		store := NewPluginState(cfg)
-		store.UpsertQuota(AccountState{AuthID: "retained", Provider: "codex", LastSuccessAt: start})
+		used := 42.0
+		store.UpsertQuota(AccountState{AuthID: "retained", Provider: "codex", LastSuccessAt: start, Quota: ParsedQuota{
+			Family: AccountFamilyWeekly,
+			FiveHour: &QuotaWindow{Kind: WindowFiveHour, UsedPercent: &used,
+				ResetAt: start.Add(4 * time.Hour)},
+		}})
+		annotation := AccountAnnotation{Alias: "kept-card", GroupID: "team", Tags: []string{"retained"}}
+		store.SetAnnotations(AnnotationState{
+			Accounts: map[string]AccountAnnotation{"auth:retained": annotation},
+			Groups:   map[string]GroupAnnotation{"team": {Name: "Retained Team"}},
+		})
 		store.RecordCodexActivity(start)
 		host := &fakeHostClient{}
 		refresher := NewQuotaRefresher(host, store, func() time.Time { return start.Add(cfg.RefreshActiveWindow) })
@@ -93,11 +104,20 @@ func TestSuiteRefresh(t *testing.T) {
 		if err := refresher.RefreshDueOnce(); err != nil {
 			t.Fatal(err)
 		}
-		if host.listCallCount() != 0 || host.httpCallCount() != 0 {
-			t.Fatalf("dormant normal refresh made list/http calls = %d/%d", host.listCallCount(), host.httpCallCount())
+		if host.listCallCount() != 0 || host.getCallCount() != 0 || host.httpCallCount() != 0 {
+			t.Fatalf("dormant normal refresh made list/get/http calls = %d/%d/%d", host.listCallCount(), host.getCallCount(), host.httpCallCount())
 		}
-		if got := store.Snapshot(start.Add(cfg.RefreshActiveWindow)).Accounts; len(got) != 1 || got[0].AuthID != "retained" {
-			t.Fatalf("dormant cache/accounts = %#v", got)
+		snapshot := store.Snapshot(start.Add(cfg.RefreshActiveWindow))
+		if got := snapshot.Accounts; len(got) != 1 || got[0].AuthID != "retained" || got[0].Quota.FiveHour == nil || got[0].Quota.FiveHour.UsedPercent == nil || *got[0].Quota.FiveHour.UsedPercent != used {
+			t.Fatalf("dormant cached quota/accounts = %#v", got)
+		}
+		if got := snapshot.Annotations.Accounts["auth:retained"]; got.Alias != annotation.Alias || len(got.Tags) != 1 {
+			t.Fatalf("dormant annotation = %#v", got)
+		}
+		scheduled := ScheduledAccount{AuthID: "retained", Family: AccountFamilyWeekly, Available: true, QueueStatus: QueueStatusAvailable, Annotation: snapshot.Accounts[0].Annotation}
+		payload := BuildStatusPayload(snapshot, []ScheduledAccount{scheduled})
+		if payload.RefreshActive || payload.RefreshState != "sleeping" || len(payload.Accounts) != 1 || payload.Accounts[0].Alias != "kept-card" || payload.Accounts[0].FiveHour.Kind != WindowFiveHour {
+			t.Fatalf("dormant Management status/card = %#v", payload)
 		}
 	})
 }
@@ -148,6 +168,70 @@ func TestRefreshActiveWindowDeadlineIsExclusive(t *testing.T) {
 	store.RecordCodexActivity(start)
 	if store.RefreshActive(start.Add(time.Hour)) {
 		t.Fatal("refresh active at exact active-window deadline")
+	}
+}
+
+func TestAuxiliaryDeadlineAtActiveCutoffIsNotOwnedByLegacyLoop(t *testing.T) {
+	start := refreshTestTime(t, "2026-07-12 10:00:00.000000000")
+	cfg := DefaultConfig()
+	cutoff := start.Add(cfg.RefreshActiveWindow)
+	store := NewPluginState(cfg)
+	store.RecordCodexActivity(start)
+	store.UpsertQuota(AccountState{
+		AuthID:        "retry-at-cutoff",
+		Provider:      "codex",
+		LastSuccessAt: start,
+		LastError:     "retry pending",
+		Refresh:       AccountRefreshState{NextRetryAt: cutoff},
+	})
+	if got := store.NextRefreshDueAt(cutoff); !got.IsZero() {
+		t.Fatalf("legacy auxiliary deadline at dormant cutoff = %s, want zero", got)
+	}
+
+	var clockReads atomic.Int64
+	spinning := make(chan struct{})
+	now := func() time.Time {
+		if clockReads.Add(1) == 100 {
+			close(spinning)
+		}
+		return cutoff
+	}
+	refresher := NewQuotaRefresher(&fakeHostClient{}, store, now)
+	refresher.Start()
+	defer refresher.Stop()
+	select {
+	case <-spinning:
+		t.Fatalf("production loop repeatedly scheduled zero-duration cutoff deadline; clock reads=%d", clockReads.Load())
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestExactCutoffDoesNotAssignLegacyRetryResetOrProbeOwnership(t *testing.T) {
+	start := refreshTestTime(t, "2026-07-12 10:00:00.000000000")
+	cfg := DefaultConfig()
+	cfg.EnableResetProbe = true
+	cutoff := start.Add(cfg.RefreshActiveWindow)
+	tests := []struct {
+		name    string
+		account AccountState
+	}{
+		{name: "retry", account: AccountState{LastError: "retry pending", Refresh: AccountRefreshState{NextRetryAt: cutoff}}},
+		{name: "reset", account: AccountState{Quota: ParsedQuota{FiveHour: &QuotaWindow{Kind: WindowFiveHour, ResetAt: cutoff.Add(-cfg.RefreshAfterResetDelay)}}}},
+		{name: "probe", account: AccountState{ResetProbes: map[WindowKind]ResetProbeState{WindowFiveHour: {Status: ResetProbeStatusPending, NextCheckAt: cutoff}}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewPluginState(cfg)
+			store.RecordCodexActivity(start)
+			account := tc.account
+			account.AuthID = tc.name
+			account.Provider = "codex"
+			account.LastSuccessAt = start
+			store.UpsertQuota(account)
+			if got := store.NextRefreshDueAt(cutoff); !got.IsZero() {
+				t.Fatalf("legacy %s deadline at Dormant cutoff = %s", tc.name, got)
+			}
+		})
 	}
 }
 

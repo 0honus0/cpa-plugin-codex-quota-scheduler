@@ -531,7 +531,7 @@ func refreshActiveFromSnapshot(snapshot StateSnapshot) bool {
 		return false
 	}
 	window := NormalizeConfig(snapshot.Config).RefreshActiveWindow
-	return !snapshot.Now.After(snapshot.LastCodexActivityAt.Add(window))
+	return snapshot.Now.Before(snapshot.LastCodexActivityAt.Add(window))
 }
 
 func emptyStatePayload(snapshot StateSnapshot, refreshActive bool) EmptyStatePayload {

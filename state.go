@@ -542,7 +542,7 @@ func (s *PluginState) NextRefreshDueAt(now time.Time) time.Time {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	cfg := NormalizeConfig(s.cfg)
-	if s.lastCodexActivityAt.IsZero() || now.After(s.lastCodexActivityAt.Add(cfg.RefreshActiveWindow)) {
+	if s.lastCodexActivityAt.IsZero() || !now.Before(s.lastCodexActivityAt.Add(cfg.RefreshActiveWindow)) {
 		return time.Time{}
 	}
 	var next time.Time
