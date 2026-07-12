@@ -84,6 +84,22 @@ func TestMockGroupAProbeRecovery(t *testing.T) {
 	t.Run("sending", TestProbeWALSendingRecoversVerifyFirstAndSuppresses)
 }
 
+func TestProbeDeadlineConsumedOnceWithoutSpin(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	c := NewProbeController(now)
+	c.SetWindow(9, ProbeWindowFiveHour, ProbeWindow{State: ProbeRetryWait, Deadline: now})
+	if got := c.Advance(9, ProbeEvent{Kind: ProbeEventDeadline, Window: ProbeWindowFiveHour, Now: now}); len(got) != 1 {
+		t.Fatalf("first intents=%d", len(got))
+	}
+	if got := c.Advance(9, ProbeEvent{Kind: ProbeEventDeadline, Window: ProbeWindowFiveHour, Now: now}); len(got) != 0 {
+		t.Fatalf("deadline replay spun: %d intents", len(got))
+	}
+	w, _ := c.Window(9, ProbeWindowFiveHour)
+	if w.State != ProbePendingCheck {
+		t.Fatalf("state=%s", w.State)
+	}
+}
+
 func TestProbeRecoveryWaitsForGraceAndNeverResendsDuringSuppression(t *testing.T) { //inv:INV-27,INV-36
 	now := time.Unix(4000, 0).UTC()
 	store := NewStateStore(filepath.Join(t.TempDir(), "state.json"), OSFileHooks(), nil)

@@ -103,3 +103,25 @@ The initial S6 commit exposed only primitives and was not an active cutover. The
 - Full `go test ./...`: pass.
 - `go vet ./...`: pass.
 - `git diff --check`: pass with only CRLF conversion warnings.
+
+## Final release-blocker correction
+
+- Due deadlines are applied and persisted before orchestration; WaitingReset, RetryWait, and AnomalyHold enter PendingCheck exactly once without deadline replay/spin.
+- Added the additive `probe_sequence` coordinator job. Precheck, WAL-before-send, POST, sent WAL, propagation wait, causal verify, classification, and persistence now execute under one instance lease. Propagation still releases the global HTTP slot, and queued same-instance writes remain blocked until verify/release.
+- Every run intersects bindings with the currently confirmed highest Codex tier. Removed/demoted instances lose windows and attempts without issuing requests.
+- Durable `prepared` claims plus coordinator singleflight collapse concurrent startup/timer/wake triggers. `ProbeAttemptSeq` supplies durable monotonic IDs even with a frozen clock.
+- Persisted sending/sent/SentUnknown attempts are exclusively recovery-owned and verify-first regardless of suppression expiry. Recovery preserves the original AttemptID.
+- Send, status, propagation, verify, and sent-WAL failures retain recoverable SentUnknown state; pre-send failures enter bounded RetryWait. Per-instance failures are accumulated while remaining instances continue.
+- Probe 401 uses authoritative BindingRegistry AuthBlocked persistence and stamps window LoginEpoch; only a strictly greater external LoginEpoch resumes.
+- PersistentSnapshot failures are surfaced by both due and recovery paths.
+- Fixed coordinator reclaim routing so `probe_sequence` SentUnknown inheritance cannot be overwritten by the legacy adapter.
+
+### Final regression evidence
+
+- `TestProbeDeadlineConsumedOnceWithoutSpin`: pass.
+- `TestProbeSequenceHoldsInstanceLeaseThroughVerify`: pass.
+- `TestProbeAttemptIDsMonotonicWithFrozenClock`: pass.
+- Focused production Probe and K-point crash/restart recovery: pass.
+- Probe/typed race suite: pass.
+- S1, S2, S2.5, S3, S4, S5, S6 gates: pass.
+- Full `go test ./...`, `go vet ./...`, and `git diff --check`: pass; diff-check emitted only CRLF conversion warnings.

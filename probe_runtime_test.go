@@ -183,3 +183,52 @@ func TestProductionProbeKPointCrashRestartVerifyFirst(t *testing.T) { //inv:INV-
 		})
 	}
 }
+
+func TestProbeAttemptIDsMonotonicWithFrozenClock(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
+	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":80,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(-time.Hour).Format(time.RFC3339)))
+	active := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(4*time.Hour).Format(time.RFC3339)))
+	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)}, quota: [][]byte{lazy, active, lazy, active}}
+	cfg := DefaultConfig()
+	cfg.EnableResetProbe = true
+	state := NewPluginState(cfg)
+	state.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 9, AuthIDs: map[string]struct{}{"a": {}}})
+	state.UpsertQuota(AccountState{AuthID: "a", AuthIndex: "idx", Quota: ParsedQuota{FiveHour: &QuotaWindow{ResetAt: now.Add(-time.Hour), UsedPercent: ptrFloat(80)}}})
+	roster := HostRosterSnapshot{Capability: CapabilityA, Entries: []RosterEntry{{ID: "a", AuthIndex: "idx", Provider: "codex", Priority: intPtr(9)}}}
+	adapter := &rosterCredentialHost{host: host, roster: roster}
+	r, err := NewProductionQuotaRefresher(host, state, adapter, roster, filepath.Join(t.TempDir(), "state.json"), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.bindings = r.bindings
+	r.coordinator.opts.PropagationWait = func(context.Context, time.Duration) error { return nil }
+	if _, _, err = r.BootstrapBinding(context.Background(), "a"); err != nil {
+		t.Fatal(err)
+	}
+	if err = r.RunProbeDueOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := snap.ProbeAttemptSeq
+	w, _ := r.probeController.Window(legacyAuthInstanceID("a"), ProbeWindowFiveHour)
+	w.State = ProbePendingCheck
+	w.Deadline = now
+	r.probeController.SetWindow(legacyAuthInstanceID("a"), ProbeWindowFiveHour, w)
+	if err = r.persistProbeWindows(); err != nil {
+		t.Fatal(err)
+	}
+	if err = r.RunProbeDueOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snap, err = r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.ProbeAttemptSeq <= first {
+		t.Fatalf("attempt sequence did not advance: first=%d second=%d", first, snap.ProbeAttemptSeq)
+	}
+}

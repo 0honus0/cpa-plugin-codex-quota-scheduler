@@ -170,3 +170,35 @@ func TestMockGroupETypedIntentInterleavings(t *testing.T) {
 func TestMockGroupALegacyEnvelopeWithTypedIntent(t *testing.T) {
 	t.Run("legacy-typed", TestTypedQuotaReadAllocatesAtActualStartAndBarrierJoin)
 }
+
+func TestProbeSequenceHoldsInstanceLeaseThroughVerify(t *testing.T) {
+	sequenceStarted := make(chan struct{})
+	releaseVerify := make(chan struct{})
+	writeStarted := make(chan struct{}, 1)
+	c := NewCoordinator(CoordinatorOptions{Execute: func(_ context.Context, i Intent, _ *HeldLease) OperationResult {
+		if i.Class == OperationProbeSequence {
+			close(sequenceStarted)
+			<-releaseVerify
+		} else {
+			writeStarted <- struct{}{}
+		}
+		return OperationResult{Token: i.Token}
+	}})
+	defer c.Close()
+	seq := c.SubmitTyped(Intent{Instance: 7, Class: OperationProbeSequence, Source: SourceProbeActivation, AttemptID: "a"})
+	<-sequenceStarted
+	queued := c.Submit(Intent{Instance: 7, Class: OperationLegacyRefresh, Source: LegacyEnvelopeSource})
+	select {
+	case <-writeStarted:
+		t.Fatal("same-instance write ran before probe verify/release")
+	default:
+	}
+	close(releaseVerify)
+	_ = seq.Await(context.Background())
+	_ = queued.Await(context.Background())
+	select {
+	case <-writeStarted:
+	default:
+		t.Fatal("queued write never ran after sequence release")
+	}
+}

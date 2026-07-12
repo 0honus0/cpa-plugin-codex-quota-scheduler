@@ -21,6 +21,7 @@ type PersistentState struct {
 	FenceUnsafe      bool                                               `json:"fence_unsafe,omitempty"`
 	Bindings         map[string]RuntimeBinding                          `json:"bindings,omitempty"`
 	ProbeAttempts    map[AuthInstanceID]ProbeAttemptSeam                `json:"probe_attempts,omitempty"`
+	ProbeAttemptSeq  uint64                                             `json:"probe_attempt_seq,omitempty"`
 	ProbeWindows     map[AuthInstanceID]map[ProbeWindowKind]ProbeWindow `json:"probe_windows,omitempty"`
 }
 

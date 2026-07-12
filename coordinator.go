@@ -16,6 +16,7 @@ const (
 	OperationQuotaRead     OperationClass = "quota_read"
 	OperationProbePrecheck OperationClass = "probe_precheck"
 	OperationProbeVerify   OperationClass = "probe_verify"
+	OperationProbeSequence OperationClass = "probe_sequence"
 	// Retained only for the held S3 normal-refresh adapter; typed Probe cannot
 	// submit this source. Its wire value stays stable for the unmodified S3 ABI.
 	LegacyEnvelopeSource         = "legacy_refresh_txn"
@@ -474,7 +475,7 @@ func (c *Coordinator) loop() {
 			job := q[0]
 			// completedFence gates the S3 legacy execution-token queue only.
 			// Typed reads use the distinct actual ReadStartSeq barrier.
-			if !isTypedRead(job.intent.Class) && job.intent.StartedAfter > completedFence[instance] {
+			if job.intent.Class == OperationLegacyRefresh && job.intent.StartedAfter > completedFence[instance] {
 				queue[instance] = q
 				return
 			}

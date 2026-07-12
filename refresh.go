@@ -222,7 +222,7 @@ func NewQuotaRefresher(host HostClient, state *PluginState, now func() time.Time
 			return nil
 		},
 		InheritSentUnknown: func(intent Intent, suppressUntil time.Time) error {
-			if intent.Class == OperationProbeSend && r.probeWAL != nil {
+			if (intent.Class == OperationProbeSend || intent.Class == OperationProbeSequence) && r.probeWAL != nil {
 				return r.probeWAL.PersistSentUnknown(intent.Instance, suppressUntil)
 			}
 			return r.persistLegacySentUnknown(intent, suppressUntil)

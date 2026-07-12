@@ -81,9 +81,13 @@ func (w *ProbeWAL) Complete(i AuthInstanceID) error {
 	return err
 }
 func (w *ProbeWAL) Recover(now time.Time) []Intent {
+	out, _ := w.RecoverChecked(now)
+	return out
+}
+func (w *ProbeWAL) RecoverChecked(now time.Time) ([]Intent, error) {
 	st, err := w.store.PersistentSnapshot()
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var out []Intent
 	for i, a := range st.ProbeAttempts {
@@ -95,9 +99,11 @@ func (w *ProbeWAL) Recover(now time.Time) []Intent {
 		}
 		if a.Phase == ProbeAttemptSending {
 			a.Phase = ProbeAttemptSentUnknown
-			_, _ = w.store.Update(func(s *PersistentState) error { s.ProbeAttempts[i] = a; return nil })
+			if _, err := w.store.Update(func(s *PersistentState) error { s.ProbeAttempts[i] = a; return nil }); err != nil {
+				return nil, err
+			}
 		}
-		out = append(out, Intent{Instance: i, Class: OperationProbeVerify, Source: SourceProbeVerify, StartedAfter: a.SendFenceSeq, Payload: a.Windows})
+		out = append(out, Intent{Instance: i, Class: OperationProbeVerify, Source: SourceProbeVerify, StartedAfter: a.SendFenceSeq, AttemptID: a.AttemptID, Payload: a.Windows})
 	}
-	return out
+	return out, nil
 }
