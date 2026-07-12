@@ -13,6 +13,8 @@ type ProbeAttemptPhase string
 
 const (
 	ProbeAttemptPrepared    ProbeAttemptPhase = "prepared"
+	ProbeAttemptSending     ProbeAttemptPhase = "sending"
+	ProbeAttemptSent        ProbeAttemptPhase = "sent"
 	ProbeAttemptSentUnknown ProbeAttemptPhase = "sent_unknown"
 )
 
@@ -28,3 +30,7 @@ type ProbeAttemptSeam struct {
 	VerifyNotBefore time.Time         `json:"verify_not_before"`
 	SuppressUntil   time.Time         `json:"suppress_until"`
 }
+
+// ProbeAttempt is the S6 crash-safe schema. Alias preserves every S3
+// SentUnknown record without a lossy migration.
+type ProbeAttempt = ProbeAttemptSeam

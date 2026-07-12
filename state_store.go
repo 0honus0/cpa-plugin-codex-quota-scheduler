@@ -14,17 +14,18 @@ const CurrentStateSchema = 1
 var ErrStateReadOnly = errors.New("state store is read-only")
 
 type PersistentState struct {
-	SchemaVersion    int                                 `json:"schema_version"`
-	ReservedCeiling  uint64                              `json:"reserved_ceiling"`
-	NextSaveSeq      uint64                              `json:"next_save_seq"`
-	CredentialChains map[AuthInstanceID]TransitionChain  `json:"credential_chains,omitempty"`
-	FenceUnsafe      bool                                `json:"fence_unsafe,omitempty"`
-	Bindings         map[string]RuntimeBinding           `json:"bindings,omitempty"`
-	ProbeAttempts    map[AuthInstanceID]ProbeAttemptSeam `json:"probe_attempts,omitempty"`
+	SchemaVersion    int                                                `json:"schema_version"`
+	ReservedCeiling  uint64                                             `json:"reserved_ceiling"`
+	NextSaveSeq      uint64                                             `json:"next_save_seq"`
+	CredentialChains map[AuthInstanceID]TransitionChain                 `json:"credential_chains,omitempty"`
+	FenceUnsafe      bool                                               `json:"fence_unsafe,omitempty"`
+	Bindings         map[string]RuntimeBinding                          `json:"bindings,omitempty"`
+	ProbeAttempts    map[AuthInstanceID]ProbeAttemptSeam                `json:"probe_attempts,omitempty"`
+	ProbeWindows     map[AuthInstanceID]map[ProbeWindowKind]ProbeWindow `json:"probe_windows,omitempty"`
 }
 
 func NewPersistentState() PersistentState {
-	return PersistentState{SchemaVersion: CurrentStateSchema, CredentialChains: map[AuthInstanceID]TransitionChain{}, Bindings: map[string]RuntimeBinding{}, ProbeAttempts: map[AuthInstanceID]ProbeAttemptSeam{}}
+	return PersistentState{SchemaVersion: CurrentStateSchema, CredentialChains: map[AuthInstanceID]TransitionChain{}, Bindings: map[string]RuntimeBinding{}, ProbeAttempts: map[AuthInstanceID]ProbeAttemptSeam{}, ProbeWindows: map[AuthInstanceID]map[ProbeWindowKind]ProbeWindow{}}
 }
 func clonePersistentState(s PersistentState) PersistentState {
 	raw, _ := json.Marshal(s)
@@ -39,6 +40,9 @@ func clonePersistentState(s PersistentState) PersistentState {
 	}
 	if out.ProbeAttempts == nil {
 		out.ProbeAttempts = map[AuthInstanceID]ProbeAttemptSeam{}
+	}
+	if out.ProbeWindows == nil {
+		out.ProbeWindows = map[AuthInstanceID]map[ProbeWindowKind]ProbeWindow{}
 	}
 	return out
 }
@@ -161,6 +165,9 @@ func (s *StateStore) loadLocked() (PersistentState, RecoveryReport, error) {
 	if state.ProbeAttempts == nil {
 		state.ProbeAttempts = map[AuthInstanceID]ProbeAttemptSeam{}
 	}
+	if state.ProbeWindows == nil {
+		state.ProbeWindows = map[AuthInstanceID]map[ProbeWindowKind]ProbeWindow{}
+	}
 	s.state = state
 	s.loaded = true
 	if state.FenceUnsafe {
@@ -270,6 +277,9 @@ func (s *StateStore) writeLockedMode(state PersistentState, mirrorBackup bool) e
 	}
 	if state.ProbeAttempts == nil {
 		state.ProbeAttempts = map[AuthInstanceID]ProbeAttemptSeam{}
+	}
+	if state.ProbeWindows == nil {
+		state.ProbeWindows = map[AuthInstanceID]map[ProbeWindowKind]ProbeWindow{}
 	}
 	raw, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {

@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("S0", "S1", "S2", "S2.5", "S3", "S4", "S5", "S7")]
+    [ValidateSet("S0", "S1", "S2", "S2.5", "S3", "S4", "S5", "S6", "S7")]
     [string]$Stage,
     [string]$RepoRoot = (Split-Path -Parent $PSScriptRoot),
     [switch]$VerifyNegativeFixture
@@ -122,6 +122,14 @@ try {
             exit 1
         }
         Invoke-ExactGoTest -TestName "TestSchedulerPickABIPathSnapshotOnly"
+    }
+
+    if ($Stage -eq "S6") {
+        if ($baseline.Count -ne 0 -or $actual.Count -ne 0) { Write-Error "S6 requires zero ABI pick-closure violations"; exit 1 }
+        & go test ./... -run 'Test(SuiteProbe|MockGroupC|MockGroupAProbeRecovery|ProbeAttemptSeamRuntimeRoundTrip|ProbeClassifyGolden|ProbeAllStateEventsAndDualWindowProduct|ProbeKPointsReachableAndRegistered|S6KPointRegistryMatchesSource)$' -count=1
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        Write-Output "S6 dual-window Probe, classifier golden, WAL recovery, and seam-superset gates passed"
+        exit 0
     }
 
     if ($Stage -eq "S7") {

@@ -92,7 +92,7 @@ func TestLegacyRefreshCompleteOutboundEnvelope(t *testing.T) {
 	if err := r.RefreshDueOnce(); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"GetAuth", "POST " + codexTokenEndpoint, "SaveAuth", "GET " + chatGPTQuotaEndpoint, "GET " + resetCreditsEndpoint, "POST " + codexResetProbeEndpoint, "GET " + chatGPTQuotaEndpoint, "GET " + resetCreditsEndpoint}
+	want := []string{"GetAuth", "POST " + codexTokenEndpoint, "SaveAuth", "GET " + chatGPTQuotaEndpoint, "GET " + resetCreditsEndpoint}
 	if got := host.Calls(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("outbound envelope = %#v, want %#v", got, want)
 	}

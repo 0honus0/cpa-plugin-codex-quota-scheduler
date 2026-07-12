@@ -388,7 +388,7 @@ func (c *Coordinator) loop() {
 					continue
 				}
 				f := &futureState{done: make(chan struct{})}
-				if !accepting || cmd.intent.Source != LegacyRefreshSource {
+				if !accepting || (cmd.intent.Source != LegacyRefreshSource && cmd.intent.Source != ProbeSource) {
 					completeFuture(f, OperationResult{Err: errors.New("legacy coordinator is draining"), Disposition: ResultCancelled})
 					cmd.reply <- Future[OperationResult]{f}
 					continue

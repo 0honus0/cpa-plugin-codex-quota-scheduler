@@ -859,9 +859,6 @@ func (r *QuotaRefresher) refreshAuthVersionedHeld(auth pluginapi.HostAuthFileEnt
 	}
 	account = r.mergeExistingAccount(account)
 	account.ChatGPTAccountID = credentials.ChatGPTAccountID
-	previous := account
-
-	cfg := r.state.Config()
 	quota, err := r.fetchQuota(credentials, account.AuthID, version)
 	if err != nil {
 		if errors.Is(err, errCPAAdmissionChanged) {
@@ -883,57 +880,9 @@ func (r *QuotaRefresher) refreshAuthVersionedHeld(auth pluginapi.HostAuthFileEnt
 	} else {
 		mergeResetCredits(&quota, resetCredits)
 	}
-	if cfg.EnableResetProbe {
-		account.ResetProbes = scheduleResetProbesFromPrevious(previous, previous.ResetProbes, r.now())
-		lazyKinds := make([]WindowKind, 0, len(account.ResetProbes))
-		for kind, probe := range account.ResetProbes {
-			if !resetProbeDue(probe, r.now()) {
-				continue
-			}
-			window, ok := matchingProbeWindow(quota, probe)
-			if !ok || window.ResetAt.IsZero() {
-				account.ResetProbes[kind] = markResetProbeRetry(probe, r.now(), errors.New("matching quota window missing"), credentials, cfg)
-				continue
-			}
-			if looksLikeLazyReset(r.now(), window, probe.WindowSeconds) {
-				lazyKinds = append(lazyKinds, kind)
-				continue
-			}
-			account.ResetProbes[kind] = markResetProbeConfirmedActive(probe)
-		}
-		if len(lazyKinds) > 0 {
-			if err := r.runResetProbe(credentials, account.AuthID, version); err != nil {
-				if errors.Is(err, errCPAAdmissionChanged) {
-					return
-				}
-				for _, kind := range lazyKinds {
-					account.ResetProbes[kind] = markResetProbeRetry(account.ResetProbes[kind], r.now(), err, credentials, cfg)
-				}
-				r.recordAdmissionLog(account.AuthID, version, "warn", "quota.reset_probe_failed", "Codex reset probe failed", map[string]any{"auth_id": account.AuthID, "error": redactWithCredentials(err.Error(), credentials)})
-			} else {
-				for _, kind := range lazyKinds {
-					account.ResetProbes[kind] = markResetProbeVerified(account.ResetProbes[kind], r.now())
-				}
-				r.recordAdmissionLog(account.AuthID, version, "info", "quota.reset_probe_verified", "Codex reset probe verified", map[string]any{"auth_id": account.AuthID})
-				if refreshedQuota, err := r.fetchQuota(credentials, account.AuthID, version); err != nil {
-					if errors.Is(err, errCPAAdmissionChanged) {
-						return
-					}
-					r.recordAdmissionLog(account.AuthID, version, "warn", "quota.reset_probe_post_refresh_failed", "Post-probe quota refresh failed", map[string]any{"auth_id": account.AuthID, "error": redactWithCredentials(err.Error(), credentials)})
-				} else {
-					quota = refreshedQuota
-					if resetCredits, err := r.refreshResetCredits(credentials, account.AuthID, version); err != nil {
-						if errors.Is(err, errCPAAdmissionChanged) {
-							return
-						}
-						r.recordAdmissionLog(account.AuthID, version, "warn", "quota.reset_credits_failed", "主动重置次数刷新失败", map[string]any{"auth_id": account.AuthID, "error": redactWithCredentials(err.Error(), credentials)})
-					} else {
-						mergeResetCredits(&quota, resetCredits)
-					}
-				}
-			}
-		}
-	}
+	// S6: Probe deadlines run independently through ProbeController, including
+	// while normal refresh is Dormant. Keep legacy data readable, but never
+	// execute the old POST/post-read envelope.
 	account.Quota = quota
 	account.Family = quota.Family
 	account.LastError = ""
@@ -1023,32 +972,6 @@ type quotaStatusError struct {
 
 func (e quotaStatusError) Error() string {
 	return fmt.Sprintf("quota request returned status %d: response body: %s", e.status, sanitizedBodySummary(e.body))
-}
-
-func (r *QuotaRefresher) runResetProbe(credentials CodexCredentials, authID string, version uint64) error {
-	req := pluginapi.HTTPRequest{
-		Method: http.MethodPost,
-		URL:    codexResetProbeEndpoint,
-		Headers: http.Header{
-			"Authorization":      []string{"Bearer " + credentials.AccessToken},
-			"Chatgpt-Account-Id": []string{credentials.ChatGPTAccountID},
-			"Accept":             []string{"application/json"},
-			"Content-Type":       []string{"application/json"},
-			"User-Agent":         []string{quotaUserAgent},
-		},
-		Body: resetProbePayloadBytes(),
-	}
-	resp, err := r.doWithAdmissionPermit(authID, version, req)
-	if err != nil {
-		return fmt.Errorf("reset probe request: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("reset probe returned status %d: response body: %s", resp.StatusCode, sanitizedBodySummary(resp.Body))
-	}
-	if !resetProbeUsageEvidence(resp.Body) {
-		return errors.New("reset probe response did not include usage evidence")
-	}
-	return nil
 }
 
 func (r *QuotaRefresher) refreshAndSaveCredentials(authResp pluginapi.HostAuthGetResponse, current CodexCredentials, authID string, version uint64) (CodexCredentials, error) {
