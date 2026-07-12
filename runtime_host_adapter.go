@@ -62,6 +62,35 @@ func (h *rosterCredentialHost) GetAuth(_ context.Context, instance AuthInstanceI
 	}
 	return HostAuth{Name: resp.Name, Raw: append([]byte(nil), resp.JSON...), Fingerprint: NewCredentialFingerprint(credentials.ChatGPTAccountID, credentials.RefreshToken, b.AuthIndex)}, nil
 }
+
+func (h *rosterCredentialHost) bootstrapGetAuth(ctx context.Context, instance AuthInstanceID, roster HostRosterSnapshot) (HostAuth, error) {
+	for _, entry := range roster.Entries {
+		if legacyAuthInstanceID(entry.ID) == instance {
+			resp, err := h.host.GetAuth(entry.AuthIndex)
+			if err != nil {
+				return HostAuth{}, err
+			}
+			credentials, err := ExtractCodexCredentials(resp.JSON)
+			if err != nil {
+				return HostAuth{}, err
+			}
+			return HostAuth{Name: resp.Name, Raw: append([]byte(nil), resp.JSON...), Fingerprint: NewCredentialFingerprint(credentials.ChatGPTAccountID, credentials.RefreshToken, entry.AuthIndex)}, nil
+		}
+	}
+	return HostAuth{}, ErrBindingNotRosterConfirmed
+}
+
+type bootstrapCredentialHost struct {
+	adapter *rosterCredentialHost
+	roster  HostRosterSnapshot
+}
+
+func (h bootstrapCredentialHost) GetAuth(ctx context.Context, id AuthInstanceID) (HostAuth, error) {
+	return h.adapter.bootstrapGetAuth(ctx, id, h.roster)
+}
+func (h bootstrapCredentialHost) SaveAuth(context.Context, AuthInstanceID, HostAuth) error {
+	return errors.New("bootstrap host is read-only")
+}
 func (h *rosterCredentialHost) SaveAuth(_ context.Context, instance AuthInstanceID, auth HostAuth) error {
 	b, ok := h.binding(instance)
 	if !ok {

@@ -126,16 +126,20 @@ func (r *QuotaRefresher) PublishAuthoritativeRoster(ctx context.Context, roster 
 			filtered.Entries = append(filtered.Entries, entry)
 		}
 	}
+	bootstrapHost := r.credentials.host
+	if adapter, ok := r.credentials.host.(*rosterCredentialHost); ok {
+		bootstrapHost = bootstrapCredentialHost{adapter: adapter, roster: filtered}
+	}
+	for _, id := range ids {
+		if _, _, err := r.bindings.ObserveAuthoritative(ctx, filtered, id, bootstrapHost); err != nil {
+			return err
+		}
+	}
 	r.rosterMu.Lock()
 	r.roster = filtered
 	r.rosterMu.Unlock()
 	if adapter, ok := r.credentials.host.(*rosterCredentialHost); ok {
 		adapter.setRoster(filtered)
-	}
-	for _, id := range ids {
-		if _, _, err := r.bindings.ObserveAuthoritative(ctx, filtered, id, r.credentials.host); err != nil {
-			return err
-		}
 	}
 	r.mu.Lock()
 	requested := r.startRequested

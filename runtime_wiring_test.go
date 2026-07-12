@@ -71,6 +71,55 @@ func TestRuntimeCorruptLegacyIsPreserved(t *testing.T) {
 	}
 }
 
+func TestLegacyMigrationRejectsSensitiveAndUnknownFieldsWithoutRename(t *testing.T) {
+	for name, raw := range map[string]string{
+		"refresh_token": `{"config":{},"refresh_token":"secret"}`,
+		"authorization": `{"config":{},"Authorization":"Bearer secret"}`,
+		"unknown":       `{"config":{},"credential_blob":{"token":"secret"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			legacy := filepath.Join(dir, "state.json")
+			if err := os.WriteFile(legacy, []byte(raw), 0600); err != nil {
+				t.Fatal(err)
+			}
+			_, _, err := loadUserDataWithMigration(semanticStatePaths(legacy), OSFileHooks(), nil)
+			if err == nil {
+				t.Fatal("expected strict migration rejection")
+			}
+			got, e := os.ReadFile(legacy)
+			if e != nil || string(got) != raw {
+				t.Fatalf("legacy=%q err=%v", got, e)
+			}
+			if _, e := os.Stat(legacy + ".migrated"); !errors.Is(e, os.ErrNotExist) {
+				t.Fatalf("unexpected migrated evidence: %v", e)
+			}
+		})
+	}
+}
+
+func TestValidLegacyMigrationScansActualRetainedArtifact(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "custom-legacy.json")
+	state := PluginDiskState{Config: DefaultConfig(), Accounts: map[string]AccountAnnotation{"a": {Alias: "safe"}}}
+	if err := SavePluginDiskState(legacy, state); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := loadUserDataWithMigration(semanticStatePaths(legacy), OSFileHooks(), nil); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(legacy + ".migrated")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lower := strings.ToLower(string(raw))
+	for _, term := range []string{"refresh_token", "authorization", "cookie", "access_token", "id_token"} {
+		if strings.Contains(lower, term) {
+			t.Fatalf("sensitive term %q in actual migrated artifact: %s", term, raw)
+		}
+	}
+}
+
 func TestUserDataRecoversFromAtomicBackup(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".user-data.json")
 	if err := SaveUserData(path, PluginDiskState{Config: DefaultConfig(), Accounts: map[string]AccountAnnotation{"a": {Alias: "first"}}}); err != nil {
@@ -423,6 +472,7 @@ type countingProductionHost struct {
 	auth                         map[string]pluginapi.HostAuthGetResponse
 	savedName                    string
 	httpResp                     pluginapi.HTTPResponse
+	getErr                       map[string]error
 }
 
 func (h *countingProductionHost) total() int { return h.list + h.get + h.http + h.save + h.probe }
@@ -432,6 +482,9 @@ func (h *countingProductionHost) ListAuths() ([]pluginapi.HostAuthFileEntry, err
 }
 func (h *countingProductionHost) GetAuth(i string) (pluginapi.HostAuthGetResponse, error) {
 	h.get++
+	if err := h.getErr[i]; err != nil {
+		return pluginapi.HostAuthGetResponse{}, err
+	}
 	return h.auth[i], nil
 }
 func (h *countingProductionHost) SaveAuth(n string, _ json.RawMessage) error {
@@ -470,6 +523,43 @@ func TestStateStoreQuarantinesCorruptionAndRepairsFromBackup(t *testing.T) {
 	}
 	if _, _, err := NewStateStore(path, OSFileHooks(), nil).Load(); err != nil {
 		t.Fatalf("repaired primary unreadable: %v", err)
+	}
+}
+
+func TestRosterPublicationStaysFailClosedUntilAllGenesisSucceeds(t *testing.T) {
+	host := &countingProductionHost{auth: map[string]pluginapi.HostAuthGetResponse{"a": {AuthIndex: "a", Name: "a.json", JSON: json.RawMessage(`{"access_token":"x","refresh_token":"ra","account_id":"a"}`)}, "b": {AuthIndex: "b", Name: "b.json", JSON: json.RawMessage(`{"access_token":"x","refresh_token":"rb","account_id":"b"}`)}}, getErr: map[string]error{"b": errors.New("bootstrap failed")}}
+	adapter := &rosterCredentialHost{host: host, roster: HostRosterSnapshot{Capability: CapabilityB}}
+	r, err := NewProductionQuotaRefresher(host, NewPluginState(DefaultConfig()), adapter, HostRosterSnapshot{Capability: CapabilityB}, filepath.Join(t.TempDir(), "state.json"), time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.bindings = r.bindings
+	r.Start()
+	defer r.Stop()
+	roster := HostRosterSnapshot{Capability: CapabilityA, Entries: []RosterEntry{{ID: "a", AuthIndex: "a", Provider: "codex", Priority: intPtr(9)}, {ID: "b", AuthIndex: "b", Provider: "codex", Priority: intPtr(9)}}}
+	if err := r.PublishAuthoritativeRoster(context.Background(), roster); err == nil {
+		t.Fatal("expected second genesis failure")
+	}
+	if r.runtimeRoster().Capability != CapabilityB {
+		t.Fatal("partial genesis published Capability-A")
+	}
+	before := host.total()
+	if err := r.RefreshOnce(); !errors.Is(err, ErrCapabilityB) {
+		t.Fatalf("refresh err=%v", err)
+	}
+	r.RefreshSoon()
+	r.RefreshDueSoon()
+	r.RefreshOneSoon("a")
+	r.RefreshDueCandidatesSoon(pluginapi.SchedulerPickRequest{}, 0)
+	if host.total() != before {
+		t.Fatalf("failed publication authorized calls before=%d after=%d", before, host.total())
+	}
+	delete(host.getErr, "b")
+	if err := r.PublishAuthoritativeRoster(context.Background(), roster); err != nil {
+		t.Fatal(err)
+	}
+	if r.runtimeRoster().Capability != CapabilityA {
+		t.Fatal("successful retry did not publish A")
 	}
 }
 
@@ -554,6 +644,8 @@ func intPtr(v int) *int { return &v }
 func TestSuiteRuntimeWiring(t *testing.T) {
 	t.Run("semantic migration", TestRuntimeSemanticPathsAndLegacyMigration)
 	t.Run("corrupt legacy", TestRuntimeCorruptLegacyIsPreserved)
+	t.Run("strict legacy", TestLegacyMigrationRejectsSensitiveAndUnknownFieldsWithoutRename)
+	t.Run("actual migrated scan", TestValidLegacyMigrationScansActualRetainedArtifact)
 	t.Run("user backup", TestUserDataRecoversFromAtomicBackup)
 	t.Run("migration crashes", TestUserDataMigrationCrashPointsConverge)
 	t.Run("sensitive scan", TestRuntimeAndUserArtifactsNeverPersistSensitiveValues)
@@ -567,6 +659,7 @@ func TestSuiteRuntimeWiring(t *testing.T) {
 	t.Run("actual B path", TestProductionRefresherCapabilityBActualPathMakesZeroCalls)
 	t.Run("roster publication", TestProductionRosterPublicationBootstrapsHighestTierAndUsesWAL)
 	t.Run("runtime corruption repair", TestStateStoreQuarantinesCorruptionAndRepairsFromBackup)
+	t.Run("atomic roster publication", TestRosterPublicationStaysFailClosedUntilAllGenesisSucceeds)
 	t.Run("runtime dual corruption", TestStateStoreDualCorruptionPreservesBothEvidenceAndFences)
 	t.Run("user schema corruption", TestUserDataSchemaMigrationAndCorruptionEvidence)
 	t.Run("user future dual corruption", TestUserDataFutureSchemaFailsSafeAndDualCorruptionPreservesEvidence)

@@ -90,7 +90,7 @@ Modified:
 
 ## Concerns / later-stage ownership
 
-- The production refresher captures the startup roster snapshot. Capability-B→A recovery/synchronization remains explicitly owned by S7 and is not implemented here.
+- The first asynchronous authoritative detection performs one atomic B→A publication after all genesis work succeeds. Periodic detection-failure recovery and later synchronization remain explicitly owned by S7.
 - The existing incomplete S3 seam remains untouched and unapproved, as required.
 
 ## Review-fix wave
@@ -108,3 +108,9 @@ The S2.5 review findings were addressed test-first in a follow-up wave:
 - **Test strength:** ProbeAttemptSeam uses full deep equality. Sensitive scanning creates and reads primary, backup, temp, corrupt, and migrated artifacts instead of treating missing files as success.
 
 Review RED evidence included missing production publication API, Capability-B legacy entry authorization, absent corruption evidence/repair, schema-0 no-writeback, and non-propagating AuthBlocked persistence. Each focused regression was observed failing before the corresponding production change.
+
+## Final review fixes
+
+- Legacy migration now uses strict `PluginDiskState` decoding with unknown-field rejection plus recursive sensitive-key rejection. Documents containing token, cookie, header, Authorization, or unknown credential-bearing fields remain at the actual legacy path and are never renamed.
+- The retained migration scan reads `paths.Legacy + ".migrated"` directly and verifies the real preserved document is user-data-only.
+- Roster publication now uses a staged read-only bootstrap host while runtime and adapter capability remain B. Only after every highest-tier GetAuth/genesis persistence succeeds are adapter and runtime roster published as A. A partial failure leaves every synchronous/asynchronous background entry fail-closed; a successful retry publishes A.

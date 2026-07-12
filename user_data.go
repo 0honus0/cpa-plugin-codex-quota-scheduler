@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const CurrentUserDataSchema = 1
@@ -34,7 +37,7 @@ func loadUserDataWithMigration(paths SemanticStatePaths, hooks FileHooks, crash 
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return PluginDiskState{}, false, err
 	}
-	legacy, loaded, err := loadPluginDiskState(paths.Legacy)
+	legacy, loaded, err := loadStrictLegacyUserData(paths.Legacy)
 	if err != nil || !loaded {
 		return legacy, loaded, err
 	}
@@ -73,6 +76,60 @@ func loadUserDataWithMigration(paths SemanticStatePaths, hooks FileHooks, crash 
 	}
 	_ = hooks.SyncDir(filepath.Dir(paths.Legacy))
 	return verified, true, nil
+}
+
+func loadStrictLegacyUserData(path string) (PluginDiskState, bool, error) {
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return normalizePluginDiskState(PluginDiskState{Config: DefaultConfig()}), false, nil
+	}
+	if err != nil {
+		return PluginDiskState{}, false, err
+	}
+	if len(raw) == 0 {
+		return normalizePluginDiskState(PluginDiskState{Config: DefaultConfig()}), false, nil
+	}
+	var generic any
+	if err := json.Unmarshal(raw, &generic); err != nil {
+		return PluginDiskState{}, false, err
+	}
+	if key := legacySensitiveKey(generic); key != "" {
+		return PluginDiskState{}, false, fmt.Errorf("legacy state contains forbidden field %q", key)
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var state PluginDiskState
+	if err := dec.Decode(&state); err != nil {
+		return PluginDiskState{}, false, err
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		return PluginDiskState{}, false, errors.New("legacy state contains trailing JSON")
+	}
+	return normalizePluginDiskState(state), true, nil
+}
+func legacySensitiveKey(v any) string {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, child := range x {
+			lower := strings.ToLower(strings.ReplaceAll(k, "-", "_"))
+			for _, term := range []string{"token", "cookie", "header", "authorization"} {
+				if strings.Contains(lower, term) {
+					return k
+				}
+			}
+			if found := legacySensitiveKey(child); found != "" {
+				return found
+			}
+		}
+	case []any:
+		for _, child := range x {
+			if found := legacySensitiveKey(child); found != "" {
+				return found
+			}
+		}
+	}
+	return ""
 }
 
 func loadUserData(path string) (PluginDiskState, bool, error) {
