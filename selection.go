@@ -40,6 +40,7 @@ const (
 
 type AccountView struct {
 	ID                   string
+	AuthIndex            string
 	Instance             AuthInstanceID
 	PluginPriority       int
 	Family               AccountFamily

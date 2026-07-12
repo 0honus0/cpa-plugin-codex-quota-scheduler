@@ -60,3 +60,10 @@ The review findings were addressed test-first in a follow-up wave:
 Corrected verification: focused lifecycle/backoff/queue/evidence tests PASS; `TestSuiteScheduling` PASS; race `Test(SchedulerPick|Trial)` PASS; S5 static/ABI gate PASS with analyzer `[]`; full tests, vet, and diff check PASS.
 
 The two earlier concerns are resolved: bytes/op no longer regress materially, and historical unreachable bodies have been removed.
+
+## Final evidence-race correction
+
+- After an Opportunistic CAS, a successful nonblocking queue send now synchronously marks that exact trial evidence-pending before `scheduler.pick` returns. A deterministic unconsumed-queue test advances to 60s and proves the trial remains held. The distinct queue-full test proves a dropped intent is not marked pending and transitions to TrialUnknown at 60s.
+- `MarkEvidencePending` remains a CAS update of an existing record only. A deterministic evidence-before-mark test clears the record first, applies the late pending mark, and proves the trial is not recreated.
+- The actual `handleUsageHandle` business path now emits `EvidenceRequestSuccess` for successful Codex usage records and `EvidenceUsageFeedback` only for detected quota-limit feedback. It resolves the correct instance by auth ID or auth index, clears the dynamic registry immediately, and the next encoded ABI pick observes eligibility without snapshot republishing. Probe verification remains isolated and does not clear business-request trials.
+- Final focused queue-race/request-success tests, scheduling suite/oracle, ABI race/static S5 gate, full tests, vet, and diff check all pass (see final handoff verification).

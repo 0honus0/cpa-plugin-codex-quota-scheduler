@@ -207,7 +207,9 @@ func TestSuiteScheduling(t *testing.T) {
 	t.Run("trial expiry", TestTrialUnknownExpiresIntoEligibility)
 	t.Run("trial backoff", TestTrialBackoffSequence)
 	t.Run("trial retries", TestTrialThreeRetriesForceUnknown)
+	t.Run("pending evidence race", TestMarkPendingAfterEvidenceDoesNotRecreateTrial)
 	t.Run("production evidence", TestProductionEvidenceQueueAndDynamicTrial)
 	t.Run("evidence queue", TestEvidenceConsumerMarksPendingAndQueueFullIsNonblocking)
 	t.Run("immutable publication", TestSchedulerPickObservesOneImmutablePublication)
+	t.Run("request success evidence", TestUsageSuccessHandlerClearsTrialButProbeSuccessDoesNot)
 }

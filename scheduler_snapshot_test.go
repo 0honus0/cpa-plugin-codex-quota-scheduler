@@ -45,6 +45,10 @@ func TestProductionEvidenceQueueAndDynamicTrial(t *testing.T) {
 	if got := schedulerPickPublished(req, now); got.AuthID != "a" {
 		t.Fatalf("first=%#v", got)
 	}
+	trials.Advance(11, now.Add(60*time.Second))
+	if trials.State(11, now) != TrialActive {
+		t.Fatal("enqueued but unconsumed evidence was not marked pending before pick returned")
+	}
 	select {
 	case intent := <-intents:
 		if intent.Instance != 11 || intent.AuthID != "a" {
@@ -59,6 +63,32 @@ func TestProductionEvidenceQueueAndDynamicTrial(t *testing.T) {
 	trials.ObserveEvidence(11, Evidence{Kind: EvidenceRequestSuccess, At: now.Add(2 * time.Second)})
 	if got := schedulerPickPublished(req, now.Add(3*time.Second)); got.AuthID != "a" {
 		t.Fatalf("evidence not immediately visible: %#v", got)
+	}
+}
+
+func TestUsageSuccessHandlerClearsTrialButProbeSuccessDoesNot(t *testing.T) {
+	now := time.Now()
+	trials := NewTrialRegistry()
+	intents := make(chan EvidenceIntent, 2)
+	PublishSchedulerSnapshot(&SchedulerSnapshot{HandleEnabled: true, Trials: trials, EvidenceIntents: intents, Accounts: []AccountView{{ID: "success", Instance: 41, Cache: CacheUnknown}}, ActiveHighestTier: map[string]struct{}{"success": {}}})
+	req := pluginapi.SchedulerPickRequest{Provider: "codex", Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "success", Provider: "codex"}}}
+	if got := schedulerPickPublished(req, now); got.AuthID != "success" {
+		t.Fatalf("begin=%#v", got)
+	}
+	raw, _ := json.Marshal(pluginapi.UsageRecord{Provider: "codex", AuthID: "success", Failed: false})
+	if _, err := handleUsageHandle(raw); err != nil {
+		t.Fatal(err)
+	}
+	if trials.State(41, now) != TrialNone {
+		t.Fatal("actual successful usage handler did not clear trial")
+	}
+	if got := schedulerPickPublished(req, now.Add(time.Second)); got.AuthID != "success" {
+		t.Fatalf("next ABI pick remained stale-excluded: %#v", got)
+	}
+	trials.TryBegin(42, now)
+	_ = markResetProbeVerified(ResetProbeState{}, now)
+	if trials.State(42, now) != TrialActive {
+		t.Fatal("probe success cleared business-request trial evidence")
 	}
 }
 

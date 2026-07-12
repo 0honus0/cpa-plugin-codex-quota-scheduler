@@ -98,3 +98,14 @@ func TestTrialThreeRetriesForceUnknown(t *testing.T) {
 		t.Fatal("third retry did not force unknown")
 	}
 }
+
+func TestMarkPendingAfterEvidenceDoesNotRecreateTrial(t *testing.T) {
+	now := time.Now()
+	r := NewTrialRegistry()
+	r.TryBegin(51, now)
+	r.ObserveEvidence(51, Evidence{Kind: EvidenceRequestSuccess, At: now})
+	r.MarkEvidencePending(51, true)
+	if r.State(51, now) != TrialNone {
+		t.Fatal("late pending mark recreated cleared trial")
+	}
+}

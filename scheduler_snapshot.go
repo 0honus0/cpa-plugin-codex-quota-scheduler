@@ -69,6 +69,7 @@ func schedulerPickPublished(req pluginapi.SchedulerPickRequest, now time.Time) P
 	if result.AuthID != "" && result.Class == Opportunistic {
 		select {
 		case snapshot.EvidenceIntents <- EvidenceIntent{AuthID: result.AuthID, Instance: result.Instance, BeganAt: now}:
+			snapshot.Trials.MarkEvidencePending(result.Instance, true)
 		default:
 		}
 	}
@@ -105,7 +106,7 @@ func schedulerSnapshotFromState(state StateSnapshot, trials *TrialRegistry) *Sch
 		} else if circuit == CircuitStateHalfOpen {
 			circuitClass = CircuitHalfOpen
 		}
-		accounts = append(accounts, AccountView{ID: a.AuthID, Instance: a.Instance, PluginPriority: a.Annotation.SchedulerPriority, Family: a.Family, Cache: cache, LastKnownAvailable: a.LastError == "", Exhausted: exhausted, ResetAt: reset, AuthBlocked: a.Refresh.AuthFailure, Circuit: circuitClass, TemporaryUnavailable: a.TemporaryExhausted && a.TemporaryResetAt.After(state.Now), Trial: trial, Expiry: accountSortTime(a), RemainingQuota: remainingQuota(a)})
+		accounts = append(accounts, AccountView{ID: a.AuthID, AuthIndex: a.AuthIndex, Instance: a.Instance, PluginPriority: a.Annotation.SchedulerPriority, Family: a.Family, Cache: cache, LastKnownAvailable: a.LastError == "", Exhausted: exhausted, ResetAt: reset, AuthBlocked: a.Refresh.AuthFailure, Circuit: circuitClass, TemporaryUnavailable: a.TemporaryExhausted && a.TemporaryResetAt.After(state.Now), Trial: trial, Expiry: accountSortTime(a), RemainingQuota: remainingQuota(a)})
 	}
 	return &SchedulerSnapshot{HandleEnabled: state.Config.HandleEnabled, Fallback: state.Config.Fallback, MonthlyMode: state.Config.MonthlyMode, Accounts: accounts, ActiveHighestTier: active, Trials: trials, EvidenceIntents: globalEvidenceIntents}
 }

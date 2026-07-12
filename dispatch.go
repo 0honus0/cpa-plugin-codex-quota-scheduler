@@ -191,11 +191,22 @@ func handleUsageHandle(raw []byte) ([]byte, error) {
 			return nil, err
 		}
 	}
-	HandleUsageFeedback(globalState, record, time.Now())
+	now := time.Now()
+	HandleUsageFeedback(globalState, record, now)
+	evidenceKind := EvidenceUnknown
+	if record.Provider == "codex" && !record.Failed {
+		evidenceKind = EvidenceRequestSuccess
+	} else if _, ok := DetectQuotaFailure(record, now); ok {
+		evidenceKind = EvidenceUsageFeedback
+	}
 	if snapshot := publishedSchedulerSnapshot.Load(); snapshot != nil && snapshot.Trials != nil {
 		for _, account := range snapshot.Accounts {
-			if account.ID == record.AuthID {
-				snapshot.Trials.ObserveEvidence(account.Instance, Evidence{Kind: EvidenceUsageFeedback, At: time.Now()})
+			matches := record.AuthID != "" && account.ID == record.AuthID
+			if record.AuthID == "" && record.AuthIndex != "" {
+				matches = account.AuthIndex == record.AuthIndex
+			}
+			if evidenceKind != EvidenceUnknown && matches {
+				snapshot.Trials.ObserveEvidence(account.Instance, Evidence{Kind: evidenceKind, At: now})
 				break
 			}
 		}
