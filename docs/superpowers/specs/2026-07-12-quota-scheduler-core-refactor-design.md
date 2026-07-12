@@ -8,6 +8,8 @@ Approved and frozen on 2026-07-12. This is the Superpowers-formatted authoritati
 
 This document adapts the jointly reviewed Decision Spec v5 into the repository's Superpowers design location. The frozen specification below is preserved in full. Formatting metadata in this preface clarifies workflow only and does not weaken, replace, or reinterpret any normative rule.
 
+**Erratum:** the frozen v5 changelog says the full Mock design and automation protocol were added as §14 and §15. Their final locations are §12 and §13. This preface corrects only that historical section-number reference; the frozen text remains unchanged.
+
 ## Goal
 
 Refactor the plugin into three independent controllers backed by one coordinated request layer, while preserving the Management security boundary, admitting only the highest CPA priority tier, keeping scheduler pick free of I/O, and making refresh, Probe, identity, persistence, and crash recovery behavior executable through invariant-driven tests.

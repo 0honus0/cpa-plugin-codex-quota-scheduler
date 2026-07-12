@@ -21,18 +21,24 @@
 - Preserve the frozen constants in design §11 exactly.
 - Use virtual time in tests; no test may depend on real sleeps.
 - Do not push, tag, release, publish, or mutate remote issues while executing this plan unless separately authorized.
+- Treat the upstream CPA contract request as a documented deferred action; local S1 completion does not imply remote submission.
 
 ---
 
 ## Planned File Structure
 
-- `boundary_test.go`: S0 Resource/Management boundary suite and sensitive-field scanner.
+- `boundary_test.go`: S0 Resource/Management boundary suite using runtime sentinel values.
 - `capability.go`, `capability_test.go`: runtime Capability-A/B detection and host roster normalization.
 - `pick_benchmark_test.go`: pick concurrency and allocation baseline artifact.
 - `identity.go`, `identity_test.go`: identity/instance/epoch model and credential classification.
 - `credential_wal.go`, `credential_wal_test.go`: four-state SaveAuth transition protocol.
 - `state_store.go`, `state_store_test.go`: schema migration, atomic write, backup, corruption recovery.
 - `fence.go`, `fence_test.go`: monotonic sequence block reservation and fsync-before-issue rule.
+- `testsupport/clock.go`: virtual clock with deterministic advance and deadline delivery.
+- `testsupport/scheduler.go`: deterministic event loop and controlled interleaving explorer.
+- `testsupport/fakehost.go`: scripted CPA roster/auth host with failures and call accounting.
+- `testsupport/fakeopenai.go`: scripted usage/reset-credits/Probe transport with response and delay injection.
+- `testsupport/kpoints.go`: crash-point registry and injected crash controller shared by persistence, coordinator, and Probe tests.
 - `coordinator.go`, `coordinator_test.go`: intent loop, leases, deduplication, HTTP slots, execution fencing.
 - `auth_transaction.go`, `auth_transaction_test.go`: complete legacy refresh envelope and drain adapter.
 - `refresh_controller.go`, `refresh_controller_test.go`: Dormant/Active normal refresh state machine.
@@ -44,6 +50,7 @@
 - `testdata/probe_classify_golden.json`: independently generated Probe classification oracle rows.
 - `roster_controller.go`, `roster_controller_test.go`: TTL, Degraded, FailClosed, tier replacement, and Capability wiring.
 - `traceability_test.go`: INV positive/negative tag matrix and K-point discovery gate.
+- `testdata/mock_group_coverage.json`: generated ownership matrix for every §12 A–E scenario row.
 - `scripts/check_refactor_gates.ps1`: pick-I/O, sensitive-state, traceability, and K-point static checks.
 - `docs/deviations.md`: implementation-time conservative decisions; begin with an empty registry.
 - Existing integration points remain in `main.go`, `dispatch.go`, `refresh.go`, `scheduler.go`, `state.go`, `disk_state.go`, `management.go`, and their current tests.
@@ -61,21 +68,44 @@
 
 **Interfaces:**
 - Consumes: `HandleManagementRequest`, `isResourcePath`, `resourceRouteAllowed`, and the embedded status page.
-- Produces: `TestSuiteBoundary` and static gate `scripts/check_refactor_gates.ps1 -Stage S0`.
+- Produces: `TestSuiteBoundary`, §12.D alias `TestMockGroupDBoundary`, and static gate `scripts/check_refactor_gates.ps1 -Stage S0`.
 
 - [ ] **Step 1: Add the failing boundary suite**
 
-Create `boundary_test.go` with a table that requests every registered Resource route without a Management key and scans response bodies for a test-owned sensitive dictionary:
+Create `boundary_test.go` with unique runtime business-data sentinels. Seed those values into the fake plugin state, request every registered Resource route without a Management key, and assert that no response contains any sentinel. JavaScript field names such as `quota`, `reset_at`, and `scheduler_priority` are allowed because INV-01 prohibits leaked business values, not schema identifiers:
 
 ```go
+type BoundarySentinels struct {
+    AuthID       string
+    AccountID    string
+    Alias        string
+    QuotaValue   string
+    ResetRFC3339 string
+    LogMessage   string
+}
+
+func (s BoundarySentinels) Values() []string {
+    return []string{s.AuthID, s.AccountID, s.Alias, s.QuotaValue, s.ResetRFC3339, s.LogMessage}
+}
+
 func TestSuiteBoundary(t *testing.T) {
     //inv:INV-01 positive
-    forbidden := []string{"auth_id", "account_id", "alias", "scheduler_priority", "quota", "reset_at", "circuit", "token"}
+    sentinels := BoundarySentinels{
+        AuthID:       "SENTINEL_AUTH_X9K",
+        AccountID:    "SENTINEL_ACCOUNT_Q7M",
+        Alias:        "SENTINEL_ALIAS_P4V",
+        QuotaValue:   "987654321",
+        ResetRFC3339: "2099-12-31T23:58:57Z",
+        LogMessage:   "SENTINEL_LOG_N6R",
+    }
+    restore := seedBoundarySentinelsForTest(t, sentinels)
+    t.Cleanup(restore)
+
     for _, route := range registeredResourceRoutesForTest(t) {
         body := requestResourceForTest(t, route)
-        for _, term := range forbidden {
-            if strings.Contains(strings.ToLower(body), term) {
-                t.Fatalf("%s leaked %q", route, term)
+        for _, sentinel := range sentinels.Values() {
+            if strings.Contains(body, sentinel) {
+                t.Fatalf("%s leaked runtime sentinel %q", route, sentinel)
             }
         }
     }
@@ -85,6 +115,10 @@ func TestSuiteBoundary(t *testing.T) {
     if resp.StatusCode < 400 {
         t.Fatalf("resource mutation status = %d", resp.StatusCode)
     }
+}
+
+func TestMockGroupDBoundary(t *testing.T) {
+    TestSuiteBoundary(t)
 }
 ```
 
@@ -96,7 +130,7 @@ Run:
 go test ./... -run TestSuiteBoundary -count=1
 ```
 
-Expected: FAIL because the helper and exhaustive route assertions do not exist, or because a Resource response contains business-data markers.
+Expected: FAIL because the sentinel-seeding helpers do not exist, or because a Resource response contains a seeded runtime value.
 
 - [ ] **Step 3: Make Resource responses static-shell-only**
 
@@ -137,6 +171,7 @@ git commit -m "test: freeze management security boundary"
 - Create: `capability_test.go`
 - Create: `pick_benchmark_test.go`
 - Create: `docs/baselines/pick-hot-path.md`
+- Create: `docs/upstream/host-roster-contract-request.md`
 - Modify: `main.go`
 - Modify: `dispatch.go`
 - Modify: `scripts/check_refactor_gates.ps1`
@@ -183,10 +218,14 @@ go test -bench BenchmarkSchedulerPickSnapshot -benchmem -run '^$'
 
 Expected: all commands exit 0 and the baseline document contains measured values.
 
-- [ ] **Step 7: Commit S1**
+- [ ] **Step 7: Record the deferred upstream request**
+
+Create `docs/upstream/host-roster-contract-request.md` containing the requested stable Priority roster contract, incarnation/revision, tombstone/change sequence, and `SaveAuth(expected_revision)` CAS. Mark its remote submission as `Deferred: requires explicit user authorization`. S1 is not blocked by submission because Capability-A/B are both implemented.
+
+- [ ] **Step 8: Commit S1**
 
 ```powershell
-git add capability.go capability_test.go pick_benchmark_test.go docs/baselines/pick-hot-path.md main.go dispatch.go scripts/check_refactor_gates.ps1
+git add capability.go capability_test.go pick_benchmark_test.go docs/baselines/pick-hot-path.md docs/upstream/host-roster-contract-request.md main.go dispatch.go scripts/check_refactor_gates.ps1
 git commit -m "feat: detect authoritative host roster capability"
 ```
 
@@ -199,6 +238,8 @@ git commit -m "feat: detect authoritative host roster capability"
 - Create: `credential_wal.go`, `credential_wal_test.go`
 - Create: `state_store.go`, `state_store_test.go`
 - Create: `fence.go`, `fence_test.go`
+- Create: `testsupport/clock.go`, `testsupport/scheduler.go`
+- Create: `testsupport/fakehost.go`, `testsupport/fakeopenai.go`, `testsupport/kpoints.go`
 - Modify: `models.go`, `state.go`, `disk_state.go`
 - Modify: `scripts/check_refactor_gates.ps1`
 
@@ -211,19 +252,23 @@ git commit -m "feat: detect authoritative host roster capability"
   - `StateStore.Load() (PersistentState, RecoveryReport, error)` and `StateStore.WriteThrough(PersistentState) error`.
   - `FenceAllocator.Next() (uint64, error)`.
 
-- [ ] **Step 1: Write RED tests for identity and credential classification**
+- [ ] **Step 1: Create the shared deterministic test infrastructure**
+
+Implement `testsupport.Clock` with `Now()`, `Advance(time.Duration)`, and deterministic timer delivery; `testsupport.EventScheduler` with queued events and bounded interleaving enumeration; `FakeHost` and `FakeOpenAI` with scripted calls and call logs; and `CrashController.Hit(name string)` backed by the shared K-point registry. Unit-test each helper without real sleeps or network calls. All later stage suites must import these helpers rather than creating stage-local clocks, hosts, transports, or crash injectors.
+
+- [ ] **Step 2: Write RED tests for identity and credential classification**
 
 Cover same fingerprint, reachable next generation, skipped generation, metadata-only difference, external subject/refresh-token change, chain expiry, ambiguous reconciliation, and old-instance writeback rejection. Include positive and negative tags for INV-28/33/40.
 
-- [ ] **Step 2: Implement the typed epoch and fingerprint model**
+- [ ] **Step 3: Implement the typed epoch and fingerprint model**
 
 Use distinct named integer types to prevent accidental mixing. Hash source components independently and persist only hashes. Keep transition chains ordered, capped at 12 generations and 24 hours.
 
-- [ ] **Step 3: Write RED tests for the four-state SaveAuth WAL**
+- [ ] **Step 4: Write RED tests for the four-state SaveAuth WAL**
 
 Inject crashes after `planned`, after host SaveAuth success, and before `applied`; inject explicit failure and unknown outcome. Assert recovery reads current auth and resolves to `applied`, `aborted`, or `CredentialAmbiguous`.
 
-- [ ] **Step 4: Implement WAL ordering**
+- [ ] **Step 5: Implement WAL ordering**
 
 Expose one method:
 
@@ -238,19 +283,21 @@ func (m *CredentialManager) SaveVersioned(
 
 It must persist `planned` before SaveAuth and persist the terminal phase immediately after a known result. Unknown results remain `outcome_unknown` until reconciliation.
 
-- [ ] **Step 5: Write RED persistence and fence tests**
+- [ ] **Step 6: Write RED persistence and fence tests**
 
 Test schema migration, future-version read-only mode, temp/fsync/rename ordering through injected filesystem hooks, backup fallback, dual corruption recovery, sensitive-term absence, fence block exhaustion, crashes around ceiling persistence, and restart monotonicity.
 
-- [ ] **Step 6: Implement state store and fence allocator**
+- [ ] **Step 7: Implement state store and fence allocator**
 
 Reserve sequence blocks of exactly `1<<20`. Persist and fsync `reserved_ceiling` before issuing any value. On restart, reserve from `persisted_reserved_ceiling+1`; gaps are allowed and regression is not.
 
-- [ ] **Step 7: Add K-point hooks and static discovery**
+- [ ] **Step 8: Add K-point hooks and static discovery**
 
 Mark each write-through, HTTP-before/after, and rename-before/after point with `//kpoint:K_<NAME>`. Extend the gate to enumerate unique K labels and compare them to a checked-in expected list generated by the test.
 
-- [ ] **Step 8: Run S2 gate**
+- [ ] **Step 9: Register §12 group ownership and run the S2 gate**
+
+Name S2's crash/migration cases `TestMockGroupAIdentityPersist` and its identity/security cases `TestMockGroupDIdentitySecurity`. Expose S0's sentinel suite as `TestMockGroupDBoundary`. These are the A/D group implementations, not placeholders for S7.
 
 ```powershell
 go test ./... -run TestSuiteIdentityPersist -count=1
@@ -261,10 +308,10 @@ go test ./...
 
 Expected: all commands exit 0; state-file sensitive scan finds no token, cookie, authorization header, or raw refresh-token value.
 
-- [ ] **Step 9: Commit S2**
+- [ ] **Step 10: Commit S2**
 
 ```powershell
-git add identity.go identity_test.go credential_wal.go credential_wal_test.go state_store.go state_store_test.go fence.go fence_test.go models.go state.go disk_state.go scripts/check_refactor_gates.ps1
+git add identity.go identity_test.go credential_wal.go credential_wal_test.go state_store.go state_store_test.go fence.go fence_test.go testsupport/ models.go state.go disk_state.go scripts/check_refactor_gates.ps1
 git commit -m "feat: add fenced identity persistence primitives"
 ```
 
@@ -306,7 +353,9 @@ Move the complete sequence into `LegacyRefreshTxn.RunHeld`. Replace internal rec
 
 Stop issuing legacy work, cancel its contexts, join for at most the 2-minute virtual lease, then invalidate unresolved ExecutionTokens. If an unresolved job reached Probe-send phase, persist `SentUnknown` and the full resend-suppression deadline before enabling the new path.
 
-- [ ] **Step 6: Run S3 gate**
+- [ ] **Step 6: Register §12 group ownership and run the S3 gate**
+
+Expose migration/crash cases as `TestMockGroupACoordinatorMigration` and coordinator interleavings, lease recovery, and legacy-envelope races as `TestMockGroupECoordinatorInterleavings`.
 
 ```powershell
 go test ./... -run TestSuiteCoordinator -count=1
@@ -356,7 +405,9 @@ A real pick moves Dormant to Active and extends `last_activity + refresh_active_
 
 Delete or disable old stale-only scheduling and any timer that can create a sixth outbound quota source. Keep reset delays and Probe deadlines owned by Probe.
 
-- [ ] **Step 5: Run S4 gate and commit**
+- [ ] **Step 5: Register §12 group ownership, run the S4 gate, and commit**
+
+Expose the refresh timeline, source-priority truth table, Dormant/Active boundaries, and failure isolation cases as `TestMockGroupERefresh`.
 
 ```powershell
 go test ./... -run TestSuiteRefresh -count=1
@@ -390,7 +441,7 @@ Expected: INV-10/11/22/32 tags are complete and all tests pass.
 
 - [ ] **Step 1: Create an independent scheduling oracle**
 
-In `selection_test.go`, implement test-only classification and ordering directly from design §5 without calling production helpers. Enumerate all 1,440 single-instance vectors and all `6^N` representative multi-instance vectors for N=1..3, crossed with the three candidates relationships.
+In `selection_test.go`, implement test-only classification and ordering directly from design §5 without calling production helpers. Enumerate all 1,440 single-instance vectors and all `6^N` representative multi-instance vectors for N=1..3, crossed with the three candidates relationships. Register this exhaustive suite as `TestMockGroupB`; S7 only aggregates it.
 
 - [ ] **Step 2: Run RED**
 
@@ -452,7 +503,7 @@ git commit -m "feat: add snapshot scheduling and evidence trials"
 
 - [ ] **Step 1: Generate the independent golden oracle**
 
-Write a test-side generator that produces the approximately 864 Cartesian rows from baseline type, reset offset, window length, usage change, and delay position. Store stable JSON sorted by input tuple. The generator must not import `ClassifyProbeWindow`.
+Write a test-side generator that produces the approximately 864 Cartesian rows from baseline type, reset offset, window length, usage change, and delay position. Store stable JSON sorted by input tuple. The generator must not import `ClassifyProbeWindow`. Register the complete Probe matrix as `TestMockGroupC`.
 
 - [ ] **Step 2: Add full transition RED tests**
 
@@ -468,7 +519,7 @@ Allocate `send_fence_seq`, persist/fsync `sending`, then permit HTTP. Persist `s
 
 - [ ] **Step 5: Implement crash recovery and lease behavior**
 
-Recover `sending` or `sent` as verify-first after `verify_not_before`. Apply `max(verify grace, 10m)` suppression from `created_at`. A `probe_send` lease timeout enters SentUnknown and is never re-signed; read leases may be re-signed and credential writes require fresh auth before re-signing.
+Recover `sending` or `sent` as verify-first after `verify_not_before`. Apply `max(verify grace, 10m)` suppression from `created_at`. A `probe_send` lease timeout enters SentUnknown and is never re-signed; read leases may be re-signed and credential writes require fresh auth before re-signing. Register Probe crash/recovery scenarios that belong to §12.A as `TestMockGroupAProbeRecovery`.
 
 - [ ] **Step 6: Remove legacy Probe and transition label**
 
@@ -499,6 +550,7 @@ git commit -m "feat: add crash-safe dual-window probe controller"
 **Files:**
 - Create: `roster_controller.go`, `roster_controller_test.go`
 - Create: `traceability_test.go`
+- Create: `testdata/mock_group_coverage.json`
 - Modify: `main.go`, `dispatch.go`, `state.go`, `management.go`
 - Modify: `config.go`, `config_test.go`, `management_test.go`, `integration_test.go`
 - Modify: `README.md`, `scripts/check_refactor_gates.ps1`
@@ -529,9 +581,9 @@ Return only active highest-tier account cards in normal payloads. Preserve cards
 
 `TestInvariantTraceability` scans all `*_test.go` files for `//inv:INV-01 positive` and `//inv:INV-01 negative` through INV-46. Fail with a sorted missing matrix. The static gate also checks all registered K points and reruns the pick-I/O and sensitive-state scans.
 
-- [ ] **Step 6: Add final Mock suites**
+- [ ] **Step 6: Aggregate §12 suites and fill only uncovered cells**
 
-Implement design §12 A–E using the virtual clock, deterministic scheduler, Fake CPA Host, Fake OpenAI, independent oracles, crash points, and fixed property seeds. Keep CI runtime under five minutes by pregenerating golden rows and coverage arrays.
+Run the already implemented group suites from S0–S6: A from S2/S3/S6, B from S5, C from S6, D from S0/S2, and E from S3/S4. Generate a machine-readable §12 coverage matrix, identify any scenario row not owned by an existing test, and add only those missing integration cases in `integration_test.go`. Do not recreate clocks, fakes, or oracles in S7. Keep the aggregated run under five minutes using pregenerated golden rows and coverage arrays.
 
 - [ ] **Step 7: Document migration behavior**
 
