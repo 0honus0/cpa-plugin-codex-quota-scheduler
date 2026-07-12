@@ -92,6 +92,60 @@ func TestUsageSuccessHandlerClearsTrialButProbeSuccessDoesNot(t *testing.T) {
 	}
 }
 
+func TestQuotaLimitFeedbackRepublishesExhaustionWithoutRosterMutation(t *testing.T) {
+	now := time.Now()
+	store := NewPluginState(DefaultConfig())
+	store.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 9, AuthIDs: map[string]struct{}{"limited": {}}})
+	store.UpsertQuota(AccountState{AuthID: "limited", AuthIndex: "idx-limited", Instance: 61, Provider: "codex", Priority: 9})
+	withGlobalRefresherForTest(t, store, nil)
+	globalTrials.ObserveEvidence(61, Evidence{Kind: EvidenceRequestSuccess, At: now})
+	publishSchedulerState(store, map[string]struct{}{"limited": {}}, now)
+	pickRaw, _ := json.Marshal(pluginapi.SchedulerPickRequest{Provider: "codex", Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "limited", Provider: "codex", Priority: 9}}})
+	firstRaw, err := handleSchedulerPick(pickRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var firstEnv envelope
+	_ = json.Unmarshal(firstRaw, &firstEnv)
+	var first pluginapi.SchedulerPickResponse
+	_ = json.Unmarshal(firstEnv.Result, &first)
+	if first.AuthID != "limited" {
+		t.Fatalf("first pick=%#v", first)
+	}
+	usageRaw, _ := json.Marshal(pluginapi.UsageRecord{Provider: "codex", AuthID: "limited", AuthIndex: "idx-limited", Failed: true, Failure: pluginapi.UsageFailure{StatusCode: 429, Body: `{"type":"usage_limit_reached","resets_in_seconds":3600}`}})
+	if _, err := handleUsageHandle(usageRaw); err != nil {
+		t.Fatal(err)
+	}
+	after := publishedSchedulerSnapshot.Load()
+	if after == nil {
+		t.Fatal("snapshot missing")
+	}
+	if _, ok := after.ActiveHighestTier["limited"]; !ok || len(after.ActiveHighestTier) != 1 {
+		t.Fatalf("active tier changed: %#v", after.ActiveHighestTier)
+	}
+	if len(after.Accounts) != 1 || !after.Accounts[0].TemporaryUnavailable {
+		t.Fatalf("usage mutation not republished: %#v", after.Accounts)
+	}
+	secondRaw, err := handleSchedulerPick(pickRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var secondEnv envelope
+	_ = json.Unmarshal(secondRaw, &secondEnv)
+	var second pluginapi.SchedulerPickResponse
+	_ = json.Unmarshal(secondEnv.Result, &second)
+	if second.AuthID != "" || !second.Handled || second.DelegateBuiltin != pluginapi.SchedulerBuiltinFillFirst {
+		t.Fatalf("limited account retrialed: %#v", second)
+	}
+	if globalTrials.State(61, now) != TrialNone {
+		t.Fatal("excluded quota-limit account started a new trial")
+	}
+	admission := store.CPAAdmission()
+	if !admission.Observed || admission.Priority != 9 || len(admission.AuthIDs) != 1 {
+		t.Fatalf("admission mutated: %#v", admission)
+	}
+}
+
 func TestEvidenceConsumerMarksPendingAndQueueFullIsNonblocking(t *testing.T) {
 	now := time.Now()
 	previous := globalTrials

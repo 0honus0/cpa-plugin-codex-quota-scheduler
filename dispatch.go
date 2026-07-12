@@ -194,12 +194,15 @@ func handleUsageHandle(raw []byte) ([]byte, error) {
 	now := time.Now()
 	HandleUsageFeedback(globalState, record, now)
 	evidenceKind := EvidenceUnknown
+	quotaLimitFeedback := false
 	if record.Provider == "codex" && !record.Failed {
 		evidenceKind = EvidenceRequestSuccess
 	} else if _, ok := DetectQuotaFailure(record, now); ok {
 		evidenceKind = EvidenceUsageFeedback
+		quotaLimitFeedback = true
 	}
-	if snapshot := publishedSchedulerSnapshot.Load(); snapshot != nil && snapshot.Trials != nil {
+	snapshot := publishedSchedulerSnapshot.Load()
+	if snapshot != nil && snapshot.Trials != nil {
 		for _, account := range snapshot.Accounts {
 			matches := record.AuthID != "" && account.ID == record.AuthID
 			if record.AuthID == "" && record.AuthIndex != "" {
@@ -210,6 +213,9 @@ func handleUsageHandle(raw []byte) ([]byte, error) {
 				break
 			}
 		}
+	}
+	if quotaLimitFeedback && snapshot != nil {
+		publishSchedulerState(globalState, snapshot.ActiveHighestTier, now)
 	}
 	return okEnvelope(map[string]any{})
 }

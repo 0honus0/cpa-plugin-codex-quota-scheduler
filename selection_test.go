@@ -212,4 +212,5 @@ func TestSuiteScheduling(t *testing.T) {
 	t.Run("evidence queue", TestEvidenceConsumerMarksPendingAndQueueFullIsNonblocking)
 	t.Run("immutable publication", TestSchedulerPickObservesOneImmutablePublication)
 	t.Run("request success evidence", TestUsageSuccessHandlerClearsTrialButProbeSuccessDoesNot)
+	t.Run("quota limit republish", TestQuotaLimitFeedbackRepublishesExhaustionWithoutRosterMutation)
 }
