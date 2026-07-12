@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -59,17 +60,34 @@ type QuotaRefresher struct {
 	pendingDue        func() error
 	pendingDueVersion uint64
 	wg                sync.WaitGroup
+	coordinator       *Coordinator
+	legacyTxn         *LegacyRefreshTxn
+	fenceMu           sync.Mutex
+	nextFence         uint64
 }
 
 func NewQuotaRefresher(host HostClient, state *PluginState, now func() time.Time) *QuotaRefresher {
 	if now == nil {
 		now = time.Now
 	}
-	return &QuotaRefresher{
+	r := &QuotaRefresher{
 		host:  host,
 		state: state,
 		now:   now,
 	}
+	r.legacyTxn = &LegacyRefreshTxn{refresher: r}
+	r.coordinator = NewCoordinator(CoordinatorOptions{
+		MaxHTTPSlots:  state.Config().MaxRefreshConcurrency,
+		LeaseDuration: legacyLeaseDuration,
+		Now:           now,
+		Execute: func(ctx context.Context, intent Intent, held *HeldLease) OperationResult {
+			return r.legacyTxn.RunHeld(ctx, intent, held)
+		},
+		Validate: func(intent Intent, result OperationResult) bool {
+			return r.state.CPAAdmissionVersionCurrent(uint64(intent.Generation))
+		},
+	})
+	return r
 }
 
 func (r *QuotaRefresher) RefreshOnce() error {
@@ -468,6 +486,12 @@ func (r *QuotaRefresher) Stop() {
 		<-done
 	}
 	r.wg.Wait()
+	if r.coordinator != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), legacyLeaseDuration)
+		defer cancel()
+		r.coordinator.DrainLegacy(ctx)
+		r.coordinator.Close()
+	}
 }
 
 func (r *QuotaRefresher) RefreshSoon() {
@@ -570,6 +594,24 @@ func (r *QuotaRefresher) refreshAuth(auth pluginapi.HostAuthFileEntry) {
 }
 
 func (r *QuotaRefresher) refreshAuthVersioned(auth pluginapi.HostAuthFileEntry, version uint64) {
+	if r.coordinator == nil {
+		r.refreshAuthVersionedHeld(auth, version)
+		return
+	}
+	r.fenceMu.Lock()
+	r.nextFence++
+	fence := r.nextFence
+	r.fenceMu.Unlock()
+	instance := legacyAuthInstanceID(auth.ID)
+	intent := Intent{
+		Instance: instance, Generation: TierGeneration(version), Class: OperationLegacyRefresh,
+		Source: LegacyRefreshSource, Token: ExecutionToken{Instance: instance, Tier: TierGeneration(version), Fence: fence},
+		Payload: auth,
+	}
+	_ = r.coordinator.Submit(intent).Await(context.Background())
+}
+
+func (r *QuotaRefresher) refreshAuthVersionedHeld(auth pluginapi.HostAuthFileEntry, version uint64) {
 	priority, currentVersion, admitted := r.state.AdmittedCPAPriorityVersioned(auth.ID)
 	if !admitted || currentVersion != version {
 		return
