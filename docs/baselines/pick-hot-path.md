@@ -14,3 +14,8 @@ ok      github.com/jeffery/codex-quota-scheduler    2.663s
 The fixture is published before timing starts. The benchmark calls only the
 snapshot selector and performs no host, network, disk, sleep, or background
 wait operation.
+
+S1 also records existing transitive legacy pick-path debt in
+`scripts/refactor_gates/s1-pick-path-baseline.json`. The ratchet permits no new
+file/type/symbol or occurrence-count increase; S5 must reduce the baseline to
+an empty array and pass the real ABI snapshot-only test.

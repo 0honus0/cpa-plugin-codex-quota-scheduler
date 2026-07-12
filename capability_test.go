@@ -61,6 +61,14 @@ func TestSuiteCapabilityFallsBackWhenPriorityIsMissing(t *testing.T) {
 	}
 }
 
+func TestSuiteCapabilityFallsBackForEmptyRoster(t *testing.T) {
+	host := &fakeHostAuthLister{}
+	snapshot := DetectHostRoster(context.Background(), host, time.Now())
+	if snapshot.Capability != CapabilityB || !snapshot.ConfirmedAt.IsZero() {
+		t.Fatalf("snapshot = %#v, want unconfirmed CapabilityB", snapshot)
+	}
+}
+
 func TestSuiteCapabilityABINormalizationPreservesMissingPriority(t *testing.T) {
 	lister := ABIHostAuthLister{call: func(string, any) (json.RawMessage, error) {
 		return json.RawMessage(`{"files":[{"id":"explicit-zero","provider":"codex","priority":0},{"id":"missing","provider":"codex"}]}`), nil
@@ -72,6 +80,65 @@ func TestSuiteCapabilityABINormalizationPreservesMissingPriority(t *testing.T) {
 	}
 	if len(entries) != 2 || entries[0].Priority == nil || *entries[0].Priority != 0 || entries[1].Priority != nil {
 		t.Fatalf("entries = %#v, want explicit zero followed by missing priority", entries)
+	}
+}
+
+func TestSuiteCapabilityRawRosterPayloadsCannotProveCapability(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload json.RawMessage
+	}{
+		{name: "empty object", payload: json.RawMessage(`{}`)},
+		{name: "missing files", payload: json.RawMessage(`{"other":[]}`)},
+		{name: "null files", payload: json.RawMessage(`{"files":null}`)},
+		{name: "empty files", payload: json.RawMessage(`{"files":[]}`)},
+		{name: "malformed", payload: json.RawMessage(`{"files":`)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lister := ABIHostAuthLister{call: func(string, any) (json.RawMessage, error) {
+				return tt.payload, nil
+			}}
+			snapshot := DetectHostRoster(context.Background(), lister, time.Now())
+			if snapshot.Capability != CapabilityB || len(snapshot.Entries) != 0 || !snapshot.ConfirmedAt.IsZero() {
+				t.Fatalf("snapshot = %#v, want unconfirmed CapabilityB", snapshot)
+			}
+		})
+	}
+}
+
+func TestSuiteCapabilityIgnoresMissingPriorityOnIrrelevantProvider(t *testing.T) {
+	host := &fakeHostAuthLister{entries: []RosterEntry{
+		{ID: "codex", Provider: "codex", Priority: priority(0)},
+		{ID: "other", Provider: "openai"},
+	}}
+	snapshot := DetectHostRoster(context.Background(), host, time.Now())
+	if snapshot.Capability != CapabilityA {
+		t.Fatalf("capability = %v, want CapabilityA", snapshot.Capability)
+	}
+}
+
+func TestSuiteCapabilityStartupTimeoutPublishesFallbackWithoutRealSleep(t *testing.T) {
+	timer := make(chan time.Time)
+	release := make(chan struct{})
+	host := HostAuthListerFunc(func(context.Context) ([]RosterEntry, error) {
+		<-release
+		return []RosterEntry{{ID: "codex", Provider: "codex", Priority: priority(1)}}, nil
+	})
+	result := make(chan HostRosterSnapshot, 1)
+	go func() {
+		result <- detectStartupHostRoster(context.Background(), host, time.Now(), func(delay time.Duration) <-chan time.Time {
+			if delay != hostRosterDetectionTimeout {
+				t.Errorf("timeout = %s, want %s", delay, hostRosterDetectionTimeout)
+			}
+			return timer
+		})
+	}()
+	timer <- time.Now()
+	snapshot := <-result
+	close(release)
+	if snapshot.Capability != CapabilityB || !snapshot.ConfirmedAt.IsZero() {
+		t.Fatalf("snapshot = %#v, want timeout CapabilityB", snapshot)
 	}
 }
 

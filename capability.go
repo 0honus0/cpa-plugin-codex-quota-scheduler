@@ -33,16 +33,22 @@ type HostAuthLister interface {
 	ListHostAuths(context.Context) ([]RosterEntry, error)
 }
 
+type HostAuthListerFunc func(context.Context) ([]RosterEntry, error)
+
+func (f HostAuthListerFunc) ListHostAuths(ctx context.Context) ([]RosterEntry, error) {
+	return f(ctx)
+}
+
 func DetectHostRoster(ctx context.Context, host HostAuthLister, now time.Time) HostRosterSnapshot {
 	if host == nil {
 		return HostRosterSnapshot{Capability: CapabilityB}
 	}
 	entries, err := host.ListHostAuths(ctx)
-	if err != nil {
+	if err != nil || len(entries) == 0 {
 		return HostRosterSnapshot{Capability: CapabilityB}
 	}
 	for _, entry := range entries {
-		if entry.Priority == nil {
+		if entry.Provider == "codex" && entry.Priority == nil {
 			return HostRosterSnapshot{Capability: CapabilityB}
 		}
 	}

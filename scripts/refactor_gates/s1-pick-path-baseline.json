@@ -1,0 +1,12 @@
+[
+  { "file": "refresh.go", "type": "host_roster", "symbol": "ListAuths", "count": 2 },
+  { "file": "refresh.go", "type": "host_roster", "symbol": "r.host.ListAuths", "count": 2 },
+  { "file": "refresh.go", "type": "host_roster", "symbol": "MethodHostAuthList", "count": 1 },
+  { "file": "refresh.go", "type": "blocking_wait", "symbol": "wg.Wait", "count": 1 },
+  { "file": "refresh.go", "type": "blocking_wait", "symbol": "r.wg.Wait", "count": 1 },
+  { "file": "refresh.go", "type": "network", "symbol": "http.MethodGet", "count": 2 },
+  { "file": "refresh.go", "type": "network", "symbol": "http.MethodPost", "count": 2 },
+  { "file": "refresh.go", "type": "network", "symbol": "http.Header", "count": 4 },
+  { "file": "refresh.go", "type": "network", "symbol": "http.StatusBadRequest", "count": 1 },
+  { "file": "refresh.go", "type": "network", "symbol": "http.StatusUnauthorized", "count": 2 }
+]

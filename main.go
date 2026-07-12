@@ -65,6 +65,8 @@ var (
 	hostRosterLatest atomic.Pointer[HostRosterSnapshot]
 )
 
+const hostRosterDetectionTimeout = 5 * time.Second
+
 func main() {}
 
 // ABIHostAuthLister normalizes raw host.auth.list JSON before the typed ABI
@@ -123,7 +125,7 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 	// Host callback readiness during init is not guaranteed. Probe in the
 	// background and publish CapabilityB on any immediate failure.
 	go func() {
-		snapshot := DetectHostRoster(context.Background(), ABIHostAuthLister{}, time.Now())
+		snapshot := detectStartupHostRoster(context.Background(), ABIHostAuthLister{}, time.Now(), time.After)
 		hostRosterLatest.Store(&snapshot)
 	}()
 	plugin.abi_version = C.uint32_t(pluginabi.ABIVersion)
@@ -131,6 +133,28 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 	plugin.free_buffer = C.cliproxy_plugin_free_fn(C.cliproxyPluginFree)
 	plugin.shutdown = C.cliproxy_plugin_shutdown_fn(C.cliproxyPluginShutdown)
 	return 0
+}
+
+func detectStartupHostRoster(
+	ctx context.Context,
+	host HostAuthLister,
+	now time.Time,
+	after func(time.Duration) <-chan time.Time,
+) HostRosterSnapshot {
+	detectCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	result := make(chan HostRosterSnapshot, 1)
+	go func() {
+		result <- DetectHostRoster(detectCtx, host, now)
+	}()
+	select {
+	case snapshot := <-result:
+		return snapshot
+	case <-ctx.Done():
+		return HostRosterSnapshot{Capability: CapabilityB}
+	case <-after(hostRosterDetectionTimeout):
+		return HostRosterSnapshot{Capability: CapabilityB}
+	}
 }
 
 //export cliproxyPluginCall
