@@ -1,0 +1,122 @@
+package main
+
+import (
+	"testing"
+	"time"
+)
+
+// oracleClassify is intentionally independent of production classification.
+func oracleClassify(a AccountView, now time.Time) AvailabilityClass {
+	if a.AuthBlocked || a.CircuitOpen || a.TemporaryUnavailable || a.Trial != TrialNone {
+		return Excluded
+	}
+	if a.Exhausted && a.ResetAt.After(now) {
+		return Excluded
+	}
+	if a.Cache == CacheFresh || a.Cache == CacheAging {
+		if !a.Exhausted {
+			return Preferred
+		}
+		return Opportunistic
+	}
+	if a.Cache == CacheUnknown || (a.Cache == CacheStale && a.LastKnownAvailable) {
+		return Opportunistic
+	}
+	return Excluded
+}
+
+// inv:INV-12,INV-13,INV-44
+func TestMockGroupB(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	caches := []CacheClass{CacheFresh, CacheAging, CacheUnknown, CacheStale}
+	exhausted := []struct {
+		exhausted bool
+		reset     time.Time
+	}{
+		{}, {true, now.Add(time.Hour)}, {true, now.Add(24 * time.Hour)}, {true, now.Add(7 * 24 * time.Hour)}, {true, now.Add(-time.Second)},
+	}
+	trials := []TrialState{TrialNone, TrialActive, TrialUnknown}
+	count := 0
+	for _, cache := range caches {
+		for _, ex := range exhausted {
+			for _, auth := range []bool{false, true} {
+				for _, circuit := range []CircuitClass{CircuitClosed, CircuitOpen, CircuitHalfOpen} {
+					for _, temp := range []bool{false, true} {
+						for _, trial := range trials {
+							for _, priority := range []int{0, 1} {
+								a := AccountView{ID: "a", Instance: 1, Cache: cache, Exhausted: ex.exhausted, ResetAt: ex.reset, AuthBlocked: auth, CircuitOpen: circuit == CircuitOpen, TemporaryUnavailable: temp, Trial: trial, PluginPriority: priority, LastKnownAvailable: true}
+								if got, want := ClassifyAccount(a, now), oracleClassify(a, now); got != want {
+									t.Fatalf("vector %d: got %v want %v: %#v", count, got, want, a)
+								}
+								count++
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if count != 1440 {
+		t.Fatalf("single-instance vectors=%d want 1440", count)
+	}
+
+	// Six representatives (three confidence classes x two plugin priorities),
+	// exhaustively enumerated for N=1..3 and crossed with three candidate relations.
+	reps := []AccountView{
+		{ID: "p0", Instance: 1, Cache: CacheFresh}, {ID: "p1", Instance: 2, Cache: CacheFresh, PluginPriority: 1},
+		{ID: "o0", Instance: 3, Cache: CacheUnknown}, {ID: "o1", Instance: 4, Cache: CacheUnknown, PluginPriority: 1},
+		{ID: "x0", Instance: 5, Cache: CacheFresh, AuthBlocked: true}, {ID: "x1", Instance: 6, Cache: CacheFresh, AuthBlocked: true, PluginPriority: 1},
+	}
+	multi := 0
+	for n := 1; n <= 3; n++ {
+		total := 1
+		for range n {
+			total *= len(reps)
+		}
+		for code := 0; code < total; code++ {
+			accounts := make([]AccountView, n)
+			active := map[string]struct{}{}
+			candidates := make([]Candidate, 0, n)
+			x := code
+			for i := 0; i < n; i++ {
+				accounts[i] = reps[x%len(reps)]
+				accounts[i].ID += string(rune('a' + i))
+				active[accounts[i].ID] = struct{}{}
+				candidates = append(candidates, Candidate{ID: accounts[i].ID, Provider: "codex"})
+				x /= len(reps)
+			}
+			for relation := 0; relation < 3; relation++ {
+				cs := candidates
+				if relation == 1 && len(cs) > 0 {
+					cs = cs[:len(cs)-1]
+				}
+				if relation == 2 {
+					cs = []Candidate{{ID: "outside", Provider: "codex"}}
+				}
+				_ = SelectAccount(SchedulerSnapshot{Accounts: accounts, ActiveHighestTier: active, MonthlyMode: MonthlyModeExpiryOrder}, cs, now)
+				multi++
+			}
+		}
+	}
+	if multi != 774 {
+		t.Fatalf("multi-instance comparisons=%d want 774", multi)
+	}
+}
+
+// inv:INV-44
+func TestPreferredAcrossAllPrioritiesBeforeOpportunistic(t *testing.T) {
+	now := time.Now()
+	s := SchedulerSnapshot{Accounts: []AccountView{{ID: "op-high", Instance: 1, Cache: CacheUnknown, PluginPriority: 99}, {ID: "preferred-low", Instance: 2, Cache: CacheFresh, PluginPriority: 0}}, ActiveHighestTier: map[string]struct{}{"op-high": {}, "preferred-low": {}}}
+	got := SelectAccount(s, []Candidate{{ID: "op-high", Provider: "codex"}, {ID: "preferred-low", Provider: "codex"}}, now)
+	if got.AuthID != "preferred-low" {
+		t.Fatalf("selected %q", got.AuthID)
+	}
+}
+
+func TestSuiteScheduling(t *testing.T) {
+	t.Run("mock group B", TestMockGroupB)
+	t.Run("class before priority", TestPreferredAcrossAllPrioritiesBeforeOpportunistic)
+	t.Run("trial CAS", TestTrialRegistryCASAndEvidence)
+	t.Run("trial budget", TestTrialPendingAtSixtySecondsAndBudget)
+	t.Run("real ABI snapshot", TestSchedulerPickABIPathSnapshotOnly)
+}

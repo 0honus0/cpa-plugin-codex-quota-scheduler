@@ -15,6 +15,7 @@ import (
 var (
 	currentConfig   atomic.Value
 	globalState     = NewPluginState(DefaultConfig())
+	globalTrials    = NewTrialRegistry()
 	refresherMu     sync.Mutex
 	globalRefresher *QuotaRefresher
 )
@@ -75,6 +76,7 @@ func configure(raw []byte) error {
 	currentConfig.Store(cfg)
 	globalState.ReplaceConfig(cfg)
 	globalState.SetAnnotations(AnnotationState{Accounts: disk.Accounts, Groups: disk.Groups})
+	publishSchedulerState(globalState, nil, time.Now())
 	return nil
 }
 
@@ -85,25 +87,7 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 			return nil, err
 		}
 	}
-	now := time.Now()
-	_, admissionVersion := globalState.CPAAdmissionVersioned()
-	if admission, ok := HighestPriorityCodexAdmission(req); ok {
-		admissionVersion = globalState.ReplaceCPAAdmission(admission)
-		globalState.RecordLog("info", "scheduler.cpa_admission_updated", "CPA priority admission updated", map[string]any{
-			"cpa_priority":   admission.Priority,
-			"admitted_count": len(admission.AuthIDs),
-			"excluded_count": codexCandidateCount(req) - len(admission.AuthIDs),
-		}, now)
-	}
-	if requestIncludesCodex(req) {
-		globalState.RecordCodexActivity(now)
-		refreshGlobalRefresherDueSoon(req, admissionVersion, now)
-	}
-	decision := schedulerPickSnapshot(req, globalState.Snapshot(now), now)
-	if decision.AuthID != "" {
-		globalState.RecordSelection(decision.AuthID, decision.Reason)
-	}
-	logSchedulerDecision(globalState, req, decision, now)
+	decision := schedulerPickPublished(req, time.Now())
 	return okEnvelope(pluginapi.SchedulerPickResponse{
 		AuthID:          decision.AuthID,
 		DelegateBuiltin: decision.DelegateBuiltin,
@@ -185,6 +169,14 @@ func handleUsageHandle(raw []byte) ([]byte, error) {
 		}
 	}
 	HandleUsageFeedback(globalState, record, time.Now())
+	if snapshot := publishedSchedulerSnapshot.Load(); snapshot != nil && snapshot.Trials != nil {
+		for _, account := range snapshot.Accounts {
+			if account.ID == record.AuthID {
+				snapshot.Trials.ObserveEvidence(account.Instance, Evidence{Kind: EvidenceUsageFeedback, At: time.Now()})
+				break
+			}
+		}
+	}
 	return okEnvelope(map[string]any{})
 }
 

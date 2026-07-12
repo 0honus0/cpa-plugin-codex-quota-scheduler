@@ -146,7 +146,7 @@ type CoordinatorOptions struct {
 	DispatchLogs       func(context.Context, Intent, OperationResult, *HeldLease) error
 }
 
-type SchedulerSnapshot struct {
+type CoordinatorSnapshot struct {
 	Accepting       bool
 	InFlight        int
 	Queued          int
@@ -194,7 +194,7 @@ type logCallbackCommand struct {
 	result OperationResult
 	err    error
 }
-type snapshotCommand struct{ reply chan *SchedulerSnapshot }
+type snapshotCommand struct{ reply chan *CoordinatorSnapshot }
 type drainCommand struct {
 	ctx   context.Context
 	reply chan DrainReport
@@ -251,18 +251,18 @@ func (c *Coordinator) Submit(intent Intent) Future[OperationResult] {
 	return <-reply
 }
 
-func (c *Coordinator) PublishSnapshot() *SchedulerSnapshot {
+func (c *Coordinator) PublishSnapshot() *CoordinatorSnapshot {
 	c.lifecycleMu.Lock()
 	defer c.lifecycleMu.Unlock()
 	if c.closing {
-		return &SchedulerSnapshot{}
+		return &CoordinatorSnapshot{}
 	}
-	reply := make(chan *SchedulerSnapshot, 1)
+	reply := make(chan *CoordinatorSnapshot, 1)
 	select {
 	case c.commands <- snapshotCommand{reply}:
 		return <-reply
 	case <-c.closed:
-		return &SchedulerSnapshot{}
+		return &CoordinatorSnapshot{}
 	}
 }
 func (c *Coordinator) DoHostCallback(ctx context.Context, call func()) error {
@@ -529,7 +529,7 @@ func (c *Coordinator) loop() {
 				for id := range leases {
 					ids = append(ids, id)
 				}
-				cmd.reply <- &SchedulerSnapshot{Accepting: accepting, InFlight: len(inflight), Queued: queued, LeasedInstances: ids, HTTPSlotsInUse: len(c.httpSlots)}
+				cmd.reply <- &CoordinatorSnapshot{Accepting: accepting, InFlight: len(inflight), Queued: queued, LeasedInstances: ids, HTTPSlotsInUse: len(c.httpSlots)}
 			case drainCommand:
 				accepting = false
 				waiter := &drainWaiter{command: cmd}

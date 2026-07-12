@@ -143,6 +143,7 @@ func (r *QuotaRefresher) PublishAuthoritativeRoster(ctx context.Context, roster 
 	r.rosterMu.Lock()
 	r.roster = filtered
 	r.rosterMu.Unlock()
+	publishSchedulerState(r.state, allowed, r.now())
 	if adapter, ok := r.credentials.host.(*rosterCredentialHost); ok {
 		adapter.setRoster(filtered)
 	}
@@ -938,6 +939,8 @@ func (r *QuotaRefresher) refreshAuthVersionedHeld(auth pluginapi.HostAuthFileEnt
 	account.LastError = ""
 	account.LastSuccessAt = r.now()
 	if r.state.ApplyQuotaRefreshSuccessIfAdmissionCurrent(account, version, r.now()) {
+		globalTrials.ObserveEvidence(account.Instance, Evidence{Kind: EvidenceReliableQuotaWriteback, At: r.now()})
+		publishSchedulerState(r.state, highestTierSet(r.runtimeRoster()), r.now())
 		r.recordAdmissionLog(account.AuthID, version, "info", "quota.refresh_success", "账号额度刷新成功", map[string]any{"auth_id": account.AuthID})
 	}
 }
@@ -1259,8 +1262,21 @@ func (r *QuotaRefresher) upsertRefreshFailure(account AccountState, version uint
 	merged.LastRefreshAt = account.LastRefreshAt
 	merged.LastError = message
 	if r.state.ApplyQuotaRefreshFailureIfAdmissionCurrent(merged, version, kind, message, r.now()) {
+		publishSchedulerState(r.state, highestTierSet(r.runtimeRoster()), r.now())
 		r.recordAdmissionLog(merged.AuthID, version, "warn", "quota.refresh_failed", "账号额度刷新失败", map[string]any{"auth_id": merged.AuthID, "error": message})
 	}
+}
+
+func highestTierSet(roster HostRosterSnapshot) map[string]struct{} {
+	_, ids, ok := HighestCodexTier(roster.Entries)
+	if !ok {
+		return nil
+	}
+	out := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		out[id] = struct{}{}
+	}
+	return out
 }
 
 func (r *QuotaRefresher) mergeExistingAccount(account AccountState) AccountState {
