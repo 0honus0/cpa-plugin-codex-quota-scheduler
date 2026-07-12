@@ -107,14 +107,14 @@ func TestSuiteCapabilityRawRosterPayloadsCannotProveCapability(t *testing.T) {
 	}
 }
 
-func TestSuiteCapabilityIgnoresMissingPriorityOnIrrelevantProvider(t *testing.T) {
+func TestSuiteCapabilityFallsBackWhenNonCodexPriorityIsMissing(t *testing.T) {
 	host := &fakeHostAuthLister{entries: []RosterEntry{
 		{ID: "codex", Provider: "codex", Priority: priority(0)},
 		{ID: "other", Provider: "openai"},
 	}}
 	snapshot := DetectHostRoster(context.Background(), host, time.Now())
-	if snapshot.Capability != CapabilityA {
-		t.Fatalf("capability = %v, want CapabilityA", snapshot.Capability)
+	if snapshot.Capability != CapabilityB {
+		t.Fatalf("capability = %v, want CapabilityB", snapshot.Capability)
 	}
 }
 

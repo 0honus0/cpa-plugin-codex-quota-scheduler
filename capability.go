@@ -48,7 +48,7 @@ func DetectHostRoster(ctx context.Context, host HostAuthLister, now time.Time) H
 		return HostRosterSnapshot{Capability: CapabilityB}
 	}
 	for _, entry := range entries {
-		if entry.Provider == "codex" && entry.Priority == nil {
+		if entry.Priority == nil {
 			return HostRosterSnapshot{Capability: CapabilityB}
 		}
 	}

@@ -16,6 +16,9 @@ snapshot selector and performs no host, network, disk, sleep, or background
 wait operation.
 
 S1 also records existing transitive legacy pick-path debt in
-`scripts/refactor_gates/s1-pick-path-baseline.json`. The ratchet permits no new
-file/type/symbol or occurrence-count increase; S5 must reduce the baseline to
-an empty array and pass the real ABI snapshot-only test.
+`scripts/refactor_gates/s1-pick-path-baseline.json`. A standard-library Go AST
+analyzer starts at real `handleSchedulerPick`, follows the same-package call
+closure across files, resolves import aliases, and emits stable
+file/type/symbol/count entries. The ratchet permits no new entry or count
+increase; S5 must reduce the baseline to an empty array and pass the real ABI
+snapshot-only test.
