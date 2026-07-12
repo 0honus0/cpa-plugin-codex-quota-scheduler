@@ -14,15 +14,17 @@ const CurrentStateSchema = 1
 var ErrStateReadOnly = errors.New("state store is read-only")
 
 type PersistentState struct {
-	SchemaVersion    int                                `json:"schema_version"`
-	ReservedCeiling  uint64                             `json:"reserved_ceiling"`
-	NextSaveSeq      uint64                             `json:"next_save_seq"`
-	CredentialChains map[AuthInstanceID]TransitionChain `json:"credential_chains,omitempty"`
-	FenceUnsafe      bool                               `json:"fence_unsafe,omitempty"`
+	SchemaVersion    int                                 `json:"schema_version"`
+	ReservedCeiling  uint64                              `json:"reserved_ceiling"`
+	NextSaveSeq      uint64                              `json:"next_save_seq"`
+	CredentialChains map[AuthInstanceID]TransitionChain  `json:"credential_chains,omitempty"`
+	FenceUnsafe      bool                                `json:"fence_unsafe,omitempty"`
+	Bindings         map[string]RuntimeBinding           `json:"bindings,omitempty"`
+	ProbeAttempts    map[AuthInstanceID]ProbeAttemptSeam `json:"probe_attempts,omitempty"`
 }
 
 func NewPersistentState() PersistentState {
-	return PersistentState{SchemaVersion: CurrentStateSchema, CredentialChains: map[AuthInstanceID]TransitionChain{}}
+	return PersistentState{SchemaVersion: CurrentStateSchema, CredentialChains: map[AuthInstanceID]TransitionChain{}, Bindings: map[string]RuntimeBinding{}, ProbeAttempts: map[AuthInstanceID]ProbeAttemptSeam{}}
 }
 func clonePersistentState(s PersistentState) PersistentState {
 	raw, _ := json.Marshal(s)
@@ -31,6 +33,12 @@ func clonePersistentState(s PersistentState) PersistentState {
 	out.FenceUnsafe = s.FenceUnsafe
 	if out.CredentialChains == nil {
 		out.CredentialChains = map[AuthInstanceID]TransitionChain{}
+	}
+	if out.Bindings == nil {
+		out.Bindings = map[string]RuntimeBinding{}
+	}
+	if out.ProbeAttempts == nil {
+		out.ProbeAttempts = map[AuthInstanceID]ProbeAttemptSeam{}
 	}
 	return out
 }
@@ -127,6 +135,12 @@ func (s *StateStore) loadLocked() (PersistentState, RecoveryReport, error) {
 	if state.CredentialChains == nil {
 		state.CredentialChains = map[AuthInstanceID]TransitionChain{}
 	}
+	if state.Bindings == nil {
+		state.Bindings = map[string]RuntimeBinding{}
+	}
+	if state.ProbeAttempts == nil {
+		state.ProbeAttempts = map[AuthInstanceID]ProbeAttemptSeam{}
+	}
 	s.state = state
 	s.loaded = true
 	if state.FenceUnsafe {
@@ -191,6 +205,12 @@ func (s *StateStore) writeLocked(state PersistentState) error {
 	state.SchemaVersion = CurrentStateSchema
 	if state.CredentialChains == nil {
 		state.CredentialChains = map[AuthInstanceID]TransitionChain{}
+	}
+	if state.Bindings == nil {
+		state.Bindings = map[string]RuntimeBinding{}
+	}
+	if state.ProbeAttempts == nil {
+		state.ProbeAttempts = map[AuthInstanceID]ProbeAttemptSeam{}
 	}
 	raw, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {

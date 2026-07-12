@@ -1,5 +1,9 @@
 # Codex Quota Scheduler
 
+## v0.2 upgrade
+
+v0.2 automatically migrates the legacy state filename to `.user-data.json` and retains the original for one version cycle as `<legacy-name>.migrated`. Machine-owned runtime state is stored separately in `.runtime-state.json` in the same directory.
+
 `codex-quota-scheduler` is a CLIProxyAPI (CPA) dynamic library plugin that
 improves Codex account selection with an optimized Fill First scheduler.
 

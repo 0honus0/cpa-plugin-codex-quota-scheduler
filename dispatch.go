@@ -66,7 +66,7 @@ func configure(raw []byte) error {
 	if err != nil {
 		return err
 	}
-	disk, loadedDisk, err := loadPluginDiskState(defaultStatePath())
+	disk, loadedDisk, err := loadUserDataWithMigration(semanticStatePaths(defaultStatePath()), OSFileHooks(), nil)
 	if err == nil && loadedDisk {
 		cfg = disk.Config
 	} else {

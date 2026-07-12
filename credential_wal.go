@@ -13,6 +13,7 @@ var ErrCredentialUnresolved = errors.New("credential transition unresolved")
 var ErrStaleExecutionToken = errors.New("stale execution token")
 
 type HostAuth struct {
+	Name        string
 	Raw         []byte
 	Fingerprint CredentialFingerprint
 }
@@ -112,6 +113,15 @@ func (m *CredentialManager) mutate(fn func(*PersistentState) error) error {
 func (m *CredentialManager) SaveVersioned(ctx context.Context, instance AuthInstanceID, next HostAuth, token ExecutionToken) (CredentialSaveResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if ss, ok := m.store.(interface {
+		PersistentSnapshot() (PersistentState, error)
+	}); ok {
+		fresh, err := ss.PersistentSnapshot()
+		if err != nil {
+			return CredentialSaveResult{}, err
+		}
+		m.state = fresh
+	}
 	if token.Instance != instance {
 		return CredentialSaveResult{}, ErrStaleExecutionToken
 	}

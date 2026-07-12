@@ -46,9 +46,13 @@ type HostClient interface {
 type ABIHostClient struct{}
 
 type QuotaRefresher struct {
-	host  HostClient
-	state *PluginState
-	now   func() time.Time
+	host         HostClient
+	state        *PluginState
+	now          func() time.Time
+	runtimeStore *StateStore
+	bindings     *BindingRegistry
+	credentials  *CredentialManager
+	roster       HostRosterSnapshot
 
 	mu                sync.Mutex
 	running           bool
@@ -64,6 +68,30 @@ type QuotaRefresher struct {
 	legacyTxn         *LegacyRefreshTxn
 	fenceMu           sync.Mutex
 	nextFence         uint64
+}
+
+// NewProductionQuotaRefresher wires S2 persistence/identity primitives into
+// the production refresher without changing S3 coordinator behavior.
+func NewProductionQuotaRefresher(host HostClient, state *PluginState, credentialHost CredentialHost, roster HostRosterSnapshot, legacyStatePath string, now func() time.Time) (*QuotaRefresher, error) {
+	r := NewQuotaRefresher(host, state, now)
+	store := NewStateStore(semanticStatePaths(legacyStatePath).Runtime, OSFileHooks(), nil)
+	bindings, err := NewBindingRegistry(store)
+	if err != nil {
+		return nil, err
+	}
+	credentials, err := NewCredentialManager(store, credentialHost, now, nil)
+	if err != nil {
+		return nil, err
+	}
+	r.runtimeStore, r.bindings, r.credentials, r.roster = store, bindings, credentials, roster
+	return r, nil
+}
+
+func (r *QuotaRefresher) BootstrapBinding(ctx context.Context, authID string) (RuntimeBinding, bool, error) {
+	if r == nil || r.bindings == nil || r.credentials == nil {
+		return RuntimeBinding{}, false, errors.New("runtime wiring unavailable")
+	}
+	return r.bindings.ObserveAuthoritative(ctx, r.roster, authID, r.credentials.host)
 }
 
 func NewQuotaRefresher(host HostClient, state *PluginState, now func() time.Time) *QuotaRefresher {

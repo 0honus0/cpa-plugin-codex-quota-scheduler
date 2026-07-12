@@ -19,7 +19,7 @@ func TestS2KPointRegistryMatchesSource(t *testing.T) {
 	hitRe := regexp.MustCompile(`(?:\.Hit|\.hit)\("(K_[A-Z0-9_]+)"\)`)
 	found := map[string]bool{}
 	runtimeFound := map[string]bool{}
-	for _, name := range []string{"credential_wal.go", "state_store.go", "fence.go"} {
+	for _, name := range []string{"credential_wal.go", "state_store.go", "fence.go", "user_data.go"} {
 		raw, err := os.ReadFile(filepath.Clean(name))
 		if err != nil {
 			t.Fatal(err)

@@ -118,7 +118,20 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 	hostAPI.Store(host)
 	refresherMu.Lock()
 	callHostCallback = callHostCallbackABI
-	globalRefresher = NewQuotaRefresher(ABIHostClient{}, globalState, time.Now)
+	roster := HostRosterSnapshot{Capability: CapabilityB}
+	if latest := hostRosterLatest.Load(); latest != nil {
+		roster = *latest
+	}
+	credentialHost := &rosterCredentialHost{host: ABIHostClient{}, roster: roster}
+	production, err := NewProductionQuotaRefresher(ABIHostClient{}, globalState, credentialHost, roster, defaultStatePath(), time.Now)
+	if err == nil {
+		globalRefresher = production
+		credentialHost.bindings = production.bindings
+	} else {
+		// Runtime persistence is an authorization prerequisite. Keep background
+		// work disabled rather than falling back to the legacy external-call path.
+		globalRefresher = nil
+	}
 	managementRefreshSoon = refreshGlobalRefresherSoon
 	managementRefreshOneSoon = refreshGlobalRefresherOneSoon
 	refresherMu.Unlock()

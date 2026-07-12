@@ -793,7 +793,7 @@ func TestSettingsEndpointUpdatesConfigAndPersistsDefaultState(t *testing.T) {
 	if cfg.HandleEnabled || cfg.MonthlyMode != MonthlyModePriority || cfg.QuotaRefreshInterval != 45*time.Second || cfg.StaleAfter != 15*time.Minute || cfg.EnableUsageFeedback || cfg.MaxRefreshConcurrency != 2 || cfg.MaxLogEntries != 25 || cfg.LogRetention != 3*time.Hour {
 		t.Fatalf("config = %#v", cfg)
 	}
-	disk, err := LoadPluginDiskState(defaultStatePath())
+	disk, _, err := loadUserData(semanticStatePaths(defaultStatePath()).UserData)
 	if err != nil {
 		t.Fatalf("LoadPluginDiskState returned error: %v", err)
 	}
@@ -1338,7 +1338,7 @@ func TestManagementAccountEndpointUpdatesAndResetsSchedulerPriority(t *testing.T
 		if got := store.Annotations().Accounts["auth:auth-1"].SchedulerPriority; got != test.want {
 			t.Fatalf("scheduler priority = %d, want %d", got, test.want)
 		}
-		persisted, err := LoadPluginDiskState(defaultStatePath())
+		persisted, _, err := loadUserData(semanticStatePaths(defaultStatePath()).UserData)
 		if err != nil {
 			t.Fatalf("LoadPluginDiskState returned error: %v", err)
 		}
@@ -1349,7 +1349,7 @@ func TestManagementAccountEndpointUpdatesAndResetsSchedulerPriority(t *testing.T
 			t.Fatalf("CPA priority = %d, want unchanged value 3", got)
 		}
 	}
-	raw, err := os.ReadFile(defaultStatePath())
+	raw, err := os.ReadFile(semanticStatePaths(defaultStatePath()).UserData)
 	if err != nil {
 		t.Fatalf("ReadFile returned error: %v", err)
 	}
@@ -1548,7 +1548,7 @@ func TestAnnotationsEndpointsNormalizePatchAndPersist(t *testing.T) {
 	if got.Alias != " New " || len(got.Tags) != 1 || got.Tags[0] != "alpha" || got.GroupID != "group-1" {
 		t.Fatalf("patched account annotation = %#v", got)
 	}
-	raw, err := os.ReadFile(defaultStatePath())
+	raw, err := os.ReadFile(semanticStatePaths(defaultStatePath()).UserData)
 	if err != nil {
 		t.Fatalf("ReadFile returned error: %v", err)
 	}
@@ -1616,7 +1616,7 @@ func TestAnnotationsPersistenceFailureDoesNotMutateMemory(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			previousDefaultStatePath := defaultStatePath
-			defaultStatePath = func() string { return filepath.Join(t.TempDir(), "state.json") + string(rune(0)) }
+			defaultStatePath = func() string { return filepath.Join(t.TempDir()+string(rune(0)), "state.json") }
 			t.Cleanup(func() { defaultStatePath = previousDefaultStatePath })
 
 			store := NewPluginState(DefaultConfig())

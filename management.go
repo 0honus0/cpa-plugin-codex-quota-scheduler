@@ -368,7 +368,7 @@ func saveSettingsPayload(store *PluginState, payload SettingsPayload) pluginapi.
 	}
 	store.ReplaceConfig(cfg)
 	currentConfig.Store(cfg)
-	if err := SavePluginDiskState(defaultStatePath(), diskStateFromStore(store)); err != nil {
+	if err := SaveUserData(semanticStatePaths(defaultStatePath()).UserData, diskStateFromStore(store)); err != nil {
 		return jsonManagementResponse(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 	return jsonManagementResponse(http.StatusOK, SettingsFromConfig(cfg))
@@ -419,7 +419,7 @@ func handleImportState(store *PluginState, body []byte, now time.Time) pluginapi
 		return jsonManagementResponse(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
 	state = normalizePluginDiskState(state)
-	if err := SavePluginDiskState(defaultStatePath(), state); err != nil {
+	if err := SaveUserData(semanticStatePaths(defaultStatePath()).UserData, state); err != nil {
 		return jsonManagementResponse(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 	store.ReplaceConfig(state.Config)
@@ -1004,7 +1004,7 @@ func persistAnnotationState(store *PluginState, state AnnotationState) error {
 	disk := diskStateFromStore(store)
 	disk.Accounts = state.Accounts
 	disk.Groups = state.Groups
-	return SavePluginDiskState(defaultStatePath(), disk)
+	return SaveUserData(semanticStatePaths(defaultStatePath()).UserData, disk)
 }
 
 func triggerRefreshSoon() {
