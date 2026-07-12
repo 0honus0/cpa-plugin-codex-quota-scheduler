@@ -9,6 +9,7 @@ import (
 
 var ErrCredentialOutcomeUnknown = errors.New("credential save outcome unknown")
 var ErrCredentialRejected = errors.New("credential save rejected")
+var ErrCredentialUnresolved = errors.New("credential transition unresolved")
 var ErrStaleExecutionToken = errors.New("stale execution token")
 
 type HostAuth struct {
@@ -38,7 +39,7 @@ type CredentialManager struct {
 	state PersistentState
 }
 
-func NewCredentialManager(store StateWriter, host CredentialHost, now func() time.Time, crash CrashHitter) *CredentialManager {
+func NewCredentialManager(store StateWriter, host CredentialHost, now func() time.Time, crash CrashHitter) (*CredentialManager, error) {
 	if now == nil {
 		now = time.Now
 	}
@@ -46,21 +47,32 @@ func NewCredentialManager(store StateWriter, host CredentialHost, now func() tim
 	if ss, ok := store.(interface {
 		PersistentSnapshot() (PersistentState, error)
 	}); ok {
-		if st, err := ss.PersistentSnapshot(); err == nil {
-			state = st
+		st, err := ss.PersistentSnapshot()
+		if err != nil {
+			return nil, err
 		}
+		state = st
 	}
-	return &CredentialManager{store: store, host: host, now: now, crash: crash, state: state}
+	return &CredentialManager{store: store, host: host, now: now, crash: crash, state: state}, nil
 }
-func (m *CredentialManager) SetChain(instance AuthInstanceID, chain TransitionChain) {
+func (m *CredentialManager) SetChain(instance AuthInstanceID, chain TransitionChain) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.state.CredentialChains[instance] = chain
 	if u, ok := m.store.(interface {
 		Update(func(*PersistentState) error) error
 	}); ok {
-		_ = u.Update(func(s *PersistentState) error { s.CredentialChains[instance] = chain; return nil })
+		if err := u.Update(func(s *PersistentState) error { s.CredentialChains[instance] = chain; return nil }); err != nil {
+			return err
+		}
+	} else {
+		next := clonePersistentState(m.state)
+		next.CredentialChains[instance] = chain
+		if err := m.store.WriteThrough(next); err != nil {
+			return err
+		}
 	}
+	m.state.CredentialChains[instance] = chain
+	return nil
 }
 func (m *CredentialManager) Chain(instance AuthInstanceID) TransitionChain {
 	m.mu.Lock()
@@ -107,7 +119,11 @@ func (m *CredentialManager) SaveVersioned(ctx context.Context, instance AuthInst
 	if !ok {
 		return CredentialSaveResult{}, errors.New("credential chain missing")
 	}
-	tr := CredentialTransition{Prev: chain.Tail(), Next: next.Fingerprint, Phase: TransitionPlanned, CreatedAt: m.now()}
+	tail, tailErr := chain.SaveTail()
+	if tailErr != nil {
+		return CredentialSaveResult{}, tailErr
+	}
+	tr := CredentialTransition{Prev: tail, Next: next.Fingerprint, Phase: TransitionPlanned, CreatedAt: m.now()}
 	//kpoint:K_CREDENTIAL_PLANNED_WRITE
 	if err := m.hit("K_CREDENTIAL_PLANNED_WRITE"); err != nil {
 		return CredentialSaveResult{}, err

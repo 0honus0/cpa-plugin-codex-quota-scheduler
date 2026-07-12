@@ -92,10 +92,31 @@ type TransitionChain struct {
 }
 
 func (c TransitionChain) Tail() CredentialFingerprint {
-	if len(c.Transitions) > 0 {
-		return c.Transitions[len(c.Transitions)-1].Next
+	current := c.Cursor
+	for _, tr := range c.Transitions {
+		if tr.Prev.CompositeHash != current.CompositeHash {
+			break
+		}
+		if tr.Phase == TransitionApplied {
+			current = tr.Next
+		}
 	}
-	return c.Cursor
+	return current
+}
+func (c TransitionChain) SaveTail() (CredentialFingerprint, error) {
+	current := c.Cursor
+	for _, tr := range c.Transitions {
+		if tr.Prev.CompositeHash != current.CompositeHash {
+			continue
+		}
+		switch tr.Phase {
+		case TransitionApplied:
+			current = tr.Next
+		case TransitionPlanned, TransitionOutcomeUnknown:
+			return CredentialFingerprint{}, ErrCredentialUnresolved
+		}
+	}
+	return current, nil
 }
 func (c TransitionChain) Append(t CredentialTransition) TransitionChain {
 	return c.AppendAt(t, t.CreatedAt)
@@ -105,7 +126,7 @@ func (c TransitionChain) AppendAt(t CredentialTransition, now time.Time) Transit
 	if now.IsZero() {
 		now = t.CreatedAt
 	}
-	for len(c.Transitions) > 0 && !c.Transitions[0].CreatedAt.IsZero() && now.Sub(c.Transitions[0].CreatedAt) > 24*time.Hour {
+	for len(c.Transitions) > 0 && c.Transitions[0].Phase == TransitionApplied && !c.Transitions[0].CreatedAt.IsZero() && now.Sub(c.Transitions[0].CreatedAt) > 24*time.Hour {
 		c.Cursor = c.Transitions[0].Next
 		c.Transitions = c.Transitions[1:]
 	}

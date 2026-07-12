@@ -52,9 +52,10 @@ func (a *FenceAllocator) Next() (uint64, error) {
 				if s.FenceUnsafe {
 					return ErrFenceUnsafe
 				}
-				if s.ReservedCeiling >= newCeiling {
-					newCeiling = s.ReservedCeiling + FenceBlockSize
+				if s.ReservedCeiling > ^uint64(0)-FenceBlockSize {
+					return ErrFenceOverflow
 				}
+				newCeiling = s.ReservedCeiling + FenceBlockSize
 				s.ReservedCeiling = newCeiling
 				return nil
 			})

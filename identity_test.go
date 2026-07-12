@@ -157,3 +157,15 @@ func TestCredentialReachabilityIsContiguousAndAmbiguityScoped(t *testing.T) {
 		t.Fatal("relevant unresolved edge not ambiguous")
 	}
 }
+
+func TestExpiredNonAppliedEdgeNeverAdvancesCursor(t *testing.T) {
+	now := time.Now()
+	f0, f1 := fp("s", "0", "m"), fp("s", "1", "m")
+	for _, phase := range []TransitionPhase{TransitionAborted, TransitionPlanned, TransitionOutcomeUnknown} {
+		c := TransitionChain{Cursor: f0, Transitions: []CredentialTransition{{Prev: f0, Next: f1, Phase: phase, CreatedAt: now.Add(-25 * time.Hour)}}}
+		c = c.AppendAt(CredentialTransition{Prev: f0, Next: fp("s", "2", "m"), Phase: TransitionApplied, CreatedAt: now}, now)
+		if c.Cursor != f0 {
+			t.Fatalf("phase %s promoted next", phase)
+		}
+	}
+}

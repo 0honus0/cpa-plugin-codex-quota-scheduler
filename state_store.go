@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -17,7 +18,7 @@ type PersistentState struct {
 	ReservedCeiling  uint64                             `json:"reserved_ceiling"`
 	NextSaveSeq      uint64                             `json:"next_save_seq"`
 	CredentialChains map[AuthInstanceID]TransitionChain `json:"credential_chains,omitempty"`
-	FenceUnsafe      bool                               `json:"-"`
+	FenceUnsafe      bool                               `json:"fence_unsafe,omitempty"`
 }
 
 func NewPersistentState() PersistentState {
@@ -36,13 +37,16 @@ func clonePersistentState(s PersistentState) PersistentState {
 
 type RecoveryReport struct{ Migrated, ReadOnly, UsedBackup, RecoveredEmpty, FenceUnsafe bool }
 type FileHooks struct {
-	Observe func(string)
-	Fail    func(string) error
-	Replace func(string, string) error
-	SyncDir func(string) error
+	Observe  func(string)
+	Fail     func(string) error
+	Replace  func(string, string) error
+	SyncDir  func(string) error
+	ReadFile func(string) ([]byte, error)
 }
 
-func OSFileHooks() FileHooks { return FileHooks{Replace: replaceFileAtomic, SyncDir: syncDirectory} }
+func OSFileHooks() FileHooks {
+	return FileHooks{Replace: replaceFileAtomic, SyncDir: syncDirectory, ReadFile: os.ReadFile}
+}
 func (h FileHooks) event(op string) error {
 	if h.Observe != nil {
 		h.Observe(op)
@@ -70,6 +74,9 @@ func NewStateStore(path string, hooks FileHooks, crash CrashHitter) *StateStore 
 	if hooks.SyncDir == nil {
 		hooks.SyncDir = defaults.SyncDir
 	}
+	if hooks.ReadFile == nil {
+		hooks.ReadFile = defaults.ReadFile
+	}
 	return &StateStore{path: path, hooks: hooks, crash: crash}
 }
 func (s *StateStore) hit(name string) error {
@@ -84,22 +91,28 @@ func (s *StateStore) Load() (PersistentState, RecoveryReport, error) {
 	return s.loadLocked()
 }
 func (s *StateStore) loadLocked() (PersistentState, RecoveryReport, error) {
-	state, err := readPersistentState(s.path)
+	state, err := s.readPersistentState(s.path)
 	report := RecoveryReport{}
 	if err != nil {
 		primaryErr := err
-		state, err = readPersistentState(s.path + ".bak")
+		if !errors.Is(primaryErr, os.ErrNotExist) && !isStateCorruption(primaryErr) {
+			return PersistentState{}, report, primaryErr
+		}
+		state, err = s.readPersistentState(s.path + ".bak")
 		if err == nil {
 			report.UsedBackup = true
 		} else if errors.Is(primaryErr, os.ErrNotExist) && errors.Is(err, os.ErrNotExist) {
 			state = NewPersistentState()
+		} else if !errors.Is(err, os.ErrNotExist) && !isStateCorruption(err) {
+			return PersistentState{}, report, err
 		} else {
 			state = NewPersistentState()
 			state.FenceUnsafe = true
 			report.RecoveredEmpty = true
 			report.FenceUnsafe = true
-			s.state = state
-			s.loaded = true
+			if writeErr := s.writeLocked(state); writeErr != nil {
+				return PersistentState{}, report, writeErr
+			}
 			return clonePersistentState(state), report, nil
 		}
 	}
@@ -116,16 +129,23 @@ func (s *StateStore) loadLocked() (PersistentState, RecoveryReport, error) {
 	}
 	s.state = state
 	s.loaded = true
+	if state.FenceUnsafe {
+		report.FenceUnsafe = true
+	}
 	return clonePersistentState(state), report, nil
 }
-func readPersistentState(path string) (PersistentState, error) {
-	raw, err := os.ReadFile(path)
+
+var errStateCorrupt = errors.New("state corrupt")
+
+func isStateCorruption(err error) bool { return errors.Is(err, errStateCorrupt) }
+func (s *StateStore) readPersistentState(path string) (PersistentState, error) {
+	raw, err := s.hooks.ReadFile(path)
 	if err != nil {
 		return PersistentState{}, err
 	}
 	var st PersistentState
 	if err = json.Unmarshal(raw, &st); err != nil {
-		return PersistentState{}, err
+		return PersistentState{}, fmt.Errorf("%w: %v", errStateCorrupt, err)
 	}
 	return st, nil
 }
@@ -162,6 +182,9 @@ func (s *StateStore) writeLocked(state PersistentState) error {
 	if s.readOnly {
 		return ErrStateReadOnly
 	}
+	if s.loaded && s.state.FenceUnsafe {
+		state.FenceUnsafe = true
+	}
 	state.SchemaVersion = CurrentStateSchema
 	if state.CredentialChains == nil {
 		state.CredentialChains = map[AuthInstanceID]TransitionChain{}
@@ -175,8 +198,11 @@ func (s *StateStore) writeLocked(state PersistentState) error {
 	if err = os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
-	current, readErr := os.ReadFile(s.path)
+	current, readErr := s.hooks.ReadFile(s.path)
 	if readErr != nil {
+		if !errors.Is(readErr, os.ErrNotExist) {
+			return readErr
+		}
 		current = raw
 	}
 	if err = s.writeAtomic(s.path+".bak", current, "backup"); err != nil {

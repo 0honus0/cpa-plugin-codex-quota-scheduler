@@ -150,6 +150,54 @@ func TestDualCorruptionMarksFenceUnsafe(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+func TestFenceQuarantineSurvivesCredentialUpdateAndRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	os.WriteFile(path, []byte("bad"), 0600)
+	os.WriteFile(path+".bak", []byte("bad"), 0600)
+	store := NewStateStore(path, OSFileHooks(), nil)
+	state, _, _ := store.Load()
+	if err := store.Update(func(s *PersistentState) error { s.NextSaveSeq = 1; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	restart := NewStateStore(path, OSFileHooks(), nil)
+	state, report, err := restart.Load()
+	if err != nil || !report.FenceUnsafe {
+		t.Fatalf("report=%+v err=%v", report, err)
+	}
+	if _, err := NewFenceAllocator(restart, state, nil).Next(); !errors.Is(err, ErrFenceUnsafe) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestStateStoreReadErrorPropagatesWithoutTouchingBackup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	backup := []byte(`{"schema_version":1,"reserved_ceiling":77}`)
+	os.WriteFile(path+".bak", backup, 0600)
+	hooks := OSFileHooks()
+	hooks.ReadFile = func(name string) ([]byte, error) {
+		if name == path {
+			return nil, os.ErrPermission
+		}
+		return os.ReadFile(name)
+	}
+	store := NewStateStore(path, hooks, nil)
+	if _, _, err := store.Load(); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("err=%v", err)
+	}
+	after, _ := os.ReadFile(path + ".bak")
+	if !bytes.Equal(after, backup) {
+		t.Fatal("backup changed")
+	}
+}
+
+func TestFenceOverflowUsesAuthoritativeCurrentCeiling(t *testing.T) {
+	store := NewStateStore(filepath.Join(t.TempDir(), "state.json"), OSFileHooks(), nil)
+	state, _, _ := store.Load()
+	_ = store.Update(func(s *PersistentState) error { s.ReservedCeiling = ^uint64(0) - FenceBlockSize + 1; return nil })
+	if _, err := NewFenceAllocator(store, state, nil).Next(); !errors.Is(err, ErrFenceOverflow) {
+		t.Fatalf("err=%v", err)
+	}
+}
 func TestMissingFreshStateAllowsInitialFenceReservation(t *testing.T) {
 	store := NewStateStore(filepath.Join(t.TempDir(), "state.json"), OSFileHooks(), nil)
 	state, report, err := store.Load()
@@ -191,7 +239,7 @@ func TestCredentialAndFenceConcurrentMutationsPreserveBoth(t *testing.T) {
 	store := NewStateStore(filepath.Join(t.TempDir(), "state.json"), OSFileHooks(), nil)
 	state, _, _ := store.Load()
 	prev := HostAuth{Fingerprint: fp("s", "0", "m")}
-	manager := NewCredentialManager(store, &walHost{current: prev}, time.Now, nil)
+	manager := mustCredentialManager(t, store, &walHost{current: prev}, time.Now, nil)
 	manager.SetChain(1, TransitionChain{Cursor: prev.Fingerprint})
 	fence := NewFenceAllocator(store, state, nil)
 	var wg sync.WaitGroup
