@@ -10,6 +10,10 @@ import (
 
 const CurrentUserDataSchema = 1
 
+var ErrUserDataFutureSchema = errors.New("user data schema is newer than supported")
+
+type UserDataRecoveryReport struct{ Migrated, UsedBackup, RecoveredDefault bool }
+
 type SemanticStatePaths struct{ Legacy, UserData, Runtime string }
 
 func semanticStatePaths(legacy string) SemanticStatePaths {
@@ -41,6 +45,12 @@ func loadUserDataWithMigration(paths SemanticStatePaths, hooks FileHooks, crash 
 	if err != nil {
 		return PluginDiskState{}, false, err
 	}
+	//kpoint:K_USER_MIGRATION_AFTER_READBACK
+	if crash != nil {
+		if err := crash.Hit("K_USER_MIGRATION_AFTER_READBACK"); err != nil {
+			return PluginDiskState{}, false, err
+		}
+	}
 	want, _ := json.Marshal(normalizePluginDiskState(legacy))
 	got, _ := json.Marshal(verified)
 	if string(want) != string(got) {
@@ -66,18 +76,74 @@ func loadUserDataWithMigration(paths SemanticStatePaths, hooks FileHooks, crash 
 }
 
 func loadUserData(path string) (PluginDiskState, bool, error) {
+	state, loaded, _, err := loadUserDataRecover(path)
+	return state, loaded, err
+}
+
+func loadUserDataRecover(path string) (PluginDiskState, bool, UserDataRecoveryReport, error) {
+	report := UserDataRecoveryReport{}
 	state, loaded, err := readUserData(path)
 	if err == nil {
-		return state, loaded, nil
+		raw, _ := os.ReadFile(path)
+		var env userDataEnvelope
+		_ = json.Unmarshal(raw, &env)
+		if loaded && env.SchemaVersion < CurrentUserDataSchema {
+			if werr := SaveUserData(path, state); werr != nil {
+				return PluginDiskState{}, false, report, werr
+			}
+			report.Migrated = true
+		}
+		return state, loaded, report, nil
+	}
+	if errors.Is(err, ErrUserDataFutureSchema) {
+		return PluginDiskState{}, false, report, err
 	}
 	backup, backupLoaded, backupErr := readUserData(path + ".bak")
 	if backupErr == nil {
-		return backup, backupLoaded, nil
+		if !errors.Is(err, os.ErrNotExist) {
+			if qerr := quarantineUserArtifact(path); qerr != nil {
+				return PluginDiskState{}, false, report, qerr
+			}
+		}
+		if werr := SaveUserData(path, backup); werr != nil {
+			return PluginDiskState{}, false, report, werr
+		}
+		report.UsedBackup = true
+		return backup, backupLoaded, report, nil
 	}
 	if errors.Is(err, os.ErrNotExist) && errors.Is(backupErr, os.ErrNotExist) {
-		return normalizePluginDiskState(PluginDiskState{Config: DefaultConfig()}), false, nil
+		return normalizePluginDiskState(PluginDiskState{Config: DefaultConfig()}), false, report, nil
 	}
-	return PluginDiskState{}, false, err
+	if !errors.Is(err, os.ErrNotExist) {
+		if qerr := quarantineUserArtifact(path); qerr != nil {
+			return PluginDiskState{}, false, report, qerr
+		}
+	}
+	if !errors.Is(backupErr, os.ErrNotExist) {
+		if qerr := quarantineUserArtifact(path + ".bak"); qerr != nil {
+			return PluginDiskState{}, false, report, qerr
+		}
+	}
+	report.RecoveredDefault = true
+	return normalizePluginDiskState(PluginDiskState{Config: DefaultConfig()}), false, report, nil
+}
+
+func quarantineUserArtifact(path string) error {
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	target := path + ".corrupt"
+	if _, err := os.Stat(target); err == nil {
+		return fmt.Errorf("corrupt evidence already exists: %s", target)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := replaceFileAtomic(path, target); err != nil {
+		return err
+	}
+	return syncDirectory(filepath.Dir(path))
 }
 
 func readUserData(path string) (PluginDiskState, bool, error) {
@@ -93,7 +159,7 @@ func readUserData(path string) (PluginDiskState, bool, error) {
 		return PluginDiskState{}, false, err
 	}
 	if env.SchemaVersion > CurrentUserDataSchema {
-		return PluginDiskState{}, false, fmt.Errorf("unsupported user data schema %d", env.SchemaVersion)
+		return PluginDiskState{}, false, fmt.Errorf("%w: %d", ErrUserDataFutureSchema, env.SchemaVersion)
 	}
 	return normalizePluginDiskState(PluginDiskState{Config: env.Config, Accounts: env.Accounts, Groups: env.Groups}), true, nil
 }
@@ -125,10 +191,16 @@ func writeUserDataAtomic(path string, state PluginDiskState, hooks FileHooks, cr
 	} else if readErr != nil {
 		return readErr
 	}
-	if err := writeUserArtifactAtomic(path+".bak", current, hooks); err != nil {
+	if err := writeUserArtifactAtomic(path+".bak", current, hooks, crash); err != nil {
 		return err
 	}
 	tmp := path + ".tmp"
+	//kpoint:K_USER_PRIMARY_TEMP_WRITE
+	if crash != nil {
+		if err := crash.Hit("K_USER_PRIMARY_TEMP_WRITE"); err != nil {
+			return err
+		}
+	}
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
@@ -136,6 +208,13 @@ func writeUserDataAtomic(path string, state PluginDiskState, hooks FileHooks, cr
 	if _, err = f.Write(raw); err != nil {
 		_ = f.Close()
 		return err
+	}
+	//kpoint:K_USER_PRIMARY_TEMP_FSYNC
+	if crash != nil {
+		if err := crash.Hit("K_USER_PRIMARY_TEMP_FSYNC"); err != nil {
+			_ = f.Close()
+			return err
+		}
 	}
 	if err = f.Sync(); err != nil {
 		_ = f.Close()
@@ -159,11 +238,32 @@ func writeUserDataAtomic(path string, state PluginDiskState, hooks FileHooks, cr
 			return err
 		}
 	}
-	return hooks.SyncDir(filepath.Dir(path))
+	//kpoint:K_USER_PRIMARY_DIR_FSYNC
+	if crash != nil {
+		if err := crash.Hit("K_USER_PRIMARY_DIR_FSYNC"); err != nil {
+			return err
+		}
+	}
+	if err := hooks.SyncDir(filepath.Dir(path)); err != nil {
+		return err
+	}
+	//kpoint:K_USER_AFTER_PRIMARY_DIR_FSYNC
+	if crash != nil {
+		if err := crash.Hit("K_USER_AFTER_PRIMARY_DIR_FSYNC"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-func writeUserArtifactAtomic(path string, raw []byte, hooks FileHooks) error {
+func writeUserArtifactAtomic(path string, raw []byte, hooks FileHooks, crash CrashHitter) error {
 	tmp := path + ".tmp"
+	//kpoint:K_USER_BACKUP_TEMP_WRITE
+	if crash != nil {
+		if err := crash.Hit("K_USER_BACKUP_TEMP_WRITE"); err != nil {
+			return err
+		}
+	}
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
@@ -172,6 +272,13 @@ func writeUserArtifactAtomic(path string, raw []byte, hooks FileHooks) error {
 		_ = f.Close()
 		return err
 	}
+	//kpoint:K_USER_BACKUP_TEMP_FSYNC
+	if crash != nil {
+		if err := crash.Hit("K_USER_BACKUP_TEMP_FSYNC"); err != nil {
+			_ = f.Close()
+			return err
+		}
+	}
 	if err = f.Sync(); err != nil {
 		_ = f.Close()
 		return err
@@ -179,10 +286,37 @@ func writeUserArtifactAtomic(path string, raw []byte, hooks FileHooks) error {
 	if err = f.Close(); err != nil {
 		return err
 	}
+	//kpoint:K_USER_BACKUP_BEFORE_REPLACE
+	if crash != nil {
+		if err := crash.Hit("K_USER_BACKUP_BEFORE_REPLACE"); err != nil {
+			return err
+		}
+	}
 	if err = hooks.Replace(tmp, path); err != nil {
 		return err
 	}
-	return hooks.SyncDir(filepath.Dir(path))
+	//kpoint:K_USER_BACKUP_AFTER_REPLACE
+	if crash != nil {
+		if err := crash.Hit("K_USER_BACKUP_AFTER_REPLACE"); err != nil {
+			return err
+		}
+	}
+	//kpoint:K_USER_BACKUP_DIR_FSYNC
+	if crash != nil {
+		if err := crash.Hit("K_USER_BACKUP_DIR_FSYNC"); err != nil {
+			return err
+		}
+	}
+	if err := hooks.SyncDir(filepath.Dir(path)); err != nil {
+		return err
+	}
+	//kpoint:K_USER_AFTER_BACKUP_DIR_FSYNC
+	if crash != nil {
+		if err := crash.Hit("K_USER_AFTER_BACKUP_DIR_FSYNC"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func SaveUserData(path string, state PluginDiskState) error {

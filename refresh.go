@@ -53,9 +53,11 @@ type QuotaRefresher struct {
 	bindings     *BindingRegistry
 	credentials  *CredentialManager
 	roster       HostRosterSnapshot
+	rosterMu     sync.RWMutex
 
 	mu                sync.Mutex
 	running           bool
+	startRequested    bool
 	refreshing        bool
 	stopping          bool
 	stop              chan struct{}
@@ -91,7 +93,57 @@ func (r *QuotaRefresher) BootstrapBinding(ctx context.Context, authID string) (R
 	if r == nil || r.bindings == nil || r.credentials == nil {
 		return RuntimeBinding{}, false, errors.New("runtime wiring unavailable")
 	}
-	return r.bindings.ObserveAuthoritative(ctx, r.roster, authID, r.credentials.host)
+	return r.bindings.ObserveAuthoritative(ctx, r.runtimeRoster(), authID, r.credentials.host)
+}
+
+func (r *QuotaRefresher) runtimeRoster() HostRosterSnapshot {
+	r.rosterMu.RLock()
+	defer r.rosterMu.RUnlock()
+	return r.roster
+}
+func (r *QuotaRefresher) runtimeAuthorized() bool {
+	return r.runtimeStore == nil || r.runtimeRoster().Capability == CapabilityA
+}
+func (r *QuotaRefresher) PublishAuthoritativeRoster(ctx context.Context, roster HostRosterSnapshot) error {
+	if r == nil || r.bindings == nil || r.credentials == nil {
+		return errors.New("runtime wiring unavailable")
+	}
+	_, ids, ok := HighestCodexTier(roster.Entries)
+	if roster.Capability != CapabilityA || !ok {
+		r.rosterMu.Lock()
+		r.roster = HostRosterSnapshot{Capability: CapabilityB}
+		r.rosterMu.Unlock()
+		return ErrCapabilityB
+	}
+	allowed := map[string]struct{}{}
+	for _, id := range ids {
+		allowed[id] = struct{}{}
+	}
+	filtered := roster
+	filtered.Entries = nil
+	for _, entry := range roster.Entries {
+		if _, yes := allowed[entry.ID]; yes {
+			filtered.Entries = append(filtered.Entries, entry)
+		}
+	}
+	r.rosterMu.Lock()
+	r.roster = filtered
+	r.rosterMu.Unlock()
+	if adapter, ok := r.credentials.host.(*rosterCredentialHost); ok {
+		adapter.setRoster(filtered)
+	}
+	for _, id := range ids {
+		if _, _, err := r.bindings.ObserveAuthoritative(ctx, filtered, id, r.credentials.host); err != nil {
+			return err
+		}
+	}
+	r.mu.Lock()
+	requested := r.startRequested
+	r.mu.Unlock()
+	if requested {
+		r.Start()
+	}
+	return nil
 }
 
 func NewQuotaRefresher(host HostClient, state *PluginState, now func() time.Time) *QuotaRefresher {
@@ -119,6 +171,9 @@ func NewQuotaRefresher(host HostClient, state *PluginState, now func() time.Time
 }
 
 func (r *QuotaRefresher) RefreshOnce() error {
+	if !r.runtimeAuthorized() {
+		return ErrCapabilityB
+	}
 	_, version := r.state.CPAAdmissionVersioned()
 	return r.refreshOnce(version)
 }
@@ -149,6 +204,9 @@ func (r *QuotaRefresher) refreshOnce(version uint64) error {
 }
 
 func (r *QuotaRefresher) RefreshDueOnce() error {
+	if !r.runtimeAuthorized() {
+		return ErrCapabilityB
+	}
 	_, version := r.state.CPAAdmissionVersioned()
 	return r.refreshDueOnce(version)
 }
@@ -332,6 +390,9 @@ func (r *QuotaRefresher) refreshAuths(eligible []pluginapi.HostAuthFileEntry, ve
 }
 
 func (r *QuotaRefresher) RefreshOneAuthID(authID string) error {
+	if !r.runtimeAuthorized() {
+		return ErrCapabilityB
+	}
 	authID = strings.TrimSpace(authID)
 	if authID == "" {
 		return fmt.Errorf("auth_id is required")
@@ -374,6 +435,9 @@ func (r *QuotaRefresher) refreshOneAuthIDVersioned(authID string, version uint64
 }
 
 func (r *QuotaRefresher) RefreshOneSoon(authID string) {
+	if !r.runtimeAuthorized() {
+		return
+	}
 	_, version, _ := r.state.AdmittedCPAPriorityVersioned(strings.TrimSpace(authID))
 	r.mu.Lock()
 	if r.refreshing || r.stopping {
@@ -400,6 +464,12 @@ func (r *QuotaRefresher) RefreshOneSoon(authID string) {
 }
 
 func (r *QuotaRefresher) Start() {
+	r.mu.Lock()
+	r.startRequested = true
+	r.mu.Unlock()
+	if !r.runtimeAuthorized() {
+		return
+	}
 	r.mu.Lock()
 	if r.running {
 		r.mu.Unlock()
@@ -523,6 +593,9 @@ func (r *QuotaRefresher) Stop() {
 }
 
 func (r *QuotaRefresher) RefreshSoon() {
+	if !r.runtimeAuthorized() {
+		return
+	}
 	r.mu.Lock()
 	if r.refreshing || r.stopping {
 		r.mu.Unlock()
@@ -545,6 +618,9 @@ func (r *QuotaRefresher) RefreshSoon() {
 }
 
 func (r *QuotaRefresher) RefreshDueSoon() {
+	if !r.runtimeAuthorized() {
+		return
+	}
 	_, version := r.state.CPAAdmissionVersioned()
 	r.refreshDueSoon(version, func() error {
 		return r.refreshDueOnce(version)
@@ -552,6 +628,9 @@ func (r *QuotaRefresher) RefreshDueSoon() {
 }
 
 func (r *QuotaRefresher) RefreshDueCandidatesSoon(req pluginapi.SchedulerPickRequest, version uint64) {
+	if !r.runtimeAuthorized() {
+		return
+	}
 	_ = req
 	r.refreshDueSoon(version, func() error {
 		return r.refreshDueCandidatesOnce(version)
@@ -765,6 +844,19 @@ func (r *QuotaRefresher) listAuthsWithAdmissionPermit(version uint64) ([]plugina
 	if !r.state.BeginCPAAdmissionVersionCall(version) {
 		return nil, errCPAAdmissionChanged
 	}
+	if r.runtimeStore != nil {
+		roster := r.runtimeRoster()
+		if roster.Capability != CapabilityA {
+			return nil, ErrCapabilityB
+		}
+		out := make([]pluginapi.HostAuthFileEntry, 0, len(roster.Entries))
+		for _, e := range roster.Entries {
+			if e.Priority != nil {
+				out = append(out, pluginapi.HostAuthFileEntry{ID: e.ID, AuthIndex: e.AuthIndex, Provider: e.Provider, Priority: *e.Priority})
+			}
+		}
+		return out, nil
+	}
 	return r.host.ListAuths()
 }
 
@@ -879,7 +971,16 @@ func (r *QuotaRefresher) refreshAndSaveCredentials(authResp pluginapi.HostAuthGe
 	if name == "" {
 		return CodexCredentials{}, errors.New("auth file name is required to save refreshed token")
 	}
-	if err := r.saveAuthWithAdmissionPermit(authID, version, name, updated); err != nil {
+	if r.credentials != nil && r.bindings != nil {
+		binding, ok := r.bindings.Lookup(authID)
+		if !ok {
+			return CodexCredentials{}, ErrBindingNotRosterConfirmed
+		}
+		next := HostAuth{Name: name, Raw: updated, Fingerprint: NewCredentialFingerprint(refreshed.ChatGPTAccountID, refreshed.RefreshToken, binding.AuthIndex)}
+		if _, err := r.credentials.SaveVersioned(context.Background(), binding.Instance, next, binding.ExecutionToken(r.nextFence)); err != nil {
+			return CodexCredentials{}, err
+		}
+	} else if err := r.saveAuthWithAdmissionPermit(authID, version, name, updated); err != nil {
 		return CodexCredentials{}, err
 	}
 	r.recordAdmissionLog(authID, version, "info", "quota.token_refreshed", "Codex access token refreshed and saved", map[string]any{"auth_file": name})

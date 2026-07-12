@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -88,7 +89,7 @@ func TestUserDataRecoversFromAtomicBackup(t *testing.T) {
 }
 
 func TestUserDataMigrationCrashPointsConverge(t *testing.T) {
-	points := []string{"K_USER_MIGRATION_BEFORE_NEW_RENAME", "K_USER_MIGRATION_AFTER_NEW_RENAME", "K_USER_MIGRATION_BEFORE_LEGACY_RENAME", "K_USER_MIGRATION_AFTER_LEGACY_RENAME"}
+	points := []string{"K_USER_MIGRATION_BEFORE_NEW_RENAME", "K_USER_MIGRATION_AFTER_NEW_RENAME", "K_USER_MIGRATION_BEFORE_LEGACY_RENAME", "K_USER_MIGRATION_AFTER_LEGACY_RENAME", "K_USER_MIGRATION_AFTER_READBACK", "K_USER_PRIMARY_TEMP_WRITE", "K_USER_PRIMARY_TEMP_FSYNC", "K_USER_BACKUP_TEMP_WRITE", "K_USER_BACKUP_TEMP_FSYNC", "K_USER_BACKUP_BEFORE_REPLACE", "K_USER_BACKUP_AFTER_REPLACE", "K_USER_PRIMARY_DIR_FSYNC", "K_USER_AFTER_PRIMARY_DIR_FSYNC", "K_USER_BACKUP_DIR_FSYNC", "K_USER_AFTER_BACKUP_DIR_FSYNC"}
 	for _, point := range points {
 		t.Run(point, func(t *testing.T) {
 			dir := t.TempDir()
@@ -132,7 +133,18 @@ func TestRuntimeAndUserArtifactsNeverPersistSensitiveValues(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	for _, suffix := range []string{"", ".bak", ".tmp", ".corrupt"} {
+	for _, base := range []string{paths.Runtime, paths.UserData} {
+		primary, err := os.ReadFile(base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, suffix := range []string{".tmp", ".corrupt", ".migrated"} {
+			if err := os.WriteFile(base+suffix, primary, 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, suffix := range []string{"", ".bak", ".tmp", ".corrupt", ".migrated"} {
 		for _, base := range []string{paths.Runtime, paths.UserData} {
 			raw, err := os.ReadFile(base + suffix)
 			if errors.Is(err, os.ErrNotExist) {
@@ -163,7 +175,7 @@ func TestProbeAttemptSeamRuntimeRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ProbeAttempts[7].AttemptID != want.AttemptID || got.ProbeAttempts[7].Phase != want.Phase || got.ProbeAttempts[7].SentAt == nil {
+	if !reflect.DeepEqual(got.ProbeAttempts[7], want) {
 		t.Fatalf("round trip = %#v", got.ProbeAttempts[7])
 	}
 }
@@ -242,7 +254,9 @@ func TestBindingGenesisFailsClosedForCapabilityBAndAuthBlocked(t *testing.T) { /
 	if host.gets != 0 || host.saves != 0 {
 		t.Fatalf("Capability-B made calls: get=%d save=%d", host.gets, host.saves)
 	}
-	registry.MarkAuthBlocked("auth-a")
+	if err := registry.MarkAuthBlocked("auth-a"); err != nil {
+		t.Fatal(err)
+	}
 	roster := HostRosterSnapshot{Capability: CapabilityA, Entries: []RosterEntry{{ID: "auth-a", AuthIndex: "idx", Provider: "codex", Priority: intPtr(1)}}}
 	host.current[legacyAuthInstanceID("auth-a")] = HostAuth{Fingerprint: fp("s", "r", "m")}
 	binding, _, err := registry.ObserveAuthoritative(context.Background(), roster, "auth-a", host)
@@ -262,6 +276,31 @@ func TestBindingGenesisFailsClosedForCapabilityBAndAuthBlocked(t *testing.T) { /
 	recovered, ok := fresh.Lookup("auth-a")
 	if !ok || !recovered.AuthBlocked {
 		t.Fatalf("primary deletion bypassed AuthBlocked: %#v ok=%v", recovered, ok)
+	}
+}
+
+func TestMarkAuthBlockedPropagatesFirstWriteAndBackupFailures(t *testing.T) {
+	for _, op := range []string{"backup-write", "backup-fsync"} {
+		t.Run(op, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), ".runtime-state.json")
+			hooks := OSFileHooks()
+			hooks.Fail = func(got string) error {
+				if got == op {
+					return errors.New("injected " + op)
+				}
+				return nil
+			}
+			registry, err := NewBindingRegistry(NewStateStore(path, hooks, nil))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := registry.MarkAuthBlocked("a"); err == nil {
+				t.Fatal("expected persistence error")
+			}
+			if _, ok := registry.Lookup("a"); ok {
+				t.Fatal("failed persistence mutated registry")
+			}
+		})
 	}
 }
 
@@ -318,6 +357,198 @@ func TestRuntimeConstructionFailureAuthorizesZeroExternalCalls(t *testing.T) {
 	}
 }
 
+func TestProductionRefresherCapabilityBActualPathMakesZeroCalls(t *testing.T) {
+	host := &countingProductionHost{}
+	adapter := &rosterCredentialHost{host: host, roster: HostRosterSnapshot{Capability: CapabilityB}}
+	r, err := NewProductionQuotaRefresher(host, NewPluginState(DefaultConfig()), adapter, HostRosterSnapshot{Capability: CapabilityB}, filepath.Join(t.TempDir(), "state.json"), time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.bindings = r.bindings
+	r.Start()
+	defer r.Stop()
+	if err := r.RefreshOnce(); !errors.Is(err, ErrCapabilityB) {
+		t.Fatalf("RefreshOnce err=%v", err)
+	}
+	r.RefreshSoon()
+	r.RefreshDueSoon()
+	r.RefreshOneSoon("candidate")
+	r.RefreshDueCandidatesSoon(pluginapi.SchedulerPickRequest{}, 0)
+	if host.total() != 0 {
+		t.Fatalf("Capability-B production calls=%#v", host)
+	}
+}
+
+func TestProductionRosterPublicationBootstrapsHighestTierAndUsesWAL(t *testing.T) {
+	host := &countingProductionHost{httpResp: pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(`{"access_token":"new","refresh_token":"r1","account_id":"acct"}`)}, auth: map[string]pluginapi.HostAuthGetResponse{
+		"high": {AuthIndex: "high", Name: "high.json", JSON: json.RawMessage(`{"access_token":"old","refresh_token":"r0","account_id":"acct"}`)},
+		"low":  {AuthIndex: "low", Name: "low.json", JSON: json.RawMessage(`{"access_token":"old","refresh_token":"r-low","account_id":"low"}`)},
+	}}
+	adapter := &rosterCredentialHost{host: host, roster: HostRosterSnapshot{Capability: CapabilityB}}
+	r, err := NewProductionQuotaRefresher(host, NewPluginState(DefaultConfig()), adapter, HostRosterSnapshot{Capability: CapabilityB}, filepath.Join(t.TempDir(), "state.json"), time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.bindings = r.bindings
+	r.Start()
+	defer r.Stop()
+	roster := HostRosterSnapshot{Capability: CapabilityA, Entries: []RosterEntry{{ID: "low", AuthIndex: "low", Provider: "codex", Priority: intPtr(1)}, {ID: "high", AuthIndex: "high", Provider: "codex", Priority: intPtr(9)}}}
+	if err := r.PublishAuthoritativeRoster(context.Background(), roster); err != nil {
+		t.Fatal(err)
+	}
+	r.mu.Lock()
+	running := r.running
+	r.mu.Unlock()
+	if !running {
+		t.Fatal("A publication did not activate requested runtime")
+	}
+	if _, ok := r.bindings.Lookup("high"); !ok {
+		t.Fatal("highest-tier binding missing")
+	}
+	if _, ok := r.bindings.Lookup("low"); ok {
+		t.Fatal("lower-tier binding bootstrapped")
+	}
+	version := r.state.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 9, AuthIDs: map[string]struct{}{"high": {}}})
+	current := CodexCredentials{AccessToken: "old", RefreshToken: "r0", ChatGPTAccountID: "acct", ExpiresAt: time.Unix(1, 0)}
+	if _, err := r.refreshAndSaveCredentials(host.auth["high"], current, "high", version); err != nil {
+		t.Fatal(err)
+	}
+	if host.save != 1 || host.savedName != "high.json" {
+		t.Fatalf("save=%d name=%q", host.save, host.savedName)
+	}
+}
+
+type countingProductionHost struct {
+	list, get, http, save, probe int
+	auth                         map[string]pluginapi.HostAuthGetResponse
+	savedName                    string
+	httpResp                     pluginapi.HTTPResponse
+}
+
+func (h *countingProductionHost) total() int { return h.list + h.get + h.http + h.save + h.probe }
+func (h *countingProductionHost) ListAuths() ([]pluginapi.HostAuthFileEntry, error) {
+	h.list++
+	return nil, nil
+}
+func (h *countingProductionHost) GetAuth(i string) (pluginapi.HostAuthGetResponse, error) {
+	h.get++
+	return h.auth[i], nil
+}
+func (h *countingProductionHost) SaveAuth(n string, _ json.RawMessage) error {
+	h.save++
+	h.savedName = n
+	return nil
+}
+func (h *countingProductionHost) Do(req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
+	h.http++
+	if req.URL == codexResetProbeEndpoint {
+		h.probe++
+	}
+	return h.httpResp, nil
+}
+func (h *countingProductionHost) Log(string, string, map[string]any) {}
+
+func TestStateStoreQuarantinesCorruptionAndRepairsFromBackup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".runtime-state.json")
+	store := NewStateStore(path, OSFileHooks(), nil)
+	if _, err := store.Update(func(s *PersistentState) error { s.ReservedCeiling = 7; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update(func(s *PersistentState) error { s.ReservedCeiling = 8; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{bad-primary"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fresh := NewStateStore(path, OSFileHooks(), nil)
+	got, report, err := fresh.Load()
+	if err != nil || !report.UsedBackup || got.ReservedCeiling != 7 {
+		t.Fatalf("got=%#v report=%#v err=%v", got, report, err)
+	}
+	if raw, err := os.ReadFile(path + ".corrupt"); err != nil || string(raw) != "{bad-primary" {
+		t.Fatalf("primary evidence=%q err=%v", raw, err)
+	}
+	if _, _, err := NewStateStore(path, OSFileHooks(), nil).Load(); err != nil {
+		t.Fatalf("repaired primary unreadable: %v", err)
+	}
+}
+
+func TestStateStoreDualCorruptionPreservesBothEvidenceAndFences(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".runtime-state.json")
+	os.WriteFile(path, []byte("{p"), 0600)
+	os.WriteFile(path+".bak", []byte("{b"), 0600)
+	got, report, err := NewStateStore(path, OSFileHooks(), nil).Load()
+	if err != nil || !report.FenceUnsafe || !got.FenceUnsafe {
+		t.Fatalf("got=%#v report=%#v err=%v", got, report, err)
+	}
+	for name, want := range map[string]string{path + ".corrupt": "{p", path + ".bak.corrupt": "{b"} {
+		raw, e := os.ReadFile(name)
+		if e != nil || string(raw) != want {
+			t.Fatalf("%s=%q err=%v", name, raw, e)
+		}
+	}
+}
+
+func TestUserDataSchemaMigrationAndCorruptionEvidence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".user-data.json")
+	if err := os.WriteFile(path, []byte(`{"schema_version":0,"config":{},"accounts":{"a":{"alias":"old"}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, loaded, err := loadUserData(path)
+	if err != nil || !loaded || got.Accounts["a"].Alias != "old" {
+		t.Fatalf("got=%#v loaded=%v err=%v", got, loaded, err)
+	}
+	raw, _ := os.ReadFile(path)
+	var env struct {
+		SchemaVersion int `json:"schema_version"`
+	}
+	json.Unmarshal(raw, &env)
+	if env.SchemaVersion != CurrentUserDataSchema {
+		t.Fatalf("schema=%d raw=%s", env.SchemaVersion, raw)
+	}
+	if err := SaveUserData(path, PluginDiskState{Config: DefaultConfig(), Accounts: map[string]AccountAnnotation{"a": {Alias: "new"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{bad-user"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := loadUserData(path); err != nil {
+		t.Fatal(err)
+	}
+	evidence, e := os.ReadFile(path + ".corrupt")
+	if e != nil || string(evidence) != "{bad-user" {
+		t.Fatalf("evidence=%q err=%v", evidence, e)
+	}
+}
+
+func TestUserDataFutureSchemaFailsSafeAndDualCorruptionPreservesEvidence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".user-data.json")
+	future := []byte(`{"schema_version":99,"config":{}}`)
+	if err := os.WriteFile(path, future, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := loadUserData(path); !errors.Is(err, ErrUserDataFutureSchema) {
+		t.Fatalf("future err=%v", err)
+	}
+	raw, _ := os.ReadFile(path)
+	if !reflect.DeepEqual(raw, future) {
+		t.Fatal("future schema rewritten")
+	}
+	os.Remove(path)
+	os.WriteFile(path, []byte("{p"), 0600)
+	os.WriteFile(path+".bak", []byte("{b"), 0600)
+	_, _, report, err := loadUserDataRecover(path)
+	if err != nil || !report.RecoveredDefault {
+		t.Fatalf("report=%#v err=%v", report, err)
+	}
+	for name, want := range map[string]string{path + ".corrupt": "{p", path + ".bak.corrupt": "{b"} {
+		got, e := os.ReadFile(name)
+		if e != nil || string(got) != want {
+			t.Fatalf("%s=%q err=%v", name, got, e)
+		}
+	}
+}
+
 func intPtr(v int) *int { return &v }
 
 func TestSuiteRuntimeWiring(t *testing.T) {
@@ -329,7 +560,14 @@ func TestSuiteRuntimeWiring(t *testing.T) {
 	t.Run("probe seam", TestProbeAttemptSeamRuntimeRoundTrip)
 	t.Run("genesis wal", TestBindingGenesisAndInjectedCredentialWAL)
 	t.Run("fail closed", TestBindingGenesisFailsClosedForCapabilityBAndAuthBlocked)
+	t.Run("blocked errors", TestMarkAuthBlockedPropagatesFirstWriteAndBackupFailures)
 	t.Run("production injection", TestQuotaRefresherProductionDependenciesAreInjected)
 	t.Run("adapter wal smoke", TestProductionRosterAdapterGenesisAndWALSmoke)
 	t.Run("construction failure", TestRuntimeConstructionFailureAuthorizesZeroExternalCalls)
+	t.Run("actual B path", TestProductionRefresherCapabilityBActualPathMakesZeroCalls)
+	t.Run("roster publication", TestProductionRosterPublicationBootstrapsHighestTierAndUsesWAL)
+	t.Run("runtime corruption repair", TestStateStoreQuarantinesCorruptionAndRepairsFromBackup)
+	t.Run("runtime dual corruption", TestStateStoreDualCorruptionPreservesBothEvidenceAndFences)
+	t.Run("user schema corruption", TestUserDataSchemaMigrationAndCorruptionEvidence)
+	t.Run("user future dual corruption", TestUserDataFutureSchemaFailsSafeAndDualCorruptionPreservesEvidence)
 }

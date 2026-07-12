@@ -4,12 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 )
 
 type rosterCredentialHost struct {
+	mu       sync.RWMutex
 	host     HostClient
 	bindings *BindingRegistry
 	roster   HostRosterSnapshot
+}
+
+func (h *rosterCredentialHost) setRoster(roster HostRosterSnapshot) {
+	h.mu.Lock()
+	h.roster = roster
+	h.mu.Unlock()
 }
 
 func (h *rosterCredentialHost) binding(instance AuthInstanceID) (RuntimeBinding, bool) {
@@ -28,7 +36,10 @@ func (h *rosterCredentialHost) binding(instance AuthInstanceID) (RuntimeBinding,
 func (h *rosterCredentialHost) GetAuth(_ context.Context, instance AuthInstanceID) (HostAuth, error) {
 	var b RuntimeBinding
 	var ok bool
-	for _, entry := range h.roster.Entries {
+	h.mu.RLock()
+	roster := h.roster
+	h.mu.RUnlock()
+	for _, entry := range roster.Entries {
 		if legacyAuthInstanceID(entry.ID) == instance {
 			b = RuntimeBinding{Instance: instance, AuthIndex: entry.AuthIndex}
 			ok = true

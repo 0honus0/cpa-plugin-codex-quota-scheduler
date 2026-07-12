@@ -70,6 +70,8 @@ func TestStateStoreBackupAndDualCorruptionRecovery(t *testing.T) {
 	if err != nil || !report.UsedBackup || got.ReservedCeiling != 7 {
 		t.Fatalf("got=%+v report=%+v err=%v", got, report, err)
 	}
+	os.Remove(path + ".corrupt")
+	os.WriteFile(path, []byte("bad-primary-again"), 0600)
 	os.WriteFile(path+".bak", []byte("bad"), 0600)
 	got, report, err = store.Load()
 	if err != nil || !report.RecoveredEmpty || got.SchemaVersion != CurrentStateSchema {

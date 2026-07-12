@@ -140,6 +140,12 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 	go func() {
 		snapshot := detectStartupHostRoster(context.Background(), ABIHostAuthLister{}, time.Now(), time.After)
 		hostRosterLatest.Store(&snapshot)
+		refresherMu.Lock()
+		runtime := globalRefresher
+		refresherMu.Unlock()
+		if runtime != nil {
+			_ = runtime.PublishAuthoritativeRoster(context.Background(), snapshot)
+		}
 	}()
 	plugin.abi_version = C.uint32_t(pluginabi.ABIVersion)
 	plugin.call = C.cliproxy_plugin_call_fn(C.cliproxyPluginCall)

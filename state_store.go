@@ -109,11 +109,31 @@ func (s *StateStore) loadLocked() (PersistentState, RecoveryReport, error) {
 		state, err = s.readPersistentState(s.path + ".bak")
 		if err == nil {
 			report.UsedBackup = true
+			if isStateCorruption(primaryErr) {
+				if qerr := s.quarantine(s.path); qerr != nil {
+					return PersistentState{}, report, qerr
+				}
+				raw, _ := json.MarshalIndent(state, "", "  ")
+				raw = append(raw, '\n')
+				if werr := s.writeAtomic(s.path, raw, "primary"); werr != nil {
+					return PersistentState{}, report, werr
+				}
+			}
 		} else if errors.Is(primaryErr, os.ErrNotExist) && errors.Is(err, os.ErrNotExist) {
 			state = NewPersistentState()
 		} else if !errors.Is(err, os.ErrNotExist) && !isStateCorruption(err) {
 			return PersistentState{}, report, err
 		} else {
+			if isStateCorruption(primaryErr) {
+				if qerr := s.quarantine(s.path); qerr != nil {
+					return PersistentState{}, report, qerr
+				}
+			}
+			if isStateCorruption(err) {
+				if qerr := s.quarantine(s.path + ".bak"); qerr != nil {
+					return PersistentState{}, report, qerr
+				}
+			}
 			state = NewPersistentState()
 			state.FenceUnsafe = true
 			report.RecoveredEmpty = true
@@ -147,6 +167,25 @@ func (s *StateStore) loadLocked() (PersistentState, RecoveryReport, error) {
 		report.FenceUnsafe = true
 	}
 	return clonePersistentState(state), report, nil
+}
+
+func (s *StateStore) quarantine(path string) error {
+	if _, err := s.hooks.ReadFile(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	target := path + ".corrupt"
+	if _, err := s.hooks.ReadFile(target); err == nil {
+		return fmt.Errorf("corrupt evidence already exists: %s", target)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := s.hooks.Replace(path, target); err != nil {
+		return err
+	}
+	return s.hooks.SyncDir(filepath.Dir(path))
 }
 
 var errStateCorrupt = errors.New("state corrupt")
@@ -190,12 +229,32 @@ func (s *StateStore) Update(fn func(*PersistentState) error) (PersistentState, e
 	}
 	return clonePersistentState(s.state), nil
 }
+func (s *StateStore) UpdateMirrored(fn func(*PersistentState) error) (PersistentState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.loaded {
+		if _, _, err := s.loadLocked(); err != nil {
+			return PersistentState{}, err
+		}
+	}
+	next := clonePersistentState(s.state)
+	if err := fn(&next); err != nil {
+		return PersistentState{}, err
+	}
+	if err := s.writeLockedMode(next, true); err != nil {
+		return PersistentState{}, err
+	}
+	return clonePersistentState(s.state), nil
+}
 func (s *StateStore) WriteThrough(state PersistentState) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.writeLocked(state)
 }
 func (s *StateStore) writeLocked(state PersistentState) error {
+	return s.writeLockedMode(state, false)
+}
+func (s *StateStore) writeLockedMode(state PersistentState, mirrorBackup bool) error {
 	if s.readOnly {
 		return ErrStateReadOnly
 	}
@@ -222,6 +281,10 @@ func (s *StateStore) writeLocked(state PersistentState) error {
 		return err
 	}
 	current, readErr := s.hooks.ReadFile(s.path)
+	if mirrorBackup {
+		current = raw
+		readErr = nil
+	}
 	if readErr != nil {
 		if !errors.Is(readErr, os.ErrNotExist) {
 			return readErr

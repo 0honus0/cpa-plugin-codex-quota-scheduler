@@ -92,3 +92,19 @@ Modified:
 
 - The production refresher captures the startup roster snapshot. Capability-B→A recovery/synchronization remains explicitly owned by S7 and is not implemented here.
 - The existing incomplete S3 seam remains untouched and unapproved, as required.
+
+## Review-fix wave
+
+The S2.5 review findings were addressed test-first in a follow-up wave:
+
+- **Actual production authorization:** Capability-B now blocks `Start`, all synchronous refresh entry points, and all `*Soon` asynchronous entry points before ListAuths/GetAuth/HTTP/SaveAuth/Probe. Runtime construction failure still leaves the global refresher disabled.
+- **First authoritative publication:** the asynchronous startup roster result is published into the live production refresher. The first B→A detection filters to the authoritative highest Codex tier, creates genesis bindings, and activates a previously requested start. Periodic/recovery synchronization remains S7-owned.
+- **Authoritative discovery:** wired production list discovery is synthesized only from the filtered authoritative roster and never calls unconstrained `host.auth.list` or scheduler candidates.
+- **WAL save path:** wired token refresh applies SaveAuth exclusively through the injected CredentialManager and roster host adapter. The production-path test exercises token HTTP, full binding token, WAL transition, and host SaveAuth.
+- **Runtime corruption:** corrupt primary evidence is atomically preserved as `.corrupt`; valid backup recovery repairs primary. Dual corruption preserves both `.corrupt` artifacts and writes fail-closed `FenceUnsafe` defaults.
+- **User-data corruption/schema:** schema 0 explicitly writes back current schema; future schema fails safely without rewrite. Corrupt-primary/valid-backup quarantines and repairs; dual corruption preserves both artifacts and returns explicit `UserDataRecoveryReport{RecoveredDefault:true}`.
+- **Write boundaries:** user-data primary/backup temp write, fsync, replace, directory fsync, migration readback, and legacy rename boundaries now have registered source-checked K-points and shared CrashController convergence coverage.
+- **AuthBlocked:** `MarkAuthBlocked` returns persistence errors and uses one mirrored StateStore update so primary and backup contain the blocked bit intrinsically. First-write/backup failure and restart preservation are covered.
+- **Test strength:** ProbeAttemptSeam uses full deep equality. Sensitive scanning creates and reads primary, backup, temp, corrupt, and migrated artifacts instead of treating missing files as success.
+
+Review RED evidence included missing production publication API, Capability-B legacy entry authorization, absent corruption evidence/repair, schema-0 no-writeback, and non-propagating AuthBlocked persistence. Each focused regression was observed failing before the corresponding production change.
