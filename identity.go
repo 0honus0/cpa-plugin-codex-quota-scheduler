@@ -107,7 +107,7 @@ func (c TransitionChain) SaveTail() (CredentialFingerprint, error) {
 	current := c.Cursor
 	for _, tr := range c.Transitions {
 		if tr.Prev.CompositeHash != current.CompositeHash {
-			continue
+			break
 		}
 		switch tr.Phase {
 		case TransitionApplied:
@@ -126,7 +126,7 @@ func (c TransitionChain) AppendAt(t CredentialTransition, now time.Time) Transit
 	if now.IsZero() {
 		now = t.CreatedAt
 	}
-	for len(c.Transitions) > 0 && c.Transitions[0].Phase == TransitionApplied && !c.Transitions[0].CreatedAt.IsZero() && now.Sub(c.Transitions[0].CreatedAt) > 24*time.Hour {
+	for len(c.Transitions) > 0 && c.Transitions[0].Prev.CompositeHash == c.Cursor.CompositeHash && c.Transitions[0].Phase == TransitionApplied && !c.Transitions[0].CreatedAt.IsZero() && now.Sub(c.Transitions[0].CreatedAt) > 24*time.Hour {
 		c.Cursor = c.Transitions[0].Next
 		c.Transitions = c.Transitions[1:]
 	}

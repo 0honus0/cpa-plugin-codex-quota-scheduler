@@ -55,15 +55,18 @@ func NewCredentialManager(store StateWriter, host CredentialHost, now func() tim
 	}
 	return &CredentialManager{store: store, host: host, now: now, crash: crash, state: state}, nil
 }
-func (m *CredentialManager) SetChain(instance AuthInstanceID, chain TransitionChain) error {
+func (m *CredentialManager) setChain(instance AuthInstanceID, chain TransitionChain) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if u, ok := m.store.(interface {
-		Update(func(*PersistentState) error) error
+		Update(func(*PersistentState) error) (PersistentState, error)
 	}); ok {
-		if err := u.Update(func(s *PersistentState) error { s.CredentialChains[instance] = chain; return nil }); err != nil {
+		committed, err := u.Update(func(s *PersistentState) error { s.CredentialChains[instance] = chain; return nil })
+		if err != nil {
 			return err
 		}
+		m.state = committed
+		return nil
 	} else {
 		next := clonePersistentState(m.state)
 		next.CredentialChains[instance] = chain
@@ -74,7 +77,7 @@ func (m *CredentialManager) SetChain(instance AuthInstanceID, chain TransitionCh
 	m.state.CredentialChains[instance] = chain
 	return nil
 }
-func (m *CredentialManager) Chain(instance AuthInstanceID) TransitionChain {
+func (m *CredentialManager) chain(instance AuthInstanceID) TransitionChain {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.state.CredentialChains[instance]
@@ -87,16 +90,13 @@ func (m *CredentialManager) hit(name string) error {
 }
 func (m *CredentialManager) mutate(fn func(*PersistentState) error) error {
 	if u, ok := m.store.(interface {
-		Update(func(*PersistentState) error) error
+		Update(func(*PersistentState) error) (PersistentState, error)
 	}); ok {
-		if err := u.Update(fn); err != nil {
+		committed, err := u.Update(fn)
+		if err != nil {
 			return err
 		}
-		if ss, ok := m.store.(interface {
-			PersistentSnapshot() (PersistentState, error)
-		}); ok {
-			m.state, _ = ss.PersistentSnapshot()
-		}
+		m.state = committed
 		return nil
 	}
 	next := clonePersistentState(m.state)

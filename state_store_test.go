@@ -156,7 +156,7 @@ func TestFenceQuarantineSurvivesCredentialUpdateAndRestart(t *testing.T) {
 	os.WriteFile(path+".bak", []byte("bad"), 0600)
 	store := NewStateStore(path, OSFileHooks(), nil)
 	state, _, _ := store.Load()
-	if err := store.Update(func(s *PersistentState) error { s.NextSaveSeq = 1; return nil }); err != nil {
+	if _, err := store.Update(func(s *PersistentState) error { s.NextSaveSeq = 1; return nil }); err != nil {
 		t.Fatal(err)
 	}
 	restart := NewStateStore(path, OSFileHooks(), nil)
@@ -193,7 +193,7 @@ func TestStateStoreReadErrorPropagatesWithoutTouchingBackup(t *testing.T) {
 func TestFenceOverflowUsesAuthoritativeCurrentCeiling(t *testing.T) {
 	store := NewStateStore(filepath.Join(t.TempDir(), "state.json"), OSFileHooks(), nil)
 	state, _, _ := store.Load()
-	_ = store.Update(func(s *PersistentState) error { s.ReservedCeiling = ^uint64(0) - FenceBlockSize + 1; return nil })
+	_, _ = store.Update(func(s *PersistentState) error { s.ReservedCeiling = ^uint64(0) - FenceBlockSize + 1; return nil })
 	if _, err := NewFenceAllocator(store, state, nil).Next(); !errors.Is(err, ErrFenceOverflow) {
 		t.Fatalf("err=%v", err)
 	}
@@ -218,11 +218,11 @@ func TestStateStoreTransactionalMutationsDoNotClobber(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_ = store.Update(func(s *PersistentState) error { s.ReservedCeiling = FenceBlockSize; return nil })
+		_, _ = store.Update(func(s *PersistentState) error { s.ReservedCeiling = FenceBlockSize; return nil })
 	}()
 	go func() {
 		defer wg.Done()
-		_ = store.Update(func(s *PersistentState) error {
+		_, _ = store.Update(func(s *PersistentState) error {
 			s.NextSaveSeq = 9
 			s.CredentialChains[1] = TransitionChain{Cursor: fp("s", "r", "m")}
 			return nil
@@ -240,7 +240,7 @@ func TestCredentialAndFenceConcurrentMutationsPreserveBoth(t *testing.T) {
 	state, _, _ := store.Load()
 	prev := HostAuth{Fingerprint: fp("s", "0", "m")}
 	manager := mustCredentialManager(t, store, &walHost{current: prev}, time.Now, nil)
-	manager.SetChain(1, TransitionChain{Cursor: prev.Fingerprint})
+	manager.setChain(1, TransitionChain{Cursor: prev.Fingerprint})
 	fence := NewFenceAllocator(store, state, nil)
 	var wg sync.WaitGroup
 	wg.Add(2)

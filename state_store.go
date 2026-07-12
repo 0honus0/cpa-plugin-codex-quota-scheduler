@@ -159,19 +159,22 @@ func (s *StateStore) PersistentSnapshot() (PersistentState, error) {
 	}
 	return clonePersistentState(s.state), nil
 }
-func (s *StateStore) Update(fn func(*PersistentState) error) error {
+func (s *StateStore) Update(fn func(*PersistentState) error) (PersistentState, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.loaded {
 		if _, _, err := s.loadLocked(); err != nil {
-			return err
+			return PersistentState{}, err
 		}
 	}
 	next := clonePersistentState(s.state)
 	if err := fn(&next); err != nil {
-		return err
+		return PersistentState{}, err
 	}
-	return s.writeLocked(next)
+	if err := s.writeLocked(next); err != nil {
+		return PersistentState{}, err
+	}
+	return clonePersistentState(s.state), nil
 }
 func (s *StateStore) WriteThrough(state PersistentState) error {
 	s.mu.Lock()

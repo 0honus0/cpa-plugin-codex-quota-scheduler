@@ -54,7 +54,7 @@ func TestCredentialSaveWALOrdering(t *testing.T) {
 	store := &walStore{}
 	host := &walHost{current: prev}
 	m := mustCredentialManager(t, store, host, func() time.Time { return time.Unix(1, 0) }, nil)
-	m.SetChain(7, TransitionChain{Cursor: prev.Fingerprint})
+	m.setChain(7, TransitionChain{Cursor: prev.Fingerprint})
 	result, err := m.SaveVersioned(context.Background(), 7, next, ExecutionToken{Instance: 7})
 	if err != nil || result.Phase != TransitionApplied {
 		t.Fatalf("result=%+v err=%v", result, err)
@@ -75,7 +75,7 @@ func TestCredentialSaveFailureAndUnknown(t *testing.T) {
 			store := &walStore{}
 			host := &walHost{current: prev, saveErr: tc.err}
 			m := mustCredentialManager(t, store, host, time.Now, nil)
-			m.SetChain(1, TransitionChain{Cursor: prev.Fingerprint})
+			m.setChain(1, TransitionChain{Cursor: prev.Fingerprint})
 			got, _ := m.SaveVersioned(context.Background(), 1, HostAuth{Fingerprint: fp("s", "r1", "m")}, ExecutionToken{Instance: 1})
 			if got.Phase != tc.want {
 				t.Fatalf("phase=%s", got.Phase)
@@ -89,7 +89,7 @@ func TestCredentialContextAndTransportErrorsAreUnknown(t *testing.T) {
 		store := &walStore{}
 		prev := HostAuth{Fingerprint: fp("s", "0", "m")}
 		m := mustCredentialManager(t, store, &walHost{current: prev, saveErr: err}, time.Now, nil)
-		m.SetChain(1, TransitionChain{Cursor: prev.Fingerprint})
+		m.setChain(1, TransitionChain{Cursor: prev.Fingerprint})
 		got, _ := m.SaveVersioned(context.Background(), 1, HostAuth{Fingerprint: fp("s", "1", "m")}, ExecutionToken{Instance: 1})
 		if got.Phase != TransitionOutcomeUnknown {
 			t.Fatalf("%v phase=%s", err, got.Phase)
@@ -102,11 +102,11 @@ func TestCredentialKnownRejectionRetryUsesAppliedTail(t *testing.T) {
 	store := &walStore{}
 	host := &walHost{current: prev, saveErr: ErrCredentialRejected}
 	m := mustCredentialManager(t, store, host, time.Now, nil)
-	m.SetChain(1, TransitionChain{Cursor: prev.Fingerprint})
+	m.setChain(1, TransitionChain{Cursor: prev.Fingerprint})
 	m.SaveVersioned(context.Background(), 1, HostAuth{Fingerprint: fp("s", "rejected", "m")}, ExecutionToken{Instance: 1})
 	host.saveErr = nil
 	m.SaveVersioned(context.Background(), 1, HostAuth{Fingerprint: fp("s", "retry", "m")}, ExecutionToken{Instance: 1})
-	chain := m.Chain(1)
+	chain := m.chain(1)
 	if chain.Transitions[1].Prev != prev.Fingerprint {
 		t.Fatalf("retry prev used rejected next: %+v", chain)
 	}
@@ -117,7 +117,7 @@ func TestCredentialUnknownBlocksRetryUntilReconciled(t *testing.T) {
 	store := &walStore{}
 	host := &walHost{current: prev, saveErr: context.DeadlineExceeded}
 	m := mustCredentialManager(t, store, host, time.Now, nil)
-	m.SetChain(1, TransitionChain{Cursor: prev.Fingerprint})
+	m.setChain(1, TransitionChain{Cursor: prev.Fingerprint})
 	m.SaveVersioned(context.Background(), 1, HostAuth{Fingerprint: fp("s", "unknown", "m")}, ExecutionToken{Instance: 1})
 	host.saveErr = nil
 	if _, err := m.SaveVersioned(context.Background(), 1, HostAuth{Fingerprint: fp("s", "retry", "m")}, ExecutionToken{Instance: 1}); !errors.Is(err, ErrCredentialUnresolved) {
@@ -128,11 +128,11 @@ func TestCredentialUnknownBlocksRetryUntilReconciled(t *testing.T) {
 func TestSetChainFailureDoesNotMutateMemory(t *testing.T) {
 	store := &walStore{fail: errors.New("disk")}
 	m := mustCredentialManager(t, store, &walHost{}, time.Now, nil)
-	err := m.SetChain(1, TransitionChain{Cursor: fp("s", "r", "m")})
+	err := m.setChain(1, TransitionChain{Cursor: fp("s", "r", "m")})
 	if err == nil {
 		t.Fatal("SetChain ignored error")
 	}
-	if m.Chain(1).GenerationCount() != 1 || m.Chain(1).Cursor != (CredentialFingerprint{}) {
+	if m.chain(1).GenerationCount() != 1 || m.chain(1).Cursor != (CredentialFingerprint{}) {
 		t.Fatal("memory mutated before durability")
 	}
 }
@@ -151,13 +151,13 @@ func TestCredentialPlannedWriteFailureRollsBackMemory(t *testing.T) {
 	store := &walStore{}
 	host := &walHost{current: prev}
 	m := mustCredentialManager(t, store, host, time.Now, nil)
-	m.SetChain(1, TransitionChain{Cursor: prev.Fingerprint})
+	m.setChain(1, TransitionChain{Cursor: prev.Fingerprint})
 	store.fail = errors.New("disk")
 	m.SaveVersioned(context.Background(), 1, HostAuth{Fingerprint: fp("s", "1", "m")}, ExecutionToken{Instance: 1})
 	store.fail = nil
 	got, err := m.SaveVersioned(context.Background(), 1, HostAuth{Fingerprint: fp("s", "2", "m")}, ExecutionToken{Instance: 1})
-	if err != nil || got.SaveSeq != 1 || m.Chain(1).Transitions[0].Prev != prev.Fingerprint {
-		t.Fatalf("got=%+v chain=%+v err=%v", got, m.Chain(1), err)
+	if err != nil || got.SaveSeq != 1 || m.chain(1).Transitions[0].Prev != prev.Fingerprint {
+		t.Fatalf("got=%+v chain=%+v err=%v", got, m.chain(1), err)
 	}
 }
 
@@ -175,10 +175,10 @@ func TestCredentialRecoveryReconcilesUnknownOutcome(t *testing.T) {
 			store := &walStore{}
 			host := &walHost{current: tc.current}
 			m := mustCredentialManager(t, store, host, time.Now, nil)
-			m.SetChain(1, TransitionChain{Cursor: prev.Fingerprint, Transitions: []CredentialTransition{tr}})
+			m.setChain(1, TransitionChain{Cursor: prev.Fingerprint, Transitions: []CredentialTransition{tr}})
 			report, err := m.Reconcile(context.Background(), 1)
-			if err != nil || report.Ambiguous != tc.amb || m.Chain(1).Transitions[0].Phase != tc.want {
-				t.Fatalf("report=%+v phase=%s err=%v", report, m.Chain(1).Transitions[0].Phase, err)
+			if err != nil || report.Ambiguous != tc.amb || m.chain(1).Transitions[0].Phase != tc.want {
+				t.Fatalf("report=%+v phase=%s err=%v", report, m.chain(1).Transitions[0].Phase, err)
 			}
 		})
 	}
@@ -186,7 +186,7 @@ func TestCredentialRecoveryReconcilesUnknownOutcome(t *testing.T) {
 
 func TestCredentialSaveRejectsOldInstance(t *testing.T) {
 	m := mustCredentialManager(t, &walStore{}, &walHost{}, time.Now, nil)
-	m.SetChain(2, TransitionChain{Cursor: fp("s", "r", "m")})
+	m.setChain(2, TransitionChain{Cursor: fp("s", "r", "m")})
 	_, err := m.SaveVersioned(context.Background(), 2, HostAuth{Fingerprint: fp("s", "r2", "m")}, ExecutionToken{Instance: 1})
 	if !errors.Is(err, ErrStaleExecutionToken) {
 		t.Fatalf("err=%v", err)
@@ -201,7 +201,7 @@ func TestCredentialCrashLeavesRecoverableWAL(t *testing.T) {
 			store := &walStore{}
 			host := &walHost{current: prev}
 			m := mustCredentialManager(t, store, host, time.Now, crashController(point))
-			m.SetChain(1, TransitionChain{Cursor: prev.Fingerprint})
+			m.setChain(1, TransitionChain{Cursor: prev.Fingerprint})
 			_, err := m.SaveVersioned(context.Background(), 1, next, ExecutionToken{Instance: 1})
 			if err == nil {
 				t.Fatal("crash not injected")
@@ -221,7 +221,7 @@ func TestFreshManagerReconcilesCrashAfterSaveAuth(t *testing.T) {
 	next := HostAuth{Fingerprint: fp("s", "1", "m")}
 	host := &walHost{current: prev}
 	m := mustCredentialManager(t, store, host, time.Now, crashController("K_CREDENTIAL_AFTER_SAVEAUTH"))
-	m.SetChain(1, TransitionChain{Cursor: prev.Fingerprint})
+	m.setChain(1, TransitionChain{Cursor: prev.Fingerprint})
 	if _, err := m.SaveVersioned(context.Background(), 1, next, ExecutionToken{Instance: 1}); err == nil {
 		t.Fatal("crash missing")
 	}

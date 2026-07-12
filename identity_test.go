@@ -169,3 +169,22 @@ func TestExpiredNonAppliedEdgeNeverAdvancesCursor(t *testing.T) {
 		}
 	}
 }
+
+func TestSaveTailStopsAtFirstDiscontinuity(t *testing.T) {
+	f0, f1, f2, decoy := fp("s", "0", "m"), fp("s", "1", "m"), fp("s", "2", "m"), fp("s", "decoy", "m")
+	c := TransitionChain{Cursor: f0, Transitions: []CredentialTransition{{Prev: f0, Next: f1, Phase: TransitionApplied}, {Prev: decoy, Next: f2, Phase: TransitionApplied}, {Prev: f1, Next: decoy, Phase: TransitionApplied}}}
+	tail, err := c.SaveTail()
+	if err != nil || tail != f1 {
+		t.Fatalf("tail=%+v err=%v", tail, err)
+	}
+}
+
+func TestExpiredAppliedPruningStopsAtDiscontinuity(t *testing.T) {
+	now := time.Now()
+	f0, f1, f2, other := fp("s", "0", "m"), fp("s", "1", "m"), fp("s", "2", "m"), fp("s", "other", "m")
+	c := TransitionChain{Cursor: f0, Transitions: []CredentialTransition{{Prev: other, Next: f1, Phase: TransitionApplied, CreatedAt: now.Add(-25 * time.Hour)}, {Prev: f0, Next: f2, Phase: TransitionApplied, CreatedAt: now.Add(-25 * time.Hour)}}}
+	c = c.AppendAt(CredentialTransition{Prev: f0, Next: fp("s", "new", "m"), Phase: TransitionApplied, CreatedAt: now}, now)
+	if c.Cursor != f0 {
+		t.Fatalf("cursor advanced across discontinuity")
+	}
+}

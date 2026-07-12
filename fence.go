@@ -46,9 +46,10 @@ func (a *FenceAllocator) Next() (uint64, error) {
 		}
 		var err error
 		if updater, ok := a.store.(interface {
-			Update(func(*PersistentState) error) error
+			Update(func(*PersistentState) error) (PersistentState, error)
 		}); ok {
-			err = updater.Update(func(s *PersistentState) error {
+			var committed PersistentState
+			committed, err = updater.Update(func(s *PersistentState) error {
 				if s.FenceUnsafe {
 					return ErrFenceUnsafe
 				}
@@ -59,6 +60,9 @@ func (a *FenceAllocator) Next() (uint64, error) {
 				s.ReservedCeiling = newCeiling
 				return nil
 			})
+			if err == nil {
+				newCeiling = committed.ReservedCeiling
+			}
 		} else {
 			a.state.ReservedCeiling = newCeiling
 			err = a.store.WriteThrough(clonePersistentState(a.state))
