@@ -98,6 +98,56 @@ func TestLegacyMigrationRejectsSensitiveAndUnknownFieldsWithoutRename(t *testing
 	}
 }
 
+func TestLegacyMigrationRejectsCredentialSyntaxInsideAllowedStringValues(t *testing.T) {
+	cases := map[string]string{
+		"alias authorization":        `{"config":{},"accounts":{"a":{"alias":"Authorization: Bearer SECRET_X"}}}`,
+		"group notes cookie":         `{"config":{},"groups":{"g":{"notes":"Cookie: session=SECRET_X"}}}`,
+		"tag refresh assignment":     `{"config":{},"accounts":{"a":{"tags":["refresh_token=SECRET_X"]}}}`,
+		"config credential material": `{"config":{"monthly_mode":"Authorization: Bearer SECRET_X"}}`,
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			legacy := filepath.Join(dir, "state.json")
+			if err := os.WriteFile(legacy, []byte(raw), 0600); err != nil {
+				t.Fatal(err)
+			}
+			paths := semanticStatePaths(legacy)
+			if _, _, err := loadUserDataWithMigration(paths, OSFileHooks(), nil); err == nil {
+				t.Fatal("expected credential-value rejection")
+			}
+			got, e := os.ReadFile(legacy)
+			if e != nil || string(got) != raw {
+				t.Fatalf("legacy=%q err=%v", got, e)
+			}
+			for _, path := range []string{legacy + ".migrated", paths.UserData} {
+				if _, e := os.Stat(path); !errors.Is(e, os.ErrNotExist) {
+					t.Fatalf("unexpected artifact %s: %v", path, e)
+				}
+			}
+		})
+	}
+}
+
+func TestLegacyMigrationAllowsBenignTokenMentionAndScansRealArtifact(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "state.json")
+	state := PluginDiskState{Config: DefaultConfig(), Accounts: map[string]AccountAnnotation{"a": {Alias: "token budgeting notes", Notes: "No credential syntax here", Tags: []string{"token-awareness"}}}}
+	if err := SavePluginDiskState(legacy, state); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := loadUserDataWithMigration(semanticStatePaths(legacy), OSFileHooks(), nil); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(legacy + ".migrated")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsSensitiveCredentialMaterial(string(raw)) {
+		t.Fatalf("real migrated artifact contains credential syntax: %s", raw)
+	}
+}
+
 func TestValidLegacyMigrationScansActualRetainedArtifact(t *testing.T) {
 	dir := t.TempDir()
 	legacy := filepath.Join(dir, "custom-legacy.json")
@@ -113,10 +163,8 @@ func TestValidLegacyMigrationScansActualRetainedArtifact(t *testing.T) {
 		t.Fatal(err)
 	}
 	lower := strings.ToLower(string(raw))
-	for _, term := range []string{"refresh_token", "authorization", "cookie", "access_token", "id_token"} {
-		if strings.Contains(lower, term) {
-			t.Fatalf("sensitive term %q in actual migrated artifact: %s", term, raw)
-		}
+	if containsSensitiveCredentialMaterial(lower) {
+		t.Fatalf("credential syntax in actual migrated artifact: %s", raw)
 	}
 }
 
@@ -645,6 +693,8 @@ func TestSuiteRuntimeWiring(t *testing.T) {
 	t.Run("semantic migration", TestRuntimeSemanticPathsAndLegacyMigration)
 	t.Run("corrupt legacy", TestRuntimeCorruptLegacyIsPreserved)
 	t.Run("strict legacy", TestLegacyMigrationRejectsSensitiveAndUnknownFieldsWithoutRename)
+	t.Run("legacy value secrets", TestLegacyMigrationRejectsCredentialSyntaxInsideAllowedStringValues)
+	t.Run("benign token text", TestLegacyMigrationAllowsBenignTokenMentionAndScansRealArtifact)
 	t.Run("actual migrated scan", TestValidLegacyMigrationScansActualRetainedArtifact)
 	t.Run("user backup", TestUserDataRecoversFromAtomicBackup)
 	t.Run("migration crashes", TestUserDataMigrationCrashPointsConverge)

@@ -1217,6 +1217,10 @@ func redactSecrets(message string) string {
 	return message
 }
 
+func containsSensitiveCredentialMaterial(value string) bool {
+	return rawCookiePattern.MatchString(value) || rawSecretPattern.MatchString(value) || secretFieldPattern.MatchString(value) || bearerPattern.MatchString(value)
+}
+
 func sanitizedBodySummary(body []byte) string {
 	if len(body) == 0 {
 		return "<empty>"

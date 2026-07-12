@@ -96,6 +96,9 @@ func loadStrictLegacyUserData(path string) (PluginDiskState, bool, error) {
 	if key := legacySensitiveKey(generic); key != "" {
 		return PluginDiskState{}, false, fmt.Errorf("legacy state contains forbidden field %q", key)
 	}
+	if legacyContainsSensitiveValue(generic) {
+		return PluginDiskState{}, false, errors.New("legacy state contains credential material in user data")
+	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	var state PluginDiskState
@@ -130,6 +133,26 @@ func legacySensitiveKey(v any) string {
 		}
 	}
 	return ""
+}
+
+func legacyContainsSensitiveValue(v any) bool {
+	switch x := v.(type) {
+	case string:
+		return containsSensitiveCredentialMaterial(x)
+	case map[string]any:
+		for _, child := range x {
+			if legacyContainsSensitiveValue(child) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range x {
+			if legacyContainsSensitiveValue(child) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func loadUserData(path string) (PluginDiskState, bool, error) {
