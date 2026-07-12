@@ -99,7 +99,7 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 		globalState.RecordCodexActivity(now)
 		refreshGlobalRefresherDueSoon(req, admissionVersion)
 	}
-	decision := PickCodexAccount(req, globalState.Snapshot(now), now)
+	decision := schedulerPickSnapshot(req, globalState.Snapshot(now), now)
 	if decision.AuthID != "" {
 		globalState.RecordSelection(decision.AuthID, decision.Reason)
 	}
@@ -109,6 +109,10 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 		DelegateBuiltin: decision.DelegateBuiltin,
 		Handled:         decision.Handled,
 	})
+}
+
+func schedulerPickSnapshot(req pluginapi.SchedulerPickRequest, snapshot StateSnapshot, now time.Time) PickDecision {
+	return PickCodexAccount(req, snapshot, now)
 }
 
 func logSchedulerDecision(store *PluginState, req pluginapi.SchedulerPickRequest, decision PickDecision, now time.Time) {

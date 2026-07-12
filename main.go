@@ -50,6 +50,7 @@ static void free_host_buffer(cliproxy_host_api* host, void* ptr, size_t len) {
 import "C"
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sync/atomic"
@@ -60,10 +61,52 @@ import (
 )
 
 var (
-	hostAPI atomic.Pointer[C.cliproxy_host_api]
+	hostAPI          atomic.Pointer[C.cliproxy_host_api]
+	hostRosterLatest atomic.Pointer[HostRosterSnapshot]
 )
 
 func main() {}
+
+// ABIHostAuthLister normalizes raw host.auth.list JSON before the typed ABI
+// can erase whether Priority was absent or explicitly zero.
+type ABIHostAuthLister struct {
+	call func(string, any) (json.RawMessage, error)
+}
+
+func (l ABIHostAuthLister) ListHostAuths(ctx context.Context) ([]RosterEntry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	call := l.call
+	if call == nil {
+		call = callHostCallback
+	}
+	result, err := call(pluginabi.MethodHostAuthList, map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	var response struct {
+		Files []struct {
+			ID        string `json:"id"`
+			AuthIndex string `json:"auth_index"`
+			Provider  string `json:"provider"`
+			Priority  *int   `json:"priority"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(result, &response); err != nil {
+		return nil, fmt.Errorf("decode host.auth.list result: %w", err)
+	}
+	entries := make([]RosterEntry, len(response.Files))
+	for i, file := range response.Files {
+		entries[i] = RosterEntry{
+			ID:        file.ID,
+			AuthIndex: file.AuthIndex,
+			Provider:  file.Provider,
+			Priority:  file.Priority,
+		}
+	}
+	return entries, nil
+}
 
 //export cliproxy_plugin_init
 func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_api) C.int {
@@ -77,6 +120,12 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 	managementRefreshSoon = refreshGlobalRefresherSoon
 	managementRefreshOneSoon = refreshGlobalRefresherOneSoon
 	refresherMu.Unlock()
+	// Host callback readiness during init is not guaranteed. Probe in the
+	// background and publish CapabilityB on any immediate failure.
+	go func() {
+		snapshot := DetectHostRoster(context.Background(), ABIHostAuthLister{}, time.Now())
+		hostRosterLatest.Store(&snapshot)
+	}()
 	plugin.abi_version = C.uint32_t(pluginabi.ABIVersion)
 	plugin.call = C.cliproxy_plugin_call_fn(C.cliproxyPluginCall)
 	plugin.free_buffer = C.cliproxy_plugin_free_fn(C.cliproxyPluginFree)
