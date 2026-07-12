@@ -188,10 +188,6 @@ func NewQuotaRefresher(host HostClient, state *PluginState, now func() time.Time
 			}
 			apply := func() {
 				r.state.applyLegacyEffectJournal(*result.Journal)
-				for _, log := range result.Journal.HostLogs {
-					l := log
-					_ = r.coordinator.DoHostCallback(context.Background(), func() { r.host.Log(l.Level, l.Message, l.Fields) })
-				}
 			}
 			if r.bindings != nil && !r.bindings.ApplyIfCurrent(intent.AuthID, WritebackVersion{Token: result.Token, Login: result.Login, Fingerprint: result.Fingerprint}, apply) {
 				return ErrStaleExecutionToken
@@ -201,7 +197,21 @@ func NewQuotaRefresher(host HostClient, state *PluginState, now func() time.Time
 			}
 			return nil
 		},
-		InheritSentUnknown: func(intent Intent, suppressUntil time.Time) { _ = r.persistLegacySentUnknown(intent, suppressUntil) },
+		DispatchLogs: func(ctx context.Context, intent Intent, result OperationResult, held *HeldLease) error {
+			for _, log := range result.Journal.HostLogs {
+				if strings.EqualFold(log.Level, "info") {
+					continue
+				}
+				l := log
+				if err := held.DoHTTP(ctx, func(context.Context) error { r.host.Log(l.Level, l.Message, l.Fields); return nil }); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		InheritSentUnknown: func(intent Intent, suppressUntil time.Time) error {
+			return r.persistLegacySentUnknown(intent, suppressUntil)
+		},
 	})
 	return r
 }
@@ -628,13 +638,15 @@ func (r *QuotaRefresher) Stop() {
 
 	if running {
 		close(stop)
+	}
+	if r.coordinator != nil {
+		r.coordinator.DrainLegacy(context.Background())
+	}
+	if running {
 		<-done
 	}
 	r.wg.Wait()
 	if r.coordinator != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), legacyLeaseDuration)
-		defer cancel()
-		r.coordinator.DrainLegacy(ctx)
 		r.coordinator.Close()
 	}
 }

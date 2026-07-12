@@ -49,6 +49,7 @@ type OperationResult struct {
 	SuppressUntil  time.Time
 	Disposition    ResultDisposition
 	Journal        *LegacyEffectJournal
+	CallbackFailed bool
 }
 
 type futureState struct {
@@ -141,7 +142,8 @@ type CoordinatorOptions struct {
 	Execute            func(context.Context, Intent, *HeldLease) OperationResult
 	Validate           func(Intent, OperationResult) bool
 	Apply              func(Intent, OperationResult) error
-	InheritSentUnknown func(Intent, time.Time)
+	InheritSentUnknown func(Intent, time.Time) error
+	DispatchLogs       func(context.Context, Intent, OperationResult, *HeldLease) error
 }
 
 type SchedulerSnapshot struct {
@@ -155,6 +157,8 @@ type SchedulerSnapshot struct {
 type DrainReport struct {
 	Completed, Cancelled, Invalidated, SentUnknown int
 	TimedOut                                       bool
+	PersistenceFailures                            int
+	HandoffBlocked                                 bool
 }
 
 type operationKey struct {
@@ -163,12 +167,13 @@ type operationKey struct {
 	generation TierGeneration
 }
 type coordinatorJob struct {
-	intent  Intent
-	future  *futureState
-	ctx     context.Context
-	cancel  context.CancelFunc
-	held    *HeldLease
-	expired bool
+	intent      Intent
+	future      *futureState
+	ctx         context.Context
+	cancel      context.CancelFunc
+	held        *HeldLease
+	expired     bool
+	invalidated bool
 }
 type submitCommand struct {
 	intent Intent
@@ -182,6 +187,12 @@ type resultCommand struct {
 type expireCommand struct {
 	key operationKey
 	job *coordinatorJob
+}
+type logCallbackCommand struct {
+	key    operationKey
+	job    *coordinatorJob
+	result OperationResult
+	err    error
 }
 type snapshotCommand struct{ reply chan *SchedulerSnapshot }
 type drainCommand struct {
@@ -255,12 +266,18 @@ func (c *Coordinator) PublishSnapshot() *SchedulerSnapshot {
 	}
 }
 func (c *Coordinator) DoHostCallback(ctx context.Context, call func()) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	select {
 	case c.httpSlots <- struct{}{}:
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 	defer func() { <-c.httpSlots }()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	call()
 	return nil
 }
@@ -394,18 +411,27 @@ func (c *Coordinator) loop() {
 					delete(leases, cmd.job.intent.Instance)
 				}
 				probe, suppress := cmd.job.held.probeState()
+				var inheritErr error
 				if probe && c.opts.InheritSentUnknown != nil {
-					c.opts.InheritSentUnknown(cmd.job.intent, suppress)
+					inheritErr = c.opts.InheritSentUnknown(cmd.job.intent, suppress)
 				}
-				completeFuture(cmd.job.future, OperationResult{Token: cmd.job.intent.Token, ProbeSendPhase: probe, SuppressUntil: suppress, Err: context.DeadlineExceeded, Disposition: ResultDiscardedStale})
+				resultErr := error(context.DeadlineExceeded)
+				if inheritErr != nil {
+					resultErr = inheritErr
+				}
+				completeFuture(cmd.job.future, OperationResult{Token: cmd.job.intent.Token, ProbeSendPhase: probe, SuppressUntil: suppress, Err: resultErr, Disposition: ResultDiscardedStale})
 				if cmd.job.intent.Token.Fence > completedFence[cmd.job.intent.Instance] {
 					completedFence[cmd.job.intent.Instance] = cmd.job.intent.Token.Fence
 				}
 				for _, d := range drains {
 					d.report.Completed++
 					d.report.Invalidated++
-					if probe {
+					if probe && inheritErr == nil {
 						d.report.SentUnknown++
+					}
+					if inheritErr != nil {
+						d.report.PersistenceFailures++
+						d.report.HandoffBlocked = true
 					}
 				}
 				tryStart(cmd.job.intent.Instance)
@@ -414,18 +440,34 @@ func (c *Coordinator) loop() {
 				if inflight[cmd.key] != cmd.job {
 					continue
 				}
-				delete(inflight, cmd.key)
-				if leases[cmd.job.intent.Instance] == cmd.job {
-					delete(leases, cmd.job.intent.Instance)
-				}
 				probe, suppress := cmd.job.held.probeState()
 				cmd.result.ProbeSendPhase = cmd.result.ProbeSendPhase || probe
 				if suppress.After(cmd.result.SuppressUntil) {
 					cmd.result.SuppressUntil = suppress
 				}
-				valid := !cmd.job.expired && cmd.result.Token == cmd.job.intent.Token
+				valid := !cmd.job.expired && !cmd.job.invalidated && !cmd.result.CallbackFailed && cmd.result.Token == cmd.job.intent.Token
 				if valid && c.opts.Validate != nil {
 					valid = c.opts.Validate(cmd.job.intent, cmd.result)
+				}
+				if valid && c.opts.DispatchLogs != nil && cmd.result.Journal != nil && len(cmd.result.Journal.HostLogs) > 0 {
+					logsResult := cmd.result
+					go func() {
+						err := c.opts.DispatchLogs(cmd.job.ctx, cmd.job.intent, logsResult, cmd.job.held)
+						if logsResult.Journal != nil {
+							copyJournal := *logsResult.Journal
+							copyJournal.HostLogs = nil
+							logsResult.Journal = &copyJournal
+						}
+						select {
+						case c.commands <- logCallbackCommand{cmd.key, cmd.job, logsResult, err}:
+						case <-c.closed:
+						}
+					}()
+					continue
+				}
+				delete(inflight, cmd.key)
+				if leases[cmd.job.intent.Instance] == cmd.job {
+					delete(leases, cmd.job.intent.Instance)
 				}
 				if valid && c.opts.Apply != nil {
 					if err := c.opts.Apply(cmd.job.intent, cmd.result); err != nil {
@@ -441,12 +483,20 @@ func (c *Coordinator) loop() {
 					for _, d := range drains {
 						d.report.Invalidated++
 					}
+					var inheritErr error
 					if cmd.result.ProbeSendPhase && c.opts.InheritSentUnknown != nil {
-						c.opts.InheritSentUnknown(cmd.job.intent, cmd.result.SuppressUntil)
+						inheritErr = c.opts.InheritSentUnknown(cmd.job.intent, cmd.result.SuppressUntil)
 					}
-					if cmd.result.ProbeSendPhase {
+					if cmd.result.ProbeSendPhase && inheritErr == nil {
 						for _, d := range drains {
 							d.report.SentUnknown++
+						}
+					}
+					if inheritErr != nil {
+						cmd.result.Err = inheritErr
+						for _, d := range drains {
+							d.report.PersistenceFailures++
+							d.report.HandoffBlocked = true
 						}
 					}
 				} else {
@@ -461,6 +511,15 @@ func (c *Coordinator) loop() {
 				}
 				tryStart(cmd.job.intent.Instance)
 				finishDrains()
+			case logCallbackCommand:
+				if inflight[cmd.key] != cmd.job {
+					continue
+				}
+				cmd.result.CallbackFailed = cmd.err != nil
+				if cmd.err != nil {
+					cmd.result.Err = cmd.err
+				}
+				c.commands <- resultCommand{key: cmd.key, job: cmd.job, result: cmd.result}
 			case snapshotCommand:
 				queued := 0
 				for _, q := range queue {
@@ -489,12 +548,11 @@ func (c *Coordinator) loop() {
 				for _, job := range inflight {
 					if job.cancel != nil {
 						job.cancel()
-						job.expired = true
+						job.invalidated = true
 						waiter.report.Cancelled++
 					}
 				}
 				if len(inflight) == 0 {
-					waiter.report.Completed = 1
 					cmd.reply <- waiter.report
 				} else {
 					drains = append(drains, waiter)

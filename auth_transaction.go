@@ -36,10 +36,6 @@ func (t *LegacyRefreshTxn) RunHeld(ctx context.Context, intent Intent, held *Hel
 	auth := payload.Auth
 	version := payload.AdmissionVersion
 	if !ok {
-		auth, ok = intent.Payload.(pluginapi.HostAuthFileEntry)
-		version = uint64(intent.Generation)
-	}
-	if !ok {
 		result.Err = errors.New("legacy refresh payload is not a host auth entry")
 		return result
 	}

@@ -106,3 +106,22 @@ The envelope has one coordinator intent and one instance lease. Internal calls r
 ### Remaining concern
 
 SaveAuth is irreversible once dispatched. If admission changes while the host call itself is executing, the credential WAL records the outcome, while post-call fencing prevents any stale PluginState effect or success log. This is the strongest safe guarantee available without host-side CAS and matches the S2 WAL outcome protocol.
+
+## Final S3 ownership corrections
+
+- RED: multi-queued non-cooperative shutdown exposed that `Stop` joined refresher goroutines before draining their coordinator futures. GREEN: stop-issue and coordinator drain now happen before loop/waitgroup joins; queued jobs cancel immediately and all active jobs share the existing single virtual lease bound.
+- RED: idle drain reported one fabricated completion. GREEN: `Completed` is exclusively incremented for actual terminal jobs; idle drain returns zero.
+- Buffered host logs now use a second immutable worker phase while the instance lease and inflight record remain owned by the coordinator. The worker acquires/releases the global slot through `HeldLease`; the owner remains responsive, revalidates the full binding after callback completion, and only then applies local effects/final success.
+- Conservative no-stale-success policy: informational/success `Host.Log` records are suppressed. Warning/error callbacks may be dispatched by the held worker, but callback failure/cancellation or a stale post-callback binding prevents local apply and successful disposition.
+- `InheritSentUnknown` now returns persistence failure. Expiry/drain reports `PersistenceFailures` and `HandoffBlocked`, the future surfaces the error, and `SentUnknown` is counted only after durable persistence succeeds.
+- Removed the raw `HostAuthFileEntry` transaction payload compatibility path. S3 accepts only `LegacyRefreshPayload` and one non-nil held lease.
+- `DoHostCallback` now checks context before slot wait and again after slot acquisition, preventing a cancelled callback from reaching the host.
+
+Focused evidence:
+
+- `TestQuotaRefresherStopDrainsAllQueuedWithinOneLeaseBound`
+- `TestCoordinatorLogCallbackWorkerRetainsLeaseAndRevalidates`
+- `TestCoordinatorDrainCancelsBufferedLogWorker`
+- `TestCoordinatorSentUnknownPersistenceFailureBlocksDrainHandoff`
+- `TestCoordinatorIdleDrainCompletesZeroJobs`
+- `TestDoHostCallbackCancellationAfterSlotWaitPreventsCall`

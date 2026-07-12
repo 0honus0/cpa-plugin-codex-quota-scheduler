@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -80,7 +81,7 @@ func TestSuiteCoordinator(t *testing.T) {
 			close(cancelled)
 			<-release
 			return OperationResult{Token: intent.Token}
-		}, InheritSentUnknown: func(_ Intent, until time.Time) { inherited <- until }})
+		}, InheritSentUnknown: func(_ Intent, until time.Time) error { inherited <- until; return nil }})
 		defer c.Close()
 		future := c.Submit(Intent{Instance: 11, Generation: 1, Class: OperationLegacyRefresh, Source: LegacyRefreshSource, Token: ExecutionToken{Instance: 11, Tier: 1, Fence: 1}})
 		<-started
@@ -185,6 +186,153 @@ func TestCoordinatorCloseSubmitSnapshotRaceDoesNotHang(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("submit/snapshot hung racing close")
 	}
+}
+
+func TestCoordinatorIdleDrainCompletesZeroJobs(t *testing.T) {
+	c := NewCoordinator(CoordinatorOptions{})
+	defer c.Close()
+	if got := c.DrainLegacy(context.Background()); got.Completed != 0 {
+		t.Fatalf("idle completed=%d", got.Completed)
+	}
+}
+
+func TestCoordinatorLogCallbackWorkerRetainsLeaseAndRevalidates(t *testing.T) {
+	var mu sync.Mutex
+	valid := true
+	applied := 0
+	callbackStarted, release := make(chan struct{}), make(chan struct{})
+	c := NewCoordinator(CoordinatorOptions{Execute: func(_ context.Context, i Intent, _ *HeldLease) OperationResult {
+		return OperationResult{Token: i.Token, Journal: &LegacyEffectJournal{HostLogs: []BufferedHostLog{{Level: "warn", Message: "buffered"}}}}
+	}, Validate: func(Intent, OperationResult) bool { mu.Lock(); defer mu.Unlock(); return valid }, DispatchLogs: func(ctx context.Context, _ Intent, _ OperationResult, held *HeldLease) error {
+		return held.DoHTTP(ctx, func(context.Context) error { close(callbackStarted); <-release; return nil })
+	}, Apply: func(Intent, OperationResult) error { applied++; return nil }})
+	defer c.Close()
+	f := c.Submit(Intent{Instance: 1, Generation: 1, Class: OperationLegacyRefresh, Source: LegacyRefreshSource, Token: ExecutionToken{Instance: 1, Tier: 1, Fence: 1}})
+	<-callbackStarted
+	s := c.PublishSnapshot()
+	if s.InFlight != 1 || len(s.LeasedInstances) != 1 {
+		t.Fatalf("callback phase released lease: %+v", s)
+	}
+	mu.Lock()
+	valid = false
+	mu.Unlock()
+	close(release)
+	if got := f.Await(context.Background()); got.Disposition != ResultDiscardedStale || applied != 0 {
+		t.Fatalf("result=%q applied=%d", got.Disposition, applied)
+	}
+}
+
+func TestCoordinatorSentUnknownPersistenceFailureBlocksDrainHandoff(t *testing.T) {
+	now := time.Unix(0, 0)
+	clock := newCoordinatorTestClock(now)
+	started, cancelled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	c := NewCoordinator(CoordinatorOptions{LeaseDuration: 2 * time.Minute, Now: clock.Now, AfterFunc: clock.AfterFunc, Execute: func(ctx context.Context, i Intent, h *HeldLease) OperationResult {
+		h.MarkProbeSent(now.Add(10 * time.Minute))
+		close(started)
+		<-ctx.Done()
+		close(cancelled)
+		<-release
+		return OperationResult{Token: i.Token}
+	}, InheritSentUnknown: func(Intent, time.Time) error { return errors.New("persist failed") }})
+	defer c.Close()
+	f := c.Submit(Intent{Instance: 1, Generation: 1, Class: OperationLegacyRefresh, Source: LegacyRefreshSource, Token: ExecutionToken{Instance: 1, Tier: 1, Fence: 1}})
+	<-started
+	done := make(chan DrainReport, 1)
+	go func() { done <- c.DrainLegacy(context.Background()) }()
+	<-cancelled
+	clock.Advance(2 * time.Minute)
+	report := <-done
+	if report.PersistenceFailures != 1 || !report.HandoffBlocked || report.SentUnknown != 0 {
+		t.Fatalf("report=%+v", report)
+	}
+	if f.Await(context.Background()).Err == nil {
+		t.Fatal("future did not surface persistence failure")
+	}
+	close(release)
+}
+
+func TestCoordinatorDrainCancelsBufferedLogWorker(t *testing.T) {
+	occupied, releaseSlot := make(chan struct{}), make(chan struct{})
+	callbackWaiting := make(chan struct{})
+	applied := 0
+	c := NewCoordinator(CoordinatorOptions{MaxHTTPSlots: 1, Execute: func(_ context.Context, i Intent, _ *HeldLease) OperationResult {
+		return OperationResult{Token: i.Token, Journal: &LegacyEffectJournal{HostLogs: []BufferedHostLog{{Level: "warn"}}}}
+	}, Validate: func(Intent, OperationResult) bool { return true }, DispatchLogs: func(ctx context.Context, _ Intent, _ OperationResult, h *HeldLease) error {
+		close(callbackWaiting)
+		return h.DoHTTP(ctx, func(context.Context) error { return nil })
+	}, Apply: func(Intent, OperationResult) error { applied++; return nil }})
+	go func() { _ = c.DoHostCallback(context.Background(), func() { close(occupied); <-releaseSlot }) }()
+	<-occupied
+	f := c.Submit(Intent{Instance: 1, Generation: 1, Class: OperationLegacyRefresh, Source: LegacyRefreshSource, Token: ExecutionToken{Instance: 1, Tier: 1}})
+	<-callbackWaiting
+	report := c.DrainLegacy(context.Background())
+	if report.Completed != 1 || applied != 0 {
+		t.Fatalf("report=%+v applied=%d", report, applied)
+	}
+	if f.Await(context.Background()).Disposition != ResultDiscardedStale {
+		t.Fatal("cancelled callback result applied")
+	}
+	close(releaseSlot)
+	c.Close()
+}
+
+func TestDoHostCallbackCancellationAfterSlotWaitPreventsCall(t *testing.T) {
+	c := NewCoordinator(CoordinatorOptions{MaxHTTPSlots: 1})
+	defer c.Close()
+	occupied, release := make(chan struct{}), make(chan struct{})
+	go func() { _ = c.DoHostCallback(context.Background(), func() { close(occupied); <-release }) }()
+	<-occupied
+	ctx, cancel := context.WithCancel(context.Background())
+	called := false
+	done := make(chan error, 1)
+	go func() { done <- c.DoHostCallback(ctx, func() { called = true }) }()
+	cancel()
+	close(release)
+	if err := <-done; err == nil || called {
+		t.Fatalf("err=%v called=%v", err, called)
+	}
+}
+
+func TestQuotaRefresherStopDrainsAllQueuedWithinOneLeaseBound(t *testing.T) {
+	clock := newCoordinatorTestClock(time.Unix(0, 0))
+	started, cancelled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	c := NewCoordinator(CoordinatorOptions{LeaseDuration: 2 * time.Minute, Now: clock.Now, AfterFunc: clock.AfterFunc, Execute: func(ctx context.Context, _ Intent, _ *HeldLease) OperationResult {
+		select {
+		case <-started:
+		default:
+			close(started)
+		}
+		<-ctx.Done()
+		close(cancelled)
+		<-release
+		return OperationResult{}
+	}})
+	r := &QuotaRefresher{coordinator: c}
+	futures := []Future[OperationResult]{}
+	for i := 1; i <= 4; i++ {
+		f := c.Submit(Intent{Instance: 1, Generation: TierGeneration(i), Class: OperationLegacyRefresh, Source: LegacyRefreshSource, Token: ExecutionToken{Instance: 1, Tier: TierGeneration(i), Fence: uint64(i)}})
+		futures = append(futures, f)
+		r.wg.Add(1)
+		go func(f Future[OperationResult]) { defer r.wg.Done(); f.Await(context.Background()) }(f)
+	}
+	<-started
+	done := make(chan struct{})
+	go func() { r.Stop(); close(done) }()
+	<-cancelled
+	clock.Advance(2 * time.Minute)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Stop exceeded one virtual lease bound")
+	}
+	for _, f := range futures {
+		select {
+		case <-f.Done():
+		default:
+			t.Fatal("future not terminal after stop")
+		}
+	}
+	close(release)
 }
 
 func TestCoordinatorDrainCancelsQueuedWithoutStarting(t *testing.T) {
