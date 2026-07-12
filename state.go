@@ -29,6 +29,47 @@ func NewPluginState(cfg Config) *PluginState {
 	}
 }
 
+func (s *PluginState) cloneForLegacyTransaction() *PluginState {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := NewPluginState(s.cfg)
+	for k, v := range s.accounts {
+		out.accounts[k] = cloneAccountState(v)
+	}
+	out.cpaAdmission = cloneCPAAdmission(s.cpaAdmission)
+	out.cpaAdmissionVersion = s.cpaAdmissionVersion
+	out.annotations = cloneAnnotationState(s.annotations)
+	out.logs = cloneLogs(s.logs)
+	out.lastSelected, out.lastReason, out.lastCodexActivityAt, out.lastAuthScanAt, out.codexAuthCount = s.lastSelected, s.lastReason, s.lastCodexActivityAt, s.lastAuthScanAt, s.codexAuthCount
+	return out
+}
+
+func (s *PluginState) legacyEffectJournal(authID string, baselineLogs int) LegacyEffectJournal {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	j := LegacyEffectJournal{}
+	for _, account := range s.accounts {
+		if account.AuthID == authID {
+			j.Accounts = append(j.Accounts, cloneAccountState(account))
+		}
+	}
+	if baselineLogs < len(s.logs) {
+		j.Logs = cloneLogs(s.logs[baselineLogs:])
+	}
+	return j
+}
+
+func (s *PluginState) applyLegacyEffectJournal(j LegacyEffectJournal) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, account := range j.Accounts {
+		if key := accountStateKey(account); key != "" {
+			s.accounts[key] = cloneAccountState(account)
+		}
+	}
+	s.logs = append(s.logs, cloneLogs(j.Logs)...)
+}
+
 func (s *PluginState) ReplaceConfig(cfg Config) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

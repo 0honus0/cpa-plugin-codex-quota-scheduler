@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
@@ -10,6 +12,53 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
+
+func TestLegacyDrainSentUnknownPersistsAcrossRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runtime.json")
+	store := NewStateStore(path, OSFileHooks(), nil)
+	if _, _, err := store.Load(); err != nil {
+		t.Fatal(err)
+	}
+	r := &QuotaRefresher{runtimeStore: store, now: func() time.Time { return time.Unix(10, 0).UTC() }}
+	intent := Intent{Instance: 7, Token: ExecutionToken{Instance: 7, Fence: 9}}
+	until := time.Unix(100, 0).UTC()
+	if err := r.persistLegacySentUnknown(intent, until); err != nil {
+		t.Fatal(err)
+	}
+	restart := NewStateStore(path, OSFileHooks(), nil)
+	state, _, err := restart.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := state.ProbeAttempts[7]
+	if got.Phase != ProbeAttemptSentUnknown || got.SendFenceSeq != 9 || !got.SuppressUntil.Equal(until) {
+		t.Fatalf("restart attempt=%+v", got)
+	}
+}
+
+func TestLegacyProbeMarksSendOnlyAfterHTTPSlotAcquired(t *testing.T) {
+	c := NewCoordinator(CoordinatorOptions{MaxHTTPSlots: 1})
+	defer c.Close()
+	occupy, occupied := make(chan struct{}), make(chan struct{})
+	go func() { _ = c.DoHostCallback(context.Background(), func() { close(occupied); <-occupy }) }()
+	<-occupied
+	host := &fakeHostClient{responseByURL: map[string]pluginapi.HTTPResponse{codexResetProbeEndpoint: {StatusCode: http.StatusOK}}, startedByURL: make(chan string, 1)}
+	held := &HeldLease{coordinator: c}
+	done := make(chan struct{})
+	go func() {
+		_, _ = (heldHostClient{HostClient: host, ctx: context.Background(), lease: held, journal: &LegacyEffectJournal{}}).Do(pluginapi.HTTPRequest{Method: http.MethodPost, URL: codexResetProbeEndpoint})
+		close(done)
+	}()
+	if sent, _ := held.probeState(); sent {
+		t.Fatal("probe marked sent while waiting for slot")
+	}
+	close(occupy)
+	<-host.startedByURL
+	if sent, _ := held.probeState(); !sent {
+		t.Fatal("probe not marked immediately before host call")
+	}
+	<-done
+}
 
 func TestMockGroupACoordinatorMigration(t *testing.T) {
 	if LegacyRefreshSource != "legacy_refresh_txn" {

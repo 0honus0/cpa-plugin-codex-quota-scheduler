@@ -47,6 +47,17 @@ func (r *BindingRegistry) Lookup(authID string) (RuntimeBinding, bool) {
 	return b, ok
 }
 
+func (r *BindingRegistry) ApplyIfCurrent(authID string, write WritebackVersion, apply func()) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	b, ok := r.bindings[authID]
+	if !ok || !ValidateWriteback(BindingVersion{Instance: b.Instance, Admission: b.Admission, Tier: TierGeneration(b.Generation), Login: b.Login, Fingerprint: b.Fingerprint}, write) {
+		return false
+	}
+	apply()
+	return true
+}
+
 func (r *BindingRegistry) MarkAuthBlocked(authID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

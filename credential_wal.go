@@ -111,6 +111,12 @@ func (m *CredentialManager) mutate(fn func(*PersistentState) error) error {
 	return nil
 }
 func (m *CredentialManager) SaveVersioned(ctx context.Context, instance AuthInstanceID, next HostAuth, token ExecutionToken) (CredentialSaveResult, error) {
+	return m.saveVersionedWithHost(ctx, instance, next, token, m.host)
+}
+func (m *CredentialManager) SaveVersionedWithHost(ctx context.Context, instance AuthInstanceID, next HostAuth, token ExecutionToken, host CredentialHost) (CredentialSaveResult, error) {
+	return m.saveVersionedWithHost(ctx, instance, next, token, host)
+}
+func (m *CredentialManager) saveVersionedWithHost(ctx context.Context, instance AuthInstanceID, next HostAuth, token ExecutionToken, host CredentialHost) (CredentialSaveResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if ss, ok := m.store.(interface {
@@ -156,7 +162,7 @@ func (m *CredentialManager) SaveVersioned(ctx context.Context, instance AuthInst
 	if err := m.hit("K_CREDENTIAL_BEFORE_SAVEAUTH"); err != nil {
 		return CredentialSaveResult{TransitionPlanned, tr.SaveSeq}, err
 	}
-	err := m.host.SaveAuth(ctx, instance, next)
+	err := host.SaveAuth(ctx, instance, next)
 	//kpoint:K_CREDENTIAL_AFTER_SAVEAUTH
 	if hitErr := m.hit("K_CREDENTIAL_AFTER_SAVEAUTH"); hitErr != nil {
 		return CredentialSaveResult{TransitionOutcomeUnknown, tr.SaveSeq}, hitErr

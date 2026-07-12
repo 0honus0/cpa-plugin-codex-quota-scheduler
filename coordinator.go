@@ -17,12 +17,15 @@ const (
 )
 
 type Intent struct {
+	AuthID       string
 	Instance     AuthInstanceID
 	Generation   TierGeneration
 	Class        OperationClass
 	Source       string
 	StartedAfter uint64
 	Token        ExecutionToken
+	Login        LoginEpoch
+	Fingerprint  CredentialFingerprint
 	Payload      any
 }
 
@@ -45,6 +48,7 @@ type OperationResult struct {
 	ProbeSendPhase bool
 	SuppressUntil  time.Time
 	Disposition    ResultDisposition
+	Journal        *LegacyEffectJournal
 }
 
 type futureState struct {
@@ -99,12 +103,18 @@ type HeldLease struct {
 }
 
 func (h *HeldLease) DoHTTP(ctx context.Context, call func(context.Context) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	select {
 	case h.coordinator.httpSlots <- struct{}{}:
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 	defer func() { <-h.coordinator.httpSlots }()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return call(ctx)
 }
 
@@ -130,6 +140,7 @@ type CoordinatorOptions struct {
 	AfterFunc          func(time.Duration, func())
 	Execute            func(context.Context, Intent, *HeldLease) OperationResult
 	Validate           func(Intent, OperationResult) bool
+	Apply              func(Intent, OperationResult) error
 	InheritSentUnknown func(Intent, time.Time)
 }
 
@@ -183,11 +194,13 @@ type drainWaiter struct {
 }
 
 type Coordinator struct {
-	opts      CoordinatorOptions
-	commands  chan any
-	closed    chan struct{}
-	httpSlots chan struct{}
-	closeOnce sync.Once
+	opts        CoordinatorOptions
+	commands    chan any
+	closed      chan struct{}
+	httpSlots   chan struct{}
+	closeOnce   sync.Once
+	lifecycleMu sync.Mutex
+	closing     bool
 }
 
 func NewCoordinator(opts CoordinatorOptions) *Coordinator {
@@ -209,6 +222,13 @@ func NewCoordinator(opts CoordinatorOptions) *Coordinator {
 }
 
 func (c *Coordinator) Submit(intent Intent) Future[OperationResult] {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.closing {
+		f := &futureState{done: make(chan struct{})}
+		completeFuture(f, OperationResult{Err: errors.New("coordinator closed"), Disposition: ResultCancelled})
+		return Future[OperationResult]{f}
+	}
 	reply := make(chan Future[OperationResult], 1)
 	select {
 	case c.commands <- submitCommand{intent, reply}:
@@ -221,6 +241,11 @@ func (c *Coordinator) Submit(intent Intent) Future[OperationResult] {
 }
 
 func (c *Coordinator) PublishSnapshot() *SchedulerSnapshot {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.closing {
+		return &SchedulerSnapshot{}
+	}
 	reply := make(chan *SchedulerSnapshot, 1)
 	select {
 	case c.commands <- snapshotCommand{reply}:
@@ -228,6 +253,16 @@ func (c *Coordinator) PublishSnapshot() *SchedulerSnapshot {
 	case <-c.closed:
 		return &SchedulerSnapshot{}
 	}
+}
+func (c *Coordinator) DoHostCallback(ctx context.Context, call func()) error {
+	select {
+	case c.httpSlots <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-c.httpSlots }()
+	call()
+	return nil
 }
 func (c *Coordinator) DrainLegacy(ctx context.Context) DrainReport {
 	reply := make(chan DrainReport, 1)
@@ -245,6 +280,9 @@ func (c *Coordinator) DrainLegacy(ctx context.Context) DrainReport {
 }
 func (c *Coordinator) Close() {
 	c.closeOnce.Do(func() {
+		c.lifecycleMu.Lock()
+		c.closing = true
+		c.lifecycleMu.Unlock()
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		_ = c.DrainLegacy(ctx)
@@ -285,6 +323,9 @@ func (c *Coordinator) loop() {
 	}
 	var tryStart func(AuthInstanceID)
 	tryStart = func(instance AuthInstanceID) {
+		if !accepting {
+			return
+		}
 		if leases[instance] != nil {
 			return
 		}
@@ -307,7 +348,6 @@ func (c *Coordinator) loop() {
 			return
 		}
 		for _, d := range drains {
-			d.report.Completed++
 			d.command.reply <- d.report
 		}
 		drains = nil
@@ -349,6 +389,27 @@ func (c *Coordinator) loop() {
 				if cmd.job.cancel != nil {
 					cmd.job.cancel()
 				}
+				delete(inflight, cmd.key)
+				if leases[cmd.job.intent.Instance] == cmd.job {
+					delete(leases, cmd.job.intent.Instance)
+				}
+				probe, suppress := cmd.job.held.probeState()
+				if probe && c.opts.InheritSentUnknown != nil {
+					c.opts.InheritSentUnknown(cmd.job.intent, suppress)
+				}
+				completeFuture(cmd.job.future, OperationResult{Token: cmd.job.intent.Token, ProbeSendPhase: probe, SuppressUntil: suppress, Err: context.DeadlineExceeded, Disposition: ResultDiscardedStale})
+				if cmd.job.intent.Token.Fence > completedFence[cmd.job.intent.Instance] {
+					completedFence[cmd.job.intent.Instance] = cmd.job.intent.Token.Fence
+				}
+				for _, d := range drains {
+					d.report.Completed++
+					d.report.Invalidated++
+					if probe {
+						d.report.SentUnknown++
+					}
+				}
+				tryStart(cmd.job.intent.Instance)
+				finishDrains()
 			case resultCommand:
 				if inflight[cmd.key] != cmd.job {
 					continue
@@ -366,8 +427,17 @@ func (c *Coordinator) loop() {
 				if valid && c.opts.Validate != nil {
 					valid = c.opts.Validate(cmd.job.intent, cmd.result)
 				}
+				if valid && c.opts.Apply != nil {
+					if err := c.opts.Apply(cmd.job.intent, cmd.result); err != nil {
+						cmd.result.Err = err
+						valid = false
+					}
+				}
 				if !valid {
 					cmd.result.Disposition = ResultDiscardedStale
+					if cmd.job.intent.Token.Fence > completedFence[cmd.job.intent.Instance] {
+						completedFence[cmd.job.intent.Instance] = cmd.job.intent.Token.Fence
+					}
 					for _, d := range drains {
 						d.report.Invalidated++
 					}
@@ -386,6 +456,9 @@ func (c *Coordinator) loop() {
 					}
 				}
 				completeFuture(cmd.job.future, cmd.result)
+				for _, d := range drains {
+					d.report.Completed++
+				}
 				tryStart(cmd.job.intent.Instance)
 				finishDrains()
 			case snapshotCommand:
@@ -401,6 +474,18 @@ func (c *Coordinator) loop() {
 			case drainCommand:
 				accepting = false
 				waiter := &drainWaiter{command: cmd}
+				for instance, jobs := range queue {
+					for _, job := range jobs {
+						key := operationKey{job.intent.Instance, job.intent.Class, job.intent.Generation}
+						if inflight[key] == job {
+							delete(inflight, key)
+						}
+						completeFuture(job.future, OperationResult{Token: job.intent.Token, Err: context.Canceled, Disposition: ResultCancelled})
+						waiter.report.Cancelled++
+						waiter.report.Completed++
+					}
+					delete(queue, instance)
+				}
 				for _, job := range inflight {
 					if job.cancel != nil {
 						job.cancel()

@@ -70,6 +70,10 @@ type QuotaRefresher struct {
 	legacyTxn         *LegacyRefreshTxn
 	fenceMu           sync.Mutex
 	nextFence         uint64
+	txnIntent         *Intent
+	txnContext        context.Context
+	txnLease          *HeldLease
+	txnPermit         func() bool
 }
 
 // NewProductionQuotaRefresher wires S2 persistence/identity primitives into
@@ -168,10 +172,49 @@ func NewQuotaRefresher(host HostClient, state *PluginState, now func() time.Time
 			return r.legacyTxn.RunHeld(ctx, intent, held)
 		},
 		Validate: func(intent Intent, result OperationResult) bool {
-			return r.state.CPAAdmissionVersionCurrent(uint64(intent.Generation))
+			if r.bindings == nil {
+				p, _ := intent.Payload.(LegacyRefreshPayload)
+				return r.state.CPAAdmissionVersionCurrent(p.AdmissionVersion)
+			}
+			b, ok := r.bindings.Lookup(intent.AuthID)
+			if !ok {
+				return false
+			}
+			return ValidateWriteback(BindingVersion{Instance: b.Instance, Admission: b.Admission, Tier: TierGeneration(b.Generation), Login: b.Login, Fingerprint: b.Fingerprint}, WritebackVersion{Token: result.Token, Login: result.Login, Fingerprint: result.Fingerprint})
 		},
+		Apply: func(intent Intent, result OperationResult) error {
+			if result.Journal == nil {
+				return nil
+			}
+			apply := func() {
+				r.state.applyLegacyEffectJournal(*result.Journal)
+				for _, log := range result.Journal.HostLogs {
+					l := log
+					_ = r.coordinator.DoHostCallback(context.Background(), func() { r.host.Log(l.Level, l.Message, l.Fields) })
+				}
+			}
+			if r.bindings != nil && !r.bindings.ApplyIfCurrent(intent.AuthID, WritebackVersion{Token: result.Token, Login: result.Login, Fingerprint: result.Fingerprint}, apply) {
+				return ErrStaleExecutionToken
+			}
+			if r.bindings == nil {
+				apply()
+			}
+			return nil
+		},
+		InheritSentUnknown: func(intent Intent, suppressUntil time.Time) { _ = r.persistLegacySentUnknown(intent, suppressUntil) },
 	})
 	return r
+}
+
+func (r *QuotaRefresher) persistLegacySentUnknown(intent Intent, suppressUntil time.Time) error {
+	if r.runtimeStore == nil {
+		return nil
+	}
+	now := r.now()
+	sent := now
+	attempt := ProbeAttemptSeam{Instance: intent.Instance, AttemptID: fmt.Sprintf("legacy-%d", intent.Token.Fence), Windows: []ProbeWindowKind{ProbeWindowFiveHour, ProbeWindowLong}, Phase: ProbeAttemptSentUnknown, SendFenceSeq: intent.Token.Fence, CreatedAt: now, SentAt: &sent, VerifyNotBefore: now, SuppressUntil: suppressUntil}
+	_, err := r.runtimeStore.Update(func(s *PersistentState) error { s.ProbeAttempts[intent.Instance] = attempt; return nil })
+	return err
 }
 
 func (r *QuotaRefresher) RefreshOnce() error {
@@ -706,7 +749,6 @@ func (r *QuotaRefresher) refreshAuth(auth pluginapi.HostAuthFileEntry) {
 
 func (r *QuotaRefresher) refreshAuthVersioned(auth pluginapi.HostAuthFileEntry, version uint64) {
 	if r.coordinator == nil {
-		r.refreshAuthVersionedHeld(auth, version)
 		return
 	}
 	r.fenceMu.Lock()
@@ -714,10 +756,21 @@ func (r *QuotaRefresher) refreshAuthVersioned(auth pluginapi.HostAuthFileEntry, 
 	fence := r.nextFence
 	r.fenceMu.Unlock()
 	instance := legacyAuthInstanceID(auth.ID)
+	generation := TierGeneration(version)
+	var admission InstanceAdmissionEpoch
+	var login LoginEpoch
+	var fingerprint CredentialFingerprint
+	if r.bindings != nil {
+		binding, ok := r.bindings.Lookup(auth.ID)
+		if !ok {
+			return
+		}
+		instance, admission, generation, login, fingerprint = binding.Instance, binding.Admission, TierGeneration(binding.Generation), binding.Login, binding.Fingerprint
+	}
 	intent := Intent{
-		Instance: instance, Generation: TierGeneration(version), Class: OperationLegacyRefresh,
-		Source: LegacyRefreshSource, Token: ExecutionToken{Instance: instance, Tier: TierGeneration(version), Fence: fence},
-		Payload: auth,
+		AuthID: auth.ID, Instance: instance, Generation: generation, Class: OperationLegacyRefresh,
+		Source: LegacyRefreshSource, Token: ExecutionToken{Instance: instance, Admission: admission, Tier: generation, Fence: fence}, Login: login, Fingerprint: fingerprint,
+		Payload: LegacyRefreshPayload{Auth: auth, AdmissionVersion: version},
 	}
 	_ = r.coordinator.Submit(intent).Await(context.Background())
 }
@@ -981,8 +1034,23 @@ func (r *QuotaRefresher) refreshAndSaveCredentials(authResp pluginapi.HostAuthGe
 			return CodexCredentials{}, ErrBindingNotRosterConfirmed
 		}
 		next := HostAuth{Name: name, Raw: updated, Fingerprint: NewCredentialFingerprint(refreshed.ChatGPTAccountID, refreshed.RefreshToken, binding.AuthIndex)}
-		if _, err := r.credentials.SaveVersioned(context.Background(), binding.Instance, next, binding.ExecutionToken(r.nextFence)); err != nil {
+		token := binding.ExecutionToken(r.nextFence)
+		ctx := context.Background()
+		host := r.credentials.host
+		if r.txnIntent != nil {
+			token = r.txnIntent.Token
+			ctx = r.txnContext
+			host = heldCredentialHost{CredentialHost: r.credentials.host, ctx: ctx, lease: r.txnLease, permit: r.txnPermit}
+		}
+		write := WritebackVersion{Token: token, Login: binding.Login, Fingerprint: binding.Fingerprint}
+		if !r.bindings.ApplyIfCurrent(authID, write, func() {}) {
+			return CodexCredentials{}, ErrStaleExecutionToken
+		}
+		if _, err := r.credentials.SaveVersionedWithHost(ctx, binding.Instance, next, token, host); err != nil {
 			return CodexCredentials{}, err
+		}
+		if !r.bindings.ApplyIfCurrent(authID, write, func() {}) {
+			return CodexCredentials{}, ErrStaleExecutionToken
 		}
 	} else if err := r.saveAuthWithAdmissionPermit(authID, version, name, updated); err != nil {
 		return CodexCredentials{}, err

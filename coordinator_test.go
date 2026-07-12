@@ -105,6 +105,124 @@ func TestSuiteCoordinator(t *testing.T) {
 
 func TestMockGroupECoordinatorInterleavings(t *testing.T) { TestSuiteCoordinator(t) }
 
+func TestCoordinatorNonCooperativeExpiryReleasesLease(t *testing.T) {
+	now := time.Date(2026, 7, 12, 0, 0, 0, 0, time.UTC)
+	clock := newCoordinatorTestClock(now)
+	firstStarted, releaseFirst, secondStarted := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	c := NewCoordinator(CoordinatorOptions{LeaseDuration: 2 * time.Minute, Now: clock.Now, AfterFunc: clock.AfterFunc, Execute: func(_ context.Context, intent Intent, _ *HeldLease) OperationResult {
+		if intent.Token.Fence == 1 {
+			close(firstStarted)
+			<-releaseFirst
+		} else {
+			close(secondStarted)
+		}
+		return OperationResult{Token: intent.Token}
+	}})
+	defer c.Close()
+	one := c.Submit(Intent{Instance: 1, Generation: 1, Class: OperationLegacyRefresh, Source: LegacyRefreshSource, Token: ExecutionToken{Instance: 1, Tier: 1, Fence: 1}})
+	<-firstStarted
+	two := c.Submit(Intent{Instance: 1, Generation: 2, Class: OperationLegacyRefresh, Source: LegacyRefreshSource, StartedAfter: 1, Token: ExecutionToken{Instance: 1, Tier: 2, Fence: 2}})
+	clock.Advance(2 * time.Minute)
+	if got := one.Await(context.Background()); got.Disposition != ResultDiscardedStale {
+		t.Fatalf("expired result = %q", got.Disposition)
+	}
+	select {
+	case <-secondStarted:
+	case <-time.After(time.Second):
+		t.Fatal("queued work did not start after expiry")
+	}
+	close(releaseFirst)
+	if got := two.Await(context.Background()); got.Disposition != ResultApplied {
+		t.Fatalf("second result = %q", got.Disposition)
+	}
+}
+
+func TestCoordinatorRejectsEveryStaleBindingComponentBeforeApply(t *testing.T) {
+	fp := NewCredentialFingerprint("subject", "refresh", "meta")
+	current := BindingVersion{Instance: 1, Admission: 2, Tier: 3, Login: 4, Fingerprint: fp}
+	cases := []struct {
+		name  string
+		write WritebackVersion
+	}{
+		{"instance", WritebackVersion{Token: ExecutionToken{Instance: 9, Admission: 2, Tier: 3}, Login: 4, Fingerprint: fp}},
+		{"admission", WritebackVersion{Token: ExecutionToken{Instance: 1, Admission: 9, Tier: 3}, Login: 4, Fingerprint: fp}},
+		{"generation", WritebackVersion{Token: ExecutionToken{Instance: 1, Admission: 2, Tier: 9}, Login: 4, Fingerprint: fp}},
+		{"login", WritebackVersion{Token: ExecutionToken{Instance: 1, Admission: 2, Tier: 3}, Login: 9, Fingerprint: fp}},
+		{"fingerprint", WritebackVersion{Token: ExecutionToken{Instance: 1, Admission: 2, Tier: 3}, Login: 4, Fingerprint: NewCredentialFingerprint("other", "refresh", "meta")}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			applied := 0
+			c := NewCoordinator(CoordinatorOptions{Execute: func(_ context.Context, i Intent, _ *HeldLease) OperationResult {
+				return OperationResult{Token: tc.write.Token, Login: tc.write.Login, Fingerprint: tc.write.Fingerprint, Journal: &LegacyEffectJournal{}}
+			}, Validate: func(_ Intent, r OperationResult) bool {
+				return ValidateWriteback(current, WritebackVersion{Token: r.Token, Login: r.Login, Fingerprint: r.Fingerprint})
+			}, Apply: func(Intent, OperationResult) error { applied++; return nil }})
+			defer c.Close()
+			got := c.Submit(Intent{Instance: 1, Generation: 3, Class: OperationLegacyRefresh, Source: LegacyRefreshSource, Token: tc.write.Token}).Await(context.Background())
+			if got.Disposition != ResultDiscardedStale || applied != 0 {
+				t.Fatalf("result=%q applied=%d", got.Disposition, applied)
+			}
+		})
+	}
+}
+
+func TestCoordinatorCloseSubmitSnapshotRaceDoesNotHang(t *testing.T) {
+	c := NewCoordinator(CoordinatorOptions{Execute: func(_ context.Context, i Intent, _ *HeldLease) OperationResult {
+		return OperationResult{Token: i.Token}
+	}})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 100; i++ {
+			_ = c.PublishSnapshot()
+			_ = c.Submit(Intent{Instance: AuthInstanceID(i + 1), Generation: 1, Class: OperationLegacyRefresh, Source: LegacyRefreshSource, Token: ExecutionToken{Instance: AuthInstanceID(i + 1), Tier: 1}})
+		}
+	}()
+	c.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("submit/snapshot hung racing close")
+	}
+}
+
+func TestCoordinatorDrainCancelsQueuedWithoutStarting(t *testing.T) {
+	started := make(chan uint64, 2)
+	cancelled := make(chan struct{})
+	release := make(chan struct{})
+	c := NewCoordinator(CoordinatorOptions{Execute: func(ctx context.Context, intent Intent, _ *HeldLease) OperationResult {
+		started <- intent.Token.Fence
+		if intent.Token.Fence == 1 {
+			<-ctx.Done()
+			close(cancelled)
+			<-release
+		}
+		return OperationResult{Token: intent.Token}
+	}})
+	defer c.Close()
+	one := c.Submit(Intent{Instance: 1, Generation: 1, Class: OperationLegacyRefresh, Source: LegacyRefreshSource, Token: ExecutionToken{Instance: 1, Tier: 1, Fence: 1}})
+	<-started
+	two := c.Submit(Intent{Instance: 1, Generation: 2, Class: OperationLegacyRefresh, Source: LegacyRefreshSource, Token: ExecutionToken{Instance: 1, Tier: 2, Fence: 2}})
+	done := make(chan DrainReport, 1)
+	go func() { done <- c.DrainLegacy(context.Background()) }()
+	<-cancelled
+	close(release)
+	report := <-done
+	if report.Completed != 2 {
+		t.Fatalf("completed jobs = %d, want 2", report.Completed)
+	}
+	select {
+	case fence := <-started:
+		t.Fatalf("queued fence %d started during drain", fence)
+	default:
+	}
+	if two.Await(context.Background()).Disposition != ResultCancelled {
+		t.Fatal("queued future was not cancelled")
+	}
+	_ = one
+}
+
 type coordinatorTestClock struct {
 	mu     sync.Mutex
 	now    time.Time
