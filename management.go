@@ -214,6 +214,9 @@ func isResourcePath(path string) bool {
 	return path == "/v0/resource"+managementBasePath || strings.HasPrefix(path, "/v0/resource"+managementBasePath+"/")
 }
 
+// resourceRouteAllowed is the Resource/Management security boundary: Resource
+// exposes only the static status shell; business data and mutations stay under
+// the authenticated Management routes.
 func resourceRouteAllowed(method, path string) bool {
 	if method == http.MethodGet {
 		switch path {

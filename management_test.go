@@ -32,6 +32,21 @@ func TestManagementRegisterExposesStatusResourceAndRoutes(t *testing.T) {
 	if len(resources) != len(resp.Resources) {
 		t.Fatalf("resources = %#v", resp.Resources)
 	}
+	if !isResourcePath("/v0/resource" + managementBasePath + "/status") {
+		t.Fatal("registered status Resource path is not recognized as Resource")
+	}
+	if !resourceRouteAllowed(http.MethodGet, "/status") {
+		t.Fatal("GET /status is not allowed at the Resource boundary")
+	}
+	for _, mutation := range []struct{ method, path string }{
+		{http.MethodPost, "/refresh"},
+		{http.MethodPut, "/settings"},
+		{http.MethodPatch, "/annotations/account"},
+	} {
+		if resourceRouteAllowed(mutation.method, mutation.path) {
+			t.Fatalf("%s %s crossed the Resource boundary", mutation.method, mutation.path)
+		}
+	}
 
 	paths := map[string]string{}
 	for _, route := range resp.Routes {
