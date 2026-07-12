@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("S0", "S1", "S5", "S7")]
+    [ValidateSet("S0", "S1", "S2", "S5", "S7")]
     [string]$Stage,
     [string]$RepoRoot = (Split-Path -Parent $PSScriptRoot),
     [switch]$VerifyNegativeFixture
@@ -72,6 +72,17 @@ try {
             }
         }
         Write-Output "S1 ABI pick closure ratchet passed; actual=$($actual.Count) baseline=$($baseline.Count)"
+        exit 0
+    }
+
+    if ($Stage -eq "S2") {
+        if ($newViolations.Count -gt 0) {
+            $newViolations | ForEach-Object { Write-Error "new pick-path violation: $_" }
+            exit 1
+        }
+        & go test ./... -run 'Test(SuiteIdentityPersist|MockGroupAIdentityPersist|MockGroupDIdentitySecurity|MockGroupDBoundary|S2KPointRegistryMatchesSource)$' -count=1
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        Write-Output "S2 identity/persistence, boundary, sensitive-state, and K-point gates passed"
         exit 0
     }
 

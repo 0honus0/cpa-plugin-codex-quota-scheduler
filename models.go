@@ -127,6 +127,12 @@ type AnnotationState struct {
 }
 
 type AccountState struct {
+	Identity           AccountIdentity
+	Instance           AuthInstanceID
+	AdmissionEpoch     InstanceAdmissionEpoch
+	BindingEpoch       AuthBindingEpoch
+	LoginEpoch         LoginEpoch
+	TokenEpoch         TokenEpoch
 	AuthID             string
 	AuthIndex          string
 	DisplayName        string

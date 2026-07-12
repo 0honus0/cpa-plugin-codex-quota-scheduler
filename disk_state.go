@@ -13,6 +13,9 @@ type PluginDiskState struct {
 	Groups   map[string]GroupAnnotation   `json:"groups,omitempty"`
 }
 
+// PersistentState is deliberately separate from PluginDiskState: the former
+// contains only scheduler-control hashes and epochs, never host auth material.
+
 var defaultStatePath = resolveDefaultStatePath
 
 func resolveDefaultStatePath() string {

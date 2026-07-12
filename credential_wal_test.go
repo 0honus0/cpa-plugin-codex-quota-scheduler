@@ -1,0 +1,129 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+)
+
+type walStore struct {
+	states []PersistentState
+	fail   error
+}
+
+func (s *walStore) WriteThrough(st PersistentState) error {
+	s.states = append(s.states, st)
+	return s.fail
+}
+
+type walHost struct {
+	current HostAuth
+	saveErr error
+	calls   int
+}
+type crashAt string
+
+func (c crashAt) Hit(name string) error {
+	if name == string(c) {
+		return errors.New("crash")
+	}
+	return nil
+}
+
+func (h *walHost) SaveAuth(_ context.Context, _ AuthInstanceID, next HostAuth) error {
+	h.calls++
+	if h.saveErr == nil {
+		h.current = next
+	}
+	return h.saveErr
+}
+func (h *walHost) GetAuth(context.Context, AuthInstanceID) (HostAuth, error) { return h.current, nil }
+
+func TestCredentialSaveWALOrdering(t *testing.T) {
+	prev := HostAuth{Fingerprint: fp("s", "r0", "m")}
+	next := HostAuth{Fingerprint: fp("s", "r1", "m")}
+	store := &walStore{}
+	host := &walHost{current: prev}
+	m := NewCredentialManager(store, host, func() time.Time { return time.Unix(1, 0) }, nil)
+	m.SetChain(7, TransitionChain{Cursor: prev.Fingerprint})
+	result, err := m.SaveVersioned(context.Background(), 7, next, ExecutionToken{Instance: 7})
+	if err != nil || result.Phase != TransitionApplied {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if len(store.states) != 2 || store.states[0].CredentialChains[7].Transitions[0].Phase != TransitionPlanned || store.states[1].CredentialChains[7].Transitions[0].Phase != TransitionApplied {
+		t.Fatalf("states=%+v", store.states)
+	}
+}
+
+func TestCredentialSaveFailureAndUnknown(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want TransitionPhase
+	}{{"failure", errors.New("denied"), TransitionAborted}, {"unknown", ErrCredentialOutcomeUnknown, TransitionOutcomeUnknown}} {
+		t.Run(tc.name, func(t *testing.T) {
+			prev := HostAuth{Fingerprint: fp("s", "r0", "m")}
+			store := &walStore{}
+			host := &walHost{current: prev, saveErr: tc.err}
+			m := NewCredentialManager(store, host, time.Now, nil)
+			m.SetChain(1, TransitionChain{Cursor: prev.Fingerprint})
+			got, _ := m.SaveVersioned(context.Background(), 1, HostAuth{Fingerprint: fp("s", "r1", "m")}, ExecutionToken{Instance: 1})
+			if got.Phase != tc.want {
+				t.Fatalf("phase=%s", got.Phase)
+			}
+		})
+	}
+}
+
+func TestCredentialRecoveryReconcilesUnknownOutcome(t *testing.T) {
+	prev := HostAuth{Fingerprint: fp("s", "r0", "m")}
+	next := HostAuth{Fingerprint: fp("s", "r1", "m")}
+	for _, tc := range []struct {
+		name    string
+		current HostAuth
+		want    TransitionPhase
+		amb     bool
+	}{{"applied", next, TransitionApplied, false}, {"aborted", prev, TransitionAborted, false}, {"ambiguous", HostAuth{Fingerprint: fp("x", "y", "z")}, TransitionOutcomeUnknown, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := CredentialTransition{Prev: prev.Fingerprint, Next: next.Fingerprint, Phase: TransitionOutcomeUnknown}
+			store := &walStore{}
+			host := &walHost{current: tc.current}
+			m := NewCredentialManager(store, host, time.Now, nil)
+			m.SetChain(1, TransitionChain{Cursor: prev.Fingerprint, Transitions: []CredentialTransition{tr}})
+			report, err := m.Reconcile(context.Background(), 1)
+			if err != nil || report.Ambiguous != tc.amb || m.Chain(1).Transitions[0].Phase != tc.want {
+				t.Fatalf("report=%+v phase=%s err=%v", report, m.Chain(1).Transitions[0].Phase, err)
+			}
+		})
+	}
+}
+
+func TestCredentialSaveRejectsOldInstance(t *testing.T) {
+	m := NewCredentialManager(&walStore{}, &walHost{}, time.Now, nil)
+	m.SetChain(2, TransitionChain{Cursor: fp("s", "r", "m")})
+	_, err := m.SaveVersioned(context.Background(), 2, HostAuth{Fingerprint: fp("s", "r2", "m")}, ExecutionToken{Instance: 1})
+	if !errors.Is(err, ErrStaleExecutionToken) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestCredentialCrashLeavesRecoverableWAL(t *testing.T) {
+	prev := HostAuth{Fingerprint: fp("s", "r0", "m")}
+	next := HostAuth{Fingerprint: fp("s", "r1", "m")}
+	for _, point := range []string{"K_CREDENTIAL_AFTER_PLANNED", "K_CREDENTIAL_BEFORE_TERMINAL"} {
+		t.Run(point, func(t *testing.T) {
+			store := &walStore{}
+			host := &walHost{current: prev}
+			m := NewCredentialManager(store, host, time.Now, crashAt(point))
+			m.SetChain(1, TransitionChain{Cursor: prev.Fingerprint})
+			_, err := m.SaveVersioned(context.Background(), 1, next, ExecutionToken{Instance: 1})
+			if err == nil {
+				t.Fatal("crash not injected")
+			}
+			if len(store.states) == 0 || store.states[0].CredentialChains[1].Transitions[0].Phase != TransitionPlanned {
+				t.Fatalf("persisted=%+v", store.states)
+			}
+		})
+	}
+}

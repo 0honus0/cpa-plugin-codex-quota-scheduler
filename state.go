@@ -131,6 +131,13 @@ func (s *PluginState) IsAuthAdmitted(authID string) bool {
 	return ok
 }
 
+func (s *PluginState) ExecutionTokenCurrent(authID string, token ExecutionToken) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	account, ok := s.accounts["auth:"+authID]
+	return ok && account.Instance == token.Instance && account.AdmissionEpoch == token.Admission
+}
+
 func (s *PluginState) AdmittedCPAPriority(authID string) (int, bool) {
 	priority, _, ok := s.AdmittedCPAPriorityVersioned(authID)
 	return priority, ok
