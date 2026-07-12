@@ -1262,6 +1262,7 @@ func (r *QuotaRefresher) upsertRefreshFailure(account AccountState, version uint
 	merged.LastRefreshAt = account.LastRefreshAt
 	merged.LastError = message
 	if r.state.ApplyQuotaRefreshFailureIfAdmissionCurrent(merged, version, kind, message, r.now()) {
+		globalTrials.ObserveRetry(merged.Instance, r.now())
 		publishSchedulerState(r.state, highestTierSet(r.runtimeRoster()), r.now())
 		r.recordAdmissionLog(merged.AuthID, version, "warn", "quota.refresh_failed", "账号额度刷新失败", map[string]any{"auth_id": merged.AuthID, "error": message})
 	}

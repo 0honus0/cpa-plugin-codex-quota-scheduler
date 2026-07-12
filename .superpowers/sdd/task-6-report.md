@@ -42,5 +42,21 @@ No S6 Probe transition or S7 roster lifecycle behavior was added. Trial timeout 
 
 ## Concerns
 
-- Benchmark bytes/op increased by 384 while allocations/op stayed constant.
-- Legacy dispatch scenarios remain inside nonconstant historical-fixture branches after their S5 replacement assertions; they are not skipped and `go vet` is clean, but can be deleted in a later test-only cleanup.
+No open S5 concern remains after the correction wave below.
+
+## Review correction wave
+
+The review findings were addressed test-first in a follow-up wave:
+
+- Production snapshots now always carry the bounded 64-entry S5 evidence-intent channel. Successful Opportunistic CAS sends `{auth, instance, began_at}` nonblocking. The S5 consumer marks evidence pending and asynchronously calls the existing `RefreshOneSoon` normal-refresh/coordinator path. A full queue safely drops the intent; the trial remains subject to timeout/budget.
+- Production refresh failures call `ObserveRetry`; reliable refresh writeback and usage/request evidence clear the trial. Selection calls event-driven `Advance` on real picks: pending evidence remains excluded at 60s, while 5m or the third retry forces TrialUnknown. No periodic re-admission scanner exists.
+- TrialUnknown becomes dynamically eligible after `nextRetry`; real pick consults `TrialRegistry.State(now)` on every selection and does not trust the snapshot's trial bit. Backoff is exactly 1m, 2m, 5m, 10m, 15m, then capped at 15m.
+- `AccountView` carries the real three-state circuit class. The 1,440 classification matrix therefore exercises Closed/Open/HalfOpen production data rather than a test-only dimension.
+- The oracle is now independently table-driven. All 774 multi-instance relations assert selected auth, confidence class, fallback, trial start, evidence source, and reason. A priority-before-class mutant is explicitly killed by oracle expectations.
+- The real ABI test encodes a plugin request, invokes `handleSchedulerPick`, decodes the response, proves authoritative-tier intersection, and proves candidates do not mutate roster admission. Concurrent alternating publications prove one immutable snapshot is observed per decision.
+- All unreachable historical dispatch bodies were deleted. There are no skips or unreachable compatibility branches.
+- Per-pick snapshot/map cloning was removed. Corrected real published-path benchmark: 403.9 / 418.1 / 1210 ns/op, 664 B/op, 6 allocs/op. This is materially below both the S1 baseline (2312 B/op) and the first S5 review build (2696 B/op).
+
+Corrected verification: focused lifecycle/backoff/queue/evidence tests PASS; `TestSuiteScheduling` PASS; race `Test(SchedulerPick|Trial)` PASS; S5 static/ABI gate PASS with analyzer `[]`; full tests, vet, and diff check PASS.
+
+The two earlier concerns are resolved: bytes/op no longer regress materially, and historical unreachable bodies have been removed.

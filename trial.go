@@ -31,6 +31,7 @@ type trialRecord struct {
 	began     time.Time
 	pending   bool
 	retries   int
+	backoffs  int
 	nextRetry time.Time
 }
 type trialCell struct{ value atomic.Pointer[trialRecord] }
@@ -48,11 +49,11 @@ func (r *TrialRegistry) TryBegin(id AuthInstanceID, now time.Time) bool {
 		if old != nil && (old.state == TrialActive || now.Before(old.nextRetry)) {
 			return false
 		}
-		retries := 0
+		backoffs := 0
 		if old != nil {
-			retries = old.retries
+			backoffs = old.backoffs
 		}
-		next := &trialRecord{state: TrialActive, began: now, retries: retries}
+		next := &trialRecord{state: TrialActive, began: now, backoffs: backoffs}
 		if c.value.CompareAndSwap(old, next) {
 			return true
 		}
@@ -85,10 +86,13 @@ func (r *TrialRegistry) Advance(id AuthInstanceID, now time.Time) {
 }
 func unknownTrial(v trialRecord, now time.Time) trialRecord {
 	v.state = TrialUnknown
-	delay := time.Minute << min(v.retries, 2)
-	if delay > 15*time.Minute {
-		delay = 15 * time.Minute
+	delays := [...]time.Duration{time.Minute, 2 * time.Minute, 5 * time.Minute, 10 * time.Minute, 15 * time.Minute}
+	index := v.backoffs
+	if index >= len(delays) {
+		index = len(delays) - 1
 	}
+	delay := delays[index]
+	v.backoffs++
 	v.nextRetry = now.Add(delay)
 	return v
 }
@@ -96,6 +100,9 @@ func (r *TrialRegistry) State(id AuthInstanceID, now time.Time) TrialState {
 	c := r.cell(id)
 	v := c.value.Load()
 	if v == nil {
+		return TrialNone
+	}
+	if v.state == TrialUnknown && !now.Before(v.nextRetry) {
 		return TrialNone
 	}
 	return v.state

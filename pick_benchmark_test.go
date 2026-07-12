@@ -66,10 +66,12 @@ func TestSchedulerPickConcurrentSnapshotOnly(t *testing.T) {
 
 func BenchmarkSchedulerPickSnapshot(b *testing.B) {
 	req, snapshot, now := pickBaselineFixture()
+	active := map[string]struct{}{"a": {}, "b": {}}
+	PublishSchedulerSnapshot(&SchedulerSnapshot{HandleEnabled: true, MonthlyMode: snapshot.Config.MonthlyMode, Accounts: []AccountView{{ID: "a", Instance: 1, Cache: CacheFresh}, {ID: "b", Instance: 2, Cache: CacheFresh}}, ActiveHighestTier: active})
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		decision := schedulerPickSnapshot(req, snapshot, now)
+		decision := schedulerPickPublished(req, now)
 		if decision.AuthID == "" {
 			b.Fatal("no selection")
 		}

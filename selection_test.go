@@ -5,24 +5,90 @@ import (
 	"time"
 )
 
-// oracleClassify is intentionally independent of production classification.
+// oracleClassify is a test-side decision table: hard exclusions are spec rows,
+// then cache/exhaustion facts index a result table. It intentionally shares no
+// production predicates or helper control flow.
 func oracleClassify(a AccountView, now time.Time) AvailabilityClass {
-	if a.AuthBlocked || a.CircuitOpen || a.TemporaryUnavailable || a.Trial != TrialNone {
-		return Excluded
-	}
-	if a.Exhausted && a.ResetAt.After(now) {
-		return Excluded
-	}
-	if a.Cache == CacheFresh || a.Cache == CacheAging {
-		if !a.Exhausted {
-			return Preferred
+	hardStops := []bool{a.AuthBlocked, a.Circuit == CircuitOpen, a.TemporaryUnavailable, a.Trial != TrialNone, a.Exhausted && a.ResetAt.After(now)}
+	for _, stop := range hardStops {
+		if stop {
+			return Excluded
 		}
-		return Opportunistic
 	}
-	if a.Cache == CacheUnknown || (a.Cache == CacheStale && a.LastKnownAvailable) {
-		return Opportunistic
+	type fact struct {
+		cache            CacheClass
+		exhausted, known bool
+	}
+	table := map[fact]AvailabilityClass{
+		{CacheFresh, false, false}: Preferred, {CacheFresh, false, true}: Preferred, {CacheAging, false, false}: Preferred, {CacheAging, false, true}: Preferred,
+		{CacheFresh, true, false}: Opportunistic, {CacheFresh, true, true}: Opportunistic, {CacheAging, true, false}: Opportunistic, {CacheAging, true, true}: Opportunistic,
+		{CacheUnknown, false, false}: Opportunistic, {CacheUnknown, false, true}: Opportunistic, {CacheUnknown, true, false}: Opportunistic, {CacheUnknown, true, true}: Opportunistic,
+		{CacheStale, false, true}: Opportunistic, {CacheStale, true, true}: Opportunistic,
+	}
+	if class, ok := table[fact{a.Cache, a.Exhausted, a.LastKnownAvailable}]; ok {
+		return class
 	}
 	return Excluded
+}
+
+func oracleSelect(snapshot SchedulerSnapshot, candidates []Candidate, now time.Time) SelectionResult {
+	candidate := map[string]bool{}
+	for _, c := range candidates {
+		if c.Provider == "codex" {
+			candidate[c.ID] = true
+		}
+	}
+	best := map[AvailabilityClass]*AccountView{}
+	for i := range snapshot.Accounts {
+		a := snapshot.Accounts[i]
+		if !candidate[a.ID] {
+			continue
+		}
+		if _, ok := snapshot.ActiveHighestTier[a.ID]; !ok {
+			continue
+		}
+		class := oracleClassify(a, now)
+		if class == Excluded {
+			continue
+		}
+		current := best[class]
+		if current == nil || oracleBefore(a, *current, snapshot.MonthlyMode) {
+			copy := a
+			best[class] = &copy
+		}
+	}
+	for _, class := range []AvailabilityClass{Preferred, Opportunistic} {
+		if a := best[class]; a != nil {
+			result := SelectionResult{AuthID: a.ID, Instance: a.Instance, Class: class, Trial: class == Opportunistic, Reason: "selected"}
+			if result.Trial {
+				result.EvidenceSource = "trial_evidence"
+			}
+			return result
+		}
+	}
+	return SelectionResult{Reason: "no_selectable_account", Fallback: snapshot.Fallback == FallbackFillFirst}
+}
+
+func oracleBefore(a, b AccountView, mode MonthlyMode) bool {
+	if a.PluginPriority > b.PluginPriority {
+		return true
+	}
+	if a.PluginPriority < b.PluginPriority {
+		return false
+	}
+	if mode == MonthlyModePriority && a.Family != b.Family {
+		return a.Family == AccountFamilyMonthly
+	}
+	if a.Expiry.IsZero() != b.Expiry.IsZero() {
+		return !a.Expiry.IsZero()
+	}
+	if !a.Expiry.Equal(b.Expiry) {
+		return a.Expiry.Before(b.Expiry)
+	}
+	if a.RemainingQuota != b.RemainingQuota {
+		return a.RemainingQuota > b.RemainingQuota
+	}
+	return a.ID < b.ID
 }
 
 // inv:INV-12,INV-13,INV-44
@@ -44,7 +110,7 @@ func TestMockGroupB(t *testing.T) {
 					for _, temp := range []bool{false, true} {
 						for _, trial := range trials {
 							for _, priority := range []int{0, 1} {
-								a := AccountView{ID: "a", Instance: 1, Cache: cache, Exhausted: ex.exhausted, ResetAt: ex.reset, AuthBlocked: auth, CircuitOpen: circuit == CircuitOpen, TemporaryUnavailable: temp, Trial: trial, PluginPriority: priority, LastKnownAvailable: true}
+								a := AccountView{ID: "a", Instance: 1, Cache: cache, Exhausted: ex.exhausted, ResetAt: ex.reset, AuthBlocked: auth, Circuit: circuit, TemporaryUnavailable: temp, Trial: trial, PluginPriority: priority, LastKnownAvailable: true}
 								if got, want := ClassifyAccount(a, now), oracleClassify(a, now); got != want {
 									t.Fatalf("vector %d: got %v want %v: %#v", count, got, want, a)
 								}
@@ -86,20 +152,38 @@ func TestMockGroupB(t *testing.T) {
 				x /= len(reps)
 			}
 			for relation := 0; relation < 3; relation++ {
-				cs := candidates
+				cs := append([]Candidate(nil), candidates...)
+				if relation == 0 {
+					cs = append(cs, Candidate{ID: "outside", Provider: "codex"})
+				}
 				if relation == 1 && len(cs) > 0 {
 					cs = cs[:len(cs)-1]
 				}
 				if relation == 2 {
 					cs = []Candidate{{ID: "outside", Provider: "codex"}}
 				}
-				_ = SelectAccount(SchedulerSnapshot{Accounts: accounts, ActiveHighestTier: active, MonthlyMode: MonthlyModeExpiryOrder}, cs, now)
+				snapshot := SchedulerSnapshot{Accounts: accounts, ActiveHighestTier: active, MonthlyMode: MonthlyModeExpiryOrder, Fallback: FallbackFillFirst}
+				got, want := SelectAccount(snapshot, cs, now), oracleSelect(snapshot, cs, now)
+				if got.AuthID != want.AuthID || got.Class != want.Class || got.Trial != want.Trial || got.Fallback != want.Fallback || got.EvidenceSource != want.EvidenceSource || got.Reason != want.Reason {
+					t.Fatalf("n=%d code=%d relation=%d got=%#v want=%#v", n, code, relation, got, want)
+				}
 				multi++
 			}
 		}
 	}
 	if multi != 774 {
 		t.Fatalf("multi-instance comparisons=%d want 774", multi)
+	}
+}
+
+func TestSchedulingOracleDetectsPriorityBeforeClassMutation(t *testing.T) {
+	now := time.Now()
+	snapshot := SchedulerSnapshot{Accounts: []AccountView{{ID: "op", Instance: 1, Cache: CacheUnknown, PluginPriority: 9}, {ID: "preferred", Instance: 2, Cache: CacheFresh}}, ActiveHighestTier: map[string]struct{}{"op": {}, "preferred": {}}}
+	cs := []Candidate{{ID: "op", Provider: "codex"}, {ID: "preferred", Provider: "codex"}}
+	want := oracleSelect(snapshot, cs, now)
+	mutant := "op"
+	if want.AuthID == mutant {
+		t.Fatal("oracle failed to kill priority-before-class mutant")
 	}
 }
 
@@ -119,4 +203,11 @@ func TestSuiteScheduling(t *testing.T) {
 	t.Run("trial CAS", TestTrialRegistryCASAndEvidence)
 	t.Run("trial budget", TestTrialPendingAtSixtySecondsAndBudget)
 	t.Run("real ABI snapshot", TestSchedulerPickABIPathSnapshotOnly)
+	t.Run("oracle mutant", TestSchedulingOracleDetectsPriorityBeforeClassMutation)
+	t.Run("trial expiry", TestTrialUnknownExpiresIntoEligibility)
+	t.Run("trial backoff", TestTrialBackoffSequence)
+	t.Run("trial retries", TestTrialThreeRetriesForceUnknown)
+	t.Run("production evidence", TestProductionEvidenceQueueAndDynamicTrial)
+	t.Run("evidence queue", TestEvidenceConsumerMarksPendingAndQueueFullIsNonblocking)
+	t.Run("immutable publication", TestSchedulerPickObservesOneImmutablePublication)
 }

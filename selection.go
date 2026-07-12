@@ -48,7 +48,7 @@ type AccountView struct {
 	Exhausted            bool
 	ResetAt              time.Time
 	AuthBlocked          bool
-	CircuitOpen          bool
+	Circuit              CircuitClass
 	TemporaryUnavailable bool
 	Trial                TrialState
 	Expiry               time.Time
@@ -58,16 +58,18 @@ type AccountView struct {
 type Candidate struct{ ID, Provider string }
 
 type SelectionResult struct {
-	AuthID   string
-	Instance AuthInstanceID
-	Class    AvailabilityClass
-	Trial    bool
-	Reason   string
-	Ordered  []AccountView
+	AuthID         string
+	Instance       AuthInstanceID
+	Class          AvailabilityClass
+	Trial          bool
+	Fallback       bool
+	EvidenceSource string
+	Reason         string
+	Ordered        []AccountView
 }
 
 func ClassifyAccount(a AccountView, now time.Time) AvailabilityClass {
-	if a.AuthBlocked || a.CircuitOpen || a.TemporaryUnavailable || a.Trial != TrialNone {
+	if a.AuthBlocked || a.Circuit == CircuitOpen || a.TemporaryUnavailable || a.Trial != TrialNone {
 		return Excluded
 	}
 	if a.Exhausted && a.ResetAt.After(now) {
@@ -86,6 +88,10 @@ func ClassifyAccount(a AccountView, now time.Time) AvailabilityClass {
 }
 
 func SelectAccount(snapshot SchedulerSnapshot, candidates []Candidate, now time.Time) SelectionResult {
+	return selectAccountSkipping(snapshot, candidates, now, nil, nil)
+}
+
+func selectAccountSkipping(snapshot SchedulerSnapshot, candidates []Candidate, now time.Time, skip map[AuthInstanceID]struct{}, trials *TrialRegistry) SelectionResult {
 	eligible := make(map[string]struct{}, len(candidates))
 	for _, c := range candidates {
 		if c.ID != "" && c.Provider == "codex" {
@@ -96,8 +102,15 @@ func SelectAccount(snapshot SchedulerSnapshot, candidates []Candidate, now time.
 	}
 	byClass := map[AvailabilityClass][]AccountView{Preferred: {}, Opportunistic: {}}
 	for _, a := range snapshot.Accounts {
+		if _, blocked := skip[a.Instance]; blocked {
+			continue
+		}
 		if _, ok := eligible[a.ID]; !ok {
 			continue
+		}
+		if trials != nil {
+			trials.Advance(a.Instance, now)
+			a.Trial = trials.State(a.Instance, now)
 		}
 		class := ClassifyAccount(a, now)
 		if class != Excluded {
@@ -108,10 +121,14 @@ func SelectAccount(snapshot SchedulerSnapshot, candidates []Candidate, now time.
 		accounts := byClass[class]
 		sort.Slice(accounts, func(i, j int) bool { return accountViewLess(accounts[i], accounts[j], snapshot.MonthlyMode) })
 		if len(accounts) > 0 {
-			return SelectionResult{AuthID: accounts[0].ID, Instance: accounts[0].Instance, Class: class, Trial: class == Opportunistic, Reason: "selected", Ordered: accounts}
+			result := SelectionResult{AuthID: accounts[0].ID, Instance: accounts[0].Instance, Class: class, Trial: class == Opportunistic, Reason: "selected", Ordered: accounts}
+			if result.Trial {
+				result.EvidenceSource = "trial_evidence"
+			}
+			return result
 		}
 	}
-	return SelectionResult{Reason: "no_selectable_account"}
+	return SelectionResult{Reason: "no_selectable_account", Fallback: snapshot.Fallback == FallbackFillFirst}
 }
 
 func accountViewLess(a, b AccountView, mode MonthlyMode) bool {

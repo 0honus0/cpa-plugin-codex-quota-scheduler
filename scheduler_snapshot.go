@@ -14,7 +14,13 @@ type SchedulerSnapshot struct {
 	Accounts          []AccountView
 	ActiveHighestTier map[string]struct{}
 	Trials            *TrialRegistry
-	EvidenceIntents   chan<- AuthInstanceID
+	EvidenceIntents   chan<- EvidenceIntent
+}
+
+type EvidenceIntent struct {
+	AuthID   string
+	Instance AuthInstanceID
+	BeganAt  time.Time
 }
 
 var publishedSchedulerSnapshot atomic.Pointer[SchedulerSnapshot]
@@ -51,19 +57,18 @@ func schedulerPickPublished(req pluginapi.SchedulerPickRequest, now time.Time) P
 	for _, c := range req.Candidates {
 		candidates = append(candidates, Candidate{ID: c.ID, Provider: c.Provider})
 	}
-	working := cloneSchedulerSnapshot(*snapshot)
-	result := SelectAccount(working, candidates, now)
+	result := selectAccountSkipping(*snapshot, candidates, now, nil, snapshot.Trials)
+	var skipped map[AuthInstanceID]struct{}
 	for result.AuthID != "" && result.Class == Opportunistic && (snapshot.Trials == nil || !snapshot.Trials.TryBegin(result.Instance, now)) {
-		for i := range working.Accounts {
-			if working.Accounts[i].Instance == result.Instance {
-				working.Accounts[i].Trial = TrialActive
-			}
+		if skipped == nil {
+			skipped = make(map[AuthInstanceID]struct{})
 		}
-		result = SelectAccount(working, candidates, now)
+		skipped[result.Instance] = struct{}{}
+		result = selectAccountSkipping(*snapshot, candidates, now, skipped, snapshot.Trials)
 	}
 	if result.AuthID != "" && result.Class == Opportunistic {
 		select {
-		case snapshot.EvidenceIntents <- result.Instance:
+		case snapshot.EvidenceIntents <- EvidenceIntent{AuthID: result.AuthID, Instance: result.Instance, BeganAt: now}:
 		default:
 		}
 	}
@@ -93,9 +98,16 @@ func schedulerSnapshotFromState(state StateSnapshot, trials *TrialRegistry) *Sch
 		if trials != nil {
 			trial = trials.State(a.Instance, state.Now)
 		}
-		accounts = append(accounts, AccountView{ID: a.AuthID, Instance: a.Instance, PluginPriority: a.Annotation.SchedulerPriority, Family: a.Family, Cache: cache, LastKnownAvailable: a.LastError == "", Exhausted: exhausted, ResetAt: reset, AuthBlocked: a.Refresh.AuthFailure, CircuitOpen: effectiveCircuitState(a.Circuit, state.Now).EffectiveState == CircuitStateOpen, TemporaryUnavailable: a.TemporaryExhausted && a.TemporaryResetAt.After(state.Now), Trial: trial, Expiry: accountSortTime(a), RemainingQuota: remainingQuota(a)})
+		circuit := effectiveCircuitState(a.Circuit, state.Now).EffectiveState
+		circuitClass := CircuitClosed
+		if circuit == CircuitStateOpen {
+			circuitClass = CircuitOpen
+		} else if circuit == CircuitStateHalfOpen {
+			circuitClass = CircuitHalfOpen
+		}
+		accounts = append(accounts, AccountView{ID: a.AuthID, Instance: a.Instance, PluginPriority: a.Annotation.SchedulerPriority, Family: a.Family, Cache: cache, LastKnownAvailable: a.LastError == "", Exhausted: exhausted, ResetAt: reset, AuthBlocked: a.Refresh.AuthFailure, Circuit: circuitClass, TemporaryUnavailable: a.TemporaryExhausted && a.TemporaryResetAt.After(state.Now), Trial: trial, Expiry: accountSortTime(a), RemainingQuota: remainingQuota(a)})
 	}
-	return &SchedulerSnapshot{HandleEnabled: state.Config.HandleEnabled, Fallback: state.Config.Fallback, MonthlyMode: state.Config.MonthlyMode, Accounts: accounts, ActiveHighestTier: active, Trials: trials}
+	return &SchedulerSnapshot{HandleEnabled: state.Config.HandleEnabled, Fallback: state.Config.Fallback, MonthlyMode: state.Config.MonthlyMode, Accounts: accounts, ActiveHighestTier: active, Trials: trials, EvidenceIntents: globalEvidenceIntents}
 }
 
 func publishSchedulerState(state *PluginState, active map[string]struct{}, now time.Time) {

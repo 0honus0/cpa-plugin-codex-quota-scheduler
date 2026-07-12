@@ -51,3 +51,50 @@ func TestTrialPendingAtSixtySecondsAndBudget(t *testing.T) {
 		t.Fatalf("retry=%s", got)
 	}
 }
+
+func TestTrialUnknownExpiresIntoEligibility(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	r := NewTrialRegistry()
+	if !r.TryBegin(9, now) {
+		t.Fatal("begin")
+	}
+	r.Advance(9, now.Add(5*time.Minute))
+	if got := r.State(9, now.Add(5*time.Minute)); got != TrialUnknown {
+		t.Fatalf("state=%v", got)
+	}
+	if got := r.State(9, now.Add(6*time.Minute)); got != TrialNone {
+		t.Fatalf("expired backoff state=%v", got)
+	}
+	if !r.TryBegin(9, now.Add(6*time.Minute)) {
+		t.Fatal("backoff expiry did not permit CAS")
+	}
+}
+
+func TestTrialBackoffSequence(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	want := []time.Duration{time.Minute, 2 * time.Minute, 5 * time.Minute, 10 * time.Minute, 15 * time.Minute, 15 * time.Minute}
+	for retries, delay := range want {
+		v := trialRecord{backoffs: retries}
+		got := unknownTrial(v, now).nextRetry.Sub(now)
+		if got != delay {
+			t.Fatalf("retries=%d delay=%s want=%s", retries, got, delay)
+		}
+	}
+}
+
+func TestTrialThreeRetriesForceUnknown(t *testing.T) {
+	now := time.Now()
+	r := NewTrialRegistry()
+	r.TryBegin(10, now)
+	r.MarkEvidencePending(10, true)
+	for i := 0; i < 2; i++ {
+		r.ObserveRetry(10, now.Add(time.Duration(i+1)*time.Second))
+		if r.State(10, now) != TrialActive {
+			t.Fatalf("retry %d forced early", i+1)
+		}
+	}
+	r.ObserveRetry(10, now.Add(3*time.Second))
+	if r.State(10, now) != TrialUnknown {
+		t.Fatal("third retry did not force unknown")
+	}
+}

@@ -13,11 +13,13 @@ import (
 )
 
 var (
-	currentConfig   atomic.Value
-	globalState     = NewPluginState(DefaultConfig())
-	globalTrials    = NewTrialRegistry()
-	refresherMu     sync.Mutex
-	globalRefresher *QuotaRefresher
+	currentConfig         atomic.Value
+	globalState           = NewPluginState(DefaultConfig())
+	globalTrials          = NewTrialRegistry()
+	globalEvidenceIntents = make(chan EvidenceIntent, 64)
+	evidenceConsumerOnce  sync.Once
+	refresherMu           sync.Mutex
+	globalRefresher       *QuotaRefresher
 )
 
 type envelope struct {
@@ -76,8 +78,29 @@ func configure(raw []byte) error {
 	currentConfig.Store(cfg)
 	globalState.ReplaceConfig(cfg)
 	globalState.SetAnnotations(AnnotationState{Accounts: disk.Accounts, Groups: disk.Groups})
+	startEvidenceConsumer()
 	publishSchedulerState(globalState, nil, time.Now())
 	return nil
+}
+
+func startEvidenceConsumer() {
+	evidenceConsumerOnce.Do(func() {
+		go func() {
+			for intent := range globalEvidenceIntents {
+				consumeEvidenceIntent(intent)
+			}
+		}()
+	})
+}
+
+func consumeEvidenceIntent(intent EvidenceIntent) {
+	globalTrials.MarkEvidencePending(intent.Instance, true)
+	refresherMu.Lock()
+	r := globalRefresher
+	refresherMu.Unlock()
+	if r != nil {
+		r.RefreshOneSoon(intent.AuthID)
+	}
 }
 
 func handleSchedulerPick(raw []byte) ([]byte, error) {
