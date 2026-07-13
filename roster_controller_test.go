@@ -289,3 +289,73 @@ func TestRosterObserverSeesEveryTransition(t *testing.T) {
 		t.Fatalf("observer transitions=%#v", observed)
 	}
 }
+
+func TestRosterObserverRejectsOutOfOrderTransition(t *testing.T) {
+	p := 7
+	clock := time.Date(2026, 7, 13, 9, 0, 0, 0, time.UTC)
+	host := &rosterTestHost{entries: []RosterEntry{{ID: "a", Provider: "codex", Priority: &p}}}
+	runtime := NewQuotaRefresher(&fakeHostClient{}, NewPluginState(DefaultConfig()), func() time.Time { return clock })
+	degradedEntered := make(chan struct{})
+	releaseDegraded := make(chan struct{})
+	var once sync.Once
+	c := NewRosterController(RosterControllerOptions{
+		Host: host,
+		Now:  func() time.Time { return clock },
+		Observe: func(active ActiveRoster) {
+			if active.Health == RosterDegraded {
+				once.Do(func() { close(degradedEntered) })
+				<-releaseDegraded
+			}
+			runtime.ObserveRosterLifecycle(active)
+		},
+	})
+	if _, err := c.Startup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	host.setError(errors.New("offline"))
+	clock = clock.Add(time.Minute)
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		_, _ = c.WakeForManagement(context.Background())
+	}()
+	<-degradedEntered
+	clock = clock.Add(rosterDegradedLimit)
+	if got, _ := c.WakeForManagement(context.Background()); got.Health != RosterFailClosed {
+		t.Fatalf("second transition=%#v", got)
+	}
+	close(releaseDegraded)
+	<-firstDone
+	if got := runtime.runtimeRoster(); got.Health != RosterFailClosed {
+		t.Fatalf("stale observer overwrote fail-closed lifecycle: %#v", got)
+	}
+}
+
+func TestRosterProvisionalObserverOnlyAfterGuardCommit(t *testing.T) {
+	p := 7
+	now := time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC)
+	base := ActiveRoster{Instances: []string{"a"}, Entries: []RosterEntry{{ID: "a", Provider: "codex", Priority: &p}}, ConfirmedAt: now.Add(-time.Hour), Generation: 3}
+	host := &rosterTestHost{err: errors.New("offline")}
+	var c *RosterController
+	var observed []ActiveRoster
+	c = NewRosterController(RosterControllerOptions{
+		Host:               host,
+		Now:                func() time.Time { return now },
+		Provisional:        &base,
+		ProbeOnProvisional: true,
+		Observe: func(active ActiveRoster) {
+			observed = append(observed, cloneActiveRoster(active))
+		},
+		VerifyProvisional: func(ctx context.Context, _ ActiveRoster) bool {
+			_, _ = c.OnSyncResult(ctx, []RosterEntry{{ID: "a", Provider: "codex", Priority: &p}}, nil)
+			return true
+		},
+	})
+	_, _ = c.WakeForProbe(context.Background())
+	if got := c.Snapshot(); got.Health != RosterHealthy || got.Provisional {
+		t.Fatalf("current=%#v", got)
+	}
+	if len(observed) != 2 || observed[len(observed)-1].Health != RosterHealthy {
+		t.Fatalf("lost guard published stale provisional transition: %#v", observed)
+	}
+}

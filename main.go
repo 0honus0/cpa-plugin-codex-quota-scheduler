@@ -144,10 +144,11 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 		},
 		Observe: func(active ActiveRoster) {
 			snapshot := hostRosterSnapshotFromActive(active)
-			hostRosterLatest.Store(&snapshot)
 			if production != nil {
 				production.ObserveRosterLifecycle(active)
+				snapshot = production.runtimeRoster()
 			}
+			hostRosterLatest.Store(&snapshot)
 		},
 		ProbeOnProvisional: globalState.Config().ProbeOnProvisionalRoster,
 	})

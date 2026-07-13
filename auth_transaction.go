@@ -60,7 +60,7 @@ func (t *LegacyRefreshTxn) RunHeld(ctx context.Context, intent Intent, held *Hel
 		b, ok := t.refresher.bindings.Lookup(intent.AuthID)
 		return ok && ValidateWriteback(BindingVersion{Instance: b.Instance, Admission: b.Admission, Tier: TierGeneration(b.Generation), Login: b.Login, Fingerprint: b.Fingerprint}, WritebackVersion{Token: intent.Token, Login: intent.Login, Fingerprint: intent.Fingerprint})
 	}
-	r := QuotaRefresher{host: heldHostClient{HostClient: t.refresher.host, ctx: ctx, lease: held, journal: &j, permit: permit}, state: overlay, now: t.refresher.now, runtimeStore: t.refresher.runtimeStore, bindings: t.refresher.bindings, credentials: t.refresher.credentials}
+	r := QuotaRefresher{host: heldHostClient{HostClient: t.refresher.host, ctx: ctx, lease: held, journal: &j, permit: permit}, state: overlay, now: t.refresher.now, runtimeStore: t.refresher.runtimeStore, bindings: t.refresher.bindings, credentials: t.refresher.credentials, lifecycleOwner: t.refresher}
 	r.txnIntent, r.txnContext, r.txnLease, r.txnPermit = &intent, ctx, held, permit
 	r.refreshAuthVersionedHeld(auth, version)
 	effects := overlay.legacyEffectJournal(auth.ID, baselineLogs)

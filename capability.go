@@ -30,6 +30,7 @@ type HostRosterSnapshot struct {
 	BackgroundAllowed bool
 	Health            RosterHealth
 	Generation        uint64
+	LifecycleRevision uint64
 	Entries           []RosterEntry
 	ConfirmedAt       time.Time
 	DegradedSince     time.Time
@@ -38,7 +39,7 @@ type HostRosterSnapshot struct {
 func hostRosterSnapshotFromActive(active ActiveRoster) HostRosterSnapshot {
 	return HostRosterSnapshot{
 		Capability: active.Capability, Confirmed: active.Confirmed, Provisional: active.Provisional,
-		BackgroundAllowed: active.BackgroundAllowed, Health: active.Health, Generation: active.Generation,
+		BackgroundAllowed: active.BackgroundAllowed, Health: active.Health, Generation: active.Generation, LifecycleRevision: active.LifecycleRevision,
 		Entries: append([]RosterEntry(nil), active.Entries...), ConfirmedAt: active.ConfirmedAt, DegradedSince: active.DegradedSince,
 	}
 }

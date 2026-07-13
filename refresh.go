@@ -49,14 +49,15 @@ type HostClient interface {
 type ABIHostClient struct{}
 
 type QuotaRefresher struct {
-	host         HostClient
-	state        *PluginState
-	now          func() time.Time
-	runtimeStore *StateStore
-	bindings     *BindingRegistry
-	credentials  *CredentialManager
-	roster       HostRosterSnapshot
-	rosterMu     sync.RWMutex
+	host           HostClient
+	state          *PluginState
+	now            func() time.Time
+	runtimeStore   *StateStore
+	bindings       *BindingRegistry
+	credentials    *CredentialManager
+	roster         HostRosterSnapshot
+	rosterMu       sync.RWMutex
+	lifecycleOwner *QuotaRefresher
 
 	mu                sync.Mutex
 	running           bool
@@ -111,33 +112,47 @@ func (r *QuotaRefresher) BootstrapBinding(ctx context.Context, authID string) (R
 }
 
 func (r *QuotaRefresher) runtimeRoster() HostRosterSnapshot {
-	r.rosterMu.RLock()
-	defer r.rosterMu.RUnlock()
-	return r.roster
+	owner := r.lifecycleRefresher()
+	owner.rosterMu.RLock()
+	defer owner.rosterMu.RUnlock()
+	return owner.roster
+}
+
+func (r *QuotaRefresher) lifecycleRefresher() *QuotaRefresher {
+	if r != nil && r.lifecycleOwner != nil {
+		return r.lifecycleOwner
+	}
+	return r
 }
 func (r *QuotaRefresher) ObserveRosterLifecycle(active ActiveRoster) {
 	if r == nil {
 		return
 	}
-	r.rosterMu.Lock()
-	r.roster = hostRosterSnapshotFromActive(active)
-	r.rosterMu.Unlock()
-	r.mu.Lock()
-	requested := r.startRequested
-	r.mu.Unlock()
-	if requested && (r.normalBackgroundAllowed() || r.probeBackgroundAllowed()) {
-		r.Start()
+	owner := r.lifecycleRefresher()
+	owner.rosterMu.Lock()
+	next := hostRosterSnapshotFromActive(active)
+	if next.LifecycleRevision == 0 {
+		next.LifecycleRevision = owner.roster.LifecycleRevision + 1
+	}
+	if next.LifecycleRevision <= owner.roster.LifecycleRevision {
+		owner.rosterMu.Unlock()
+		return
+	}
+	owner.roster = next
+	owner.rosterMu.Unlock()
+	owner.mu.Lock()
+	requested := owner.startRequested
+	owner.mu.Unlock()
+	if requested && (owner.normalBackgroundAllowed() || owner.probeBackgroundAllowed()) {
+		owner.Start()
 	}
 }
 func (r *QuotaRefresher) normalBackgroundAllowed() bool {
 	if r == nil {
 		return false
 	}
-	if r.runtimeStore == nil {
-		return true
-	}
 	roster := normalizeHostRosterLifecycle(r.runtimeRoster())
-	return roster.Capability == CapabilityA && roster.Confirmed && roster.BackgroundAllowed && (roster.Health == RosterHealthy || roster.Health == RosterDegraded)
+	return normalRosterBackgroundAllowed(roster)
 }
 func (r *QuotaRefresher) probeBackgroundAllowed() bool {
 	if r == nil {
@@ -146,10 +161,15 @@ func (r *QuotaRefresher) probeBackgroundAllowed() bool {
 	if r.normalBackgroundAllowed() {
 		return true
 	}
-	if r.runtimeStore == nil {
-		return true
-	}
 	roster := normalizeHostRosterLifecycle(r.runtimeRoster())
+	return provisionalProbeBackgroundAllowed(roster)
+}
+
+func normalRosterBackgroundAllowed(roster HostRosterSnapshot) bool {
+	return roster.Capability == CapabilityA && roster.Confirmed && roster.BackgroundAllowed && (roster.Health == RosterHealthy || roster.Health == RosterDegraded)
+}
+
+func provisionalProbeBackgroundAllowed(roster HostRosterSnapshot) bool {
 	return roster.Capability == CapabilityB && roster.Provisional && roster.BackgroundAllowed && roster.Health == RosterWaiting
 }
 func (r *QuotaRefresher) PublishAuthoritativeRoster(ctx context.Context, roster HostRosterSnapshot) error {
@@ -208,6 +228,7 @@ func NewQuotaRefresher(host HostClient, state *PluginState, now func() time.Time
 		host:              host,
 		state:             state,
 		now:               now,
+		roster:            normalizeHostRosterLifecycle(HostRosterSnapshot{Capability: CapabilityA}),
 		refreshController: NewRefreshController(state.Config().QuotaRefreshInterval, state.Config().RefreshActiveWindow),
 	}
 	r.legacyTxn = &LegacyRefreshTxn{refresher: r}
@@ -1014,14 +1035,20 @@ func (r *QuotaRefresher) doWithAdmissionPermit(authID string, version uint64, re
 }
 
 func (r *QuotaRefresher) doBackgroundHTTPRequest(req pluginapi.HTTPRequest, probe bool) (pluginapi.HTTPResponse, error) {
-	allowed := r.normalBackgroundAllowed()
+	if r == nil {
+		return pluginapi.HTTPResponse{}, ErrCapabilityB
+	}
+	owner := r.lifecycleRefresher()
+	owner.rosterMu.RLock()
+	defer owner.rosterMu.RUnlock()
+	roster := normalizeHostRosterLifecycle(owner.roster)
+	allowed := normalRosterBackgroundAllowed(roster)
 	if probe {
-		allowed = r.probeBackgroundAllowed()
+		allowed = allowed || provisionalProbeBackgroundAllowed(roster)
 	}
 	if !allowed {
 		return pluginapi.HTTPResponse{}, ErrCapabilityB
 	}
-	roster := normalizeHostRosterLifecycle(r.runtimeRoster())
 	marker := ""
 	if roster.Health == RosterDegraded {
 		marker = rosterLifecycleDegraded

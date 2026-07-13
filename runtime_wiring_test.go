@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -598,6 +599,129 @@ func TestProductionRosterLifecycleGatesBackgroundRequests(t *testing.T) {
 	if r.normalBackgroundAllowed() || !r.probeBackgroundAllowed() {
 		t.Fatalf("provisional gates normal=%v probe=%v", r.normalBackgroundAllowed(), r.probeBackgroundAllowed())
 	}
+}
+
+func TestQuotaRefresherLifecycleCannotBeBypassedWithoutRuntimeStore(t *testing.T) {
+	host := &countingProductionHost{httpResp: pluginapi.HTTPResponse{StatusCode: http.StatusOK}}
+	r := NewQuotaRefresher(host, NewPluginState(DefaultConfig()), time.Now)
+	r.ObserveRosterLifecycle(ActiveRoster{Capability: CapabilityA, Confirmed: true, Health: RosterFailClosed})
+	for _, probe := range []bool{false, true} {
+		if _, err := r.doBackgroundHTTPRequest(pluginapi.HTTPRequest{Method: http.MethodGet, URL: "https://example.invalid"}, probe); !errors.Is(err, ErrCapabilityB) {
+			t.Fatalf("probe=%v err=%v", probe, err)
+		}
+	}
+	if host.http != 0 {
+		t.Fatalf("nil runtime store bypassed lifecycle: calls=%d", host.http)
+	}
+}
+
+type lifecycleFenceHost struct {
+	entered  chan struct{}
+	release  chan struct{}
+	mu       sync.Mutex
+	requests []pluginapi.HTTPRequest
+}
+
+func (h *lifecycleFenceHost) ListAuths() ([]pluginapi.HostAuthFileEntry, error) { return nil, nil }
+func (h *lifecycleFenceHost) GetAuth(string) (pluginapi.HostAuthGetResponse, error) {
+	return pluginapi.HostAuthGetResponse{}, nil
+}
+func (h *lifecycleFenceHost) SaveAuth(string, json.RawMessage) error { return nil }
+func (h *lifecycleFenceHost) Log(string, string, map[string]any)     {}
+func (h *lifecycleFenceHost) Do(req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
+	h.mu.Lock()
+	h.requests = append(h.requests, req)
+	h.mu.Unlock()
+	select {
+	case <-h.entered:
+	default:
+		close(h.entered)
+	}
+	<-h.release
+	return pluginapi.HTTPResponse{StatusCode: http.StatusOK}, nil
+}
+
+func TestProductionLifecyclePublicationFencesHTTPStart(t *testing.T) {
+	host := &lifecycleFenceHost{entered: make(chan struct{}), release: make(chan struct{})}
+	r := NewQuotaRefresher(host, NewPluginState(DefaultConfig()), time.Now)
+	r.ObserveRosterLifecycle(ActiveRoster{Capability: CapabilityA, Confirmed: true, Health: RosterDegraded, BackgroundAllowed: true})
+	requestDone := make(chan error, 1)
+	go func() {
+		_, err := r.doBackgroundHTTPRequest(pluginapi.HTTPRequest{Method: http.MethodGet, URL: "https://example.invalid"}, false)
+		requestDone <- err
+	}()
+	<-host.entered
+	observeStarted := make(chan struct{})
+	observeDone := make(chan struct{})
+	go func() {
+		close(observeStarted)
+		r.ObserveRosterLifecycle(ActiveRoster{Capability: CapabilityA, Confirmed: true, Health: RosterFailClosed})
+		close(observeDone)
+	}()
+	<-observeStarted
+	select {
+	case <-observeDone:
+		t.Fatal("FailClosed published while an authorized HTTP start boundary was open")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(host.release)
+	if err := <-requestDone; err != nil {
+		t.Fatal(err)
+	}
+	<-observeDone
+	if _, err := r.doBackgroundHTTPRequest(pluginapi.HTTPRequest{Method: http.MethodGet, URL: "https://example.invalid"}, false); !errors.Is(err, ErrCapabilityB) {
+		t.Fatalf("post-publication request err=%v", err)
+	}
+}
+
+func TestProductionProbeLifecycleHostCallGates(t *testing.T) {
+	host := &countingProductionHost{httpResp: pluginapi.HTTPResponse{StatusCode: http.StatusOK}}
+	r, err := NewProductionQuotaRefresher(host, NewPluginState(DefaultConfig()), &runtimeCredentialHost{current: map[AuthInstanceID]HostAuth{}}, HostRosterSnapshot{Capability: CapabilityB}, filepath.Join(t.TempDir(), "state.json"), time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refresherMu.Lock()
+	previous := globalRosterController
+	globalRosterController = nil
+	refresherMu.Unlock()
+	t.Cleanup(func() { refresherMu.Lock(); globalRosterController = previous; refresherMu.Unlock() })
+
+	t.Run("enqueue denial", func(t *testing.T) {
+		r.ObserveRosterLifecycle(ActiveRoster{Capability: CapabilityA, Confirmed: true, Health: RosterFailClosed})
+		if err := r.RunProbeDueOnce(context.Background()); !errors.Is(err, ErrCapabilityB) {
+			t.Fatalf("err=%v", err)
+		}
+		if host.http != 0 {
+			t.Fatalf("denied Probe made host HTTP calls=%d", host.http)
+		}
+	})
+
+	t.Run("final start denial", func(t *testing.T) {
+		r.rosterMu.Lock()
+		started := make(chan error, 1)
+		go func() {
+			_, err := r.doBackgroundHTTPRequest(pluginapi.HTTPRequest{Method: http.MethodGet, URL: "https://example.invalid/probe"}, true)
+			started <- err
+		}()
+		r.roster = hostRosterSnapshotFromActive(ActiveRoster{Capability: CapabilityA, Confirmed: true, Health: RosterFailClosed})
+		r.rosterMu.Unlock()
+		if err := <-started; !errors.Is(err, ErrCapabilityB) {
+			t.Fatalf("err=%v", err)
+		}
+		if host.http != 0 {
+			t.Fatalf("final-start denial made host HTTP calls=%d", host.http)
+		}
+	})
+
+	t.Run("provisional marker", func(t *testing.T) {
+		r.ObserveRosterLifecycle(ActiveRoster{Capability: CapabilityB, Provisional: true, Health: RosterWaiting, BackgroundAllowed: true})
+		if _, err := r.doBackgroundHTTPRequest(pluginapi.HTTPRequest{Method: http.MethodGet, URL: "https://example.invalid/probe"}, true); err != nil {
+			t.Fatal(err)
+		}
+		if got := host.requests[len(host.requests)-1].Headers.Get(rosterLifecycleRequestHeader); got != rosterLifecycleProvisional {
+			t.Fatalf("marker=%q", got)
+		}
+	})
 }
 func (h *countingProductionHost) Log(string, string, map[string]any) {}
 

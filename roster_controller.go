@@ -31,6 +31,7 @@ type ActiveRoster struct {
 	Provisional       bool
 	HighestPriority   int
 	Generation        uint64
+	LifecycleRevision uint64
 	Instances         []string
 	Entries           []RosterEntry
 	ConfirmedAt       time.Time
@@ -101,13 +102,18 @@ func (c *RosterController) WakeForManagement(ctx context.Context) (ActiveRoster,
 func (c *RosterController) WakeForProbe(ctx context.Context) (ActiveRoster, error) {
 	got, err := c.sync(ctx, false)
 	if got.Provisional && c.probeOnProvisional && c.verifyProvisional != nil && c.now().Sub(got.ConfirmedAt) < provisionalMaxAge && c.verifyProvisional(ctx, cloneActiveRoster(got)) {
+		committed := false
 		c.mu.Lock()
 		if c.current.Provisional && c.current.Generation == got.Generation {
 			c.current.BackgroundAllowed = true
+			c.current.LifecycleRevision++
 			got = cloneActiveRoster(c.current)
+			committed = true
 		}
 		c.mu.Unlock()
-		c.notify(got)
+		if committed {
+			c.notify(got)
+		}
 	}
 	return got, err
 }
@@ -176,7 +182,7 @@ func (c *RosterController) finishSync(ctx context.Context, entries []RosterEntry
 			if !sameRoster(old, priority, filtered, ids) {
 				generation++
 			}
-			next := ActiveRoster{Capability: CapabilityA, Confirmed: true, HighestPriority: priority, Generation: generation, Instances: ids, Entries: filtered, ConfirmedAt: now, LastSyncAt: now, Health: RosterHealthy, BackgroundAllowed: true}
+			next := ActiveRoster{Capability: CapabilityA, Confirmed: true, HighestPriority: priority, Generation: generation, LifecycleRevision: old.LifecycleRevision + 1, Instances: ids, Entries: filtered, ConfirmedAt: now, LastSyncAt: now, Health: RosterHealthy, BackgroundAllowed: true}
 			c.mu.Unlock()
 			if c.publish != nil {
 				syncErr = c.publish(ctx, cloneActiveRoster(next))
@@ -193,6 +199,7 @@ func (c *RosterController) finishSync(ctx context.Context, entries []RosterEntry
 	}
 	if syncErr != nil {
 		c.current = degradedRoster(old, now)
+		c.current.LifecycleRevision = old.LifecycleRevision + 1
 	}
 	c.lastErr = syncErr
 	c.inFlight = nil
