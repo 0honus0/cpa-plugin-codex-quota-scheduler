@@ -217,6 +217,11 @@ func (r *QuotaRefresher) RunProbeDueOnce(ctx context.Context) error {
 	if !r.probeBackgroundAllowed() {
 		return ErrCapabilityB
 	}
+	if r.runtimeRoster().Provisional {
+		if !r.provisionalProbeRiskConfigured() || !r.consumeProvisionalPermit() {
+			return ErrCapabilityB
+		}
+	}
 	if r.probeController == nil {
 		return errors.New("probe runtime unavailable")
 	}
@@ -308,8 +313,19 @@ func (r *QuotaRefresher) RunProbeRecoveryOnce(ctx context.Context) error {
 	if err := r.retryProbeRosterHold(); err != nil {
 		return err
 	}
+	refresherMu.Lock()
+	rosterController := globalRosterController
+	refresherMu.Unlock()
+	if rosterController != nil {
+		_, _ = rosterController.WakeForProbe(ctx)
+	}
 	if !r.probeBackgroundAllowed() {
 		return ErrCapabilityB
+	}
+	if r.runtimeRoster().Provisional {
+		if !r.provisionalProbeRiskConfigured() || !r.consumeProvisionalPermit() {
+			return ErrCapabilityB
+		}
 	}
 	if r.probeWAL == nil || r.probeController == nil {
 		return nil
@@ -392,10 +408,24 @@ func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *
 			if err != nil {
 				return probeReadResult{}, err
 			}
+			if r.runtimeRoster().Provisional && NewCredentialFingerprint(credentials.ChatGPTAccountID, credentials.RefreshToken, p.Binding.AuthIndex) != p.Binding.Fingerprint {
+				return probeReadResult{}, ErrProvisionalFingerprintMismatch
+			}
 			quota, err := r.typedFetchQuota(ctx, held, credentials)
 			return probeReadResult{Quota: quota, Credentials: credentials}, err
 		}
 		fail := func(err error, sent bool) OperationResult {
+			if errors.Is(err, ErrProvisionalFingerprintMismatch) {
+				r.clearProvisionalPermit()
+				r.rosterMu.Lock()
+				if r.roster.Provisional {
+					r.roster.BackgroundAllowed = false
+					r.roster.Health = RosterWaiting
+				}
+				r.rosterMu.Unlock()
+				_ = r.persistProbeRosterHold()
+				return OperationResult{Token: intent.Token, Err: err}
+			}
 			if r.runtimeRoster().Health == RosterFailClosed {
 				return OperationResult{Token: intent.Token, Err: err}
 			}

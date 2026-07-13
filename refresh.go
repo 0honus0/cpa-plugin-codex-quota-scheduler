@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -27,11 +28,12 @@ const rosterLifecycleProvisional = "provisional"
 const maxErrorBodySummaryLen = 220
 
 var (
-	rawCookiePattern       = regexp.MustCompile(`(?i)\b(cookie\s*[:=]\s*)[^;\s,}"']+(?:\s*;\s*[^;\s,}"']+)*`)
-	rawSecretPattern       = regexp.MustCompile(`(?i)\b((?:access[_-]?token|id[_-]?token|refresh[_-]?token|authorization|cookie|api[_-]?key|session[_-]?token)\s*[:=]\s*)(?:bearer\s+)?[^\s,}"']+`)
-	secretFieldPattern     = regexp.MustCompile(`(?i)((?:"?(?:access[_-]?token|id[_-]?token|refresh[_-]?token|authorization|cookie|api[_-]?key|session[_-]?token)"?)\s*[:=]\s*)("[^"]*"|[^\s,}\]]+)`)
-	bearerPattern          = regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+/=-]+`)
-	errCPAAdmissionChanged = errors.New("CPA admission changed during refresh")
+	rawCookiePattern                  = regexp.MustCompile(`(?i)\b(cookie\s*[:=]\s*)[^;\s,}"']+(?:\s*;\s*[^;\s,}"']+)*`)
+	rawSecretPattern                  = regexp.MustCompile(`(?i)\b((?:access[_-]?token|id[_-]?token|refresh[_-]?token|authorization|cookie|api[_-]?key|session[_-]?token)\s*[:=]\s*)(?:bearer\s+)?[^\s,}"']+`)
+	secretFieldPattern                = regexp.MustCompile(`(?i)((?:"?(?:access[_-]?token|id[_-]?token|refresh[_-]?token|authorization|cookie|api[_-]?key|session[_-]?token)"?)\s*[:=]\s*)("[^"]*"|[^\s,}\]]+)`)
+	bearerPattern                     = regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+/=-]+`)
+	errCPAAdmissionChanged            = errors.New("CPA admission changed during refresh")
+	ErrProvisionalFingerprintMismatch = errors.New("provisional credential fingerprint changed")
 )
 
 var callHostCallback = func(method string, payload any) (json.RawMessage, error) {
@@ -79,6 +81,8 @@ type QuotaRefresher struct {
 	probeHoldMu       sync.Mutex
 	probeHoldPending  bool
 	probeHoldErr      error
+	provisionalMu     sync.Mutex
+	provisionalPermit bool
 	fenceMu           sync.Mutex
 	nextFence         uint64
 	txnIntent         *Intent
@@ -104,7 +108,124 @@ func NewProductionQuotaRefresher(host HostClient, state *PluginState, credential
 	if err := r.initProbeRuntime(); err != nil {
 		return nil, err
 	}
+	if roster.Capability == CapabilityB {
+		if provisional := r.ProvisionalRoster(); provisional != nil {
+			r.roster = hostRosterSnapshotFromActive(*provisional)
+		}
+	}
 	return r, nil
+}
+
+func (r *QuotaRefresher) ProvisionalRoster() *ActiveRoster {
+	if r == nil || r.runtimeStore == nil {
+		return nil
+	}
+	state, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil || state.LastConfirmedRoster == nil {
+		return nil
+	}
+	persisted := state.LastConfirmedRoster
+	if persisted.Generation == 0 || persisted.ConfirmedAt.IsZero() || r.now().Sub(persisted.ConfirmedAt) >= provisionalMaxAge || len(persisted.Entries) == 0 {
+		return nil
+	}
+	active := &ActiveRoster{Capability: CapabilityB, Provisional: true, Generation: persisted.Generation, ConfirmedAt: persisted.ConfirmedAt, Health: RosterWaiting}
+	seen := make(map[string]struct{}, len(persisted.Entries))
+	for i, entry := range persisted.Entries {
+		if entry.ID == "" || entry.AuthIndex == "" || !entry.Fingerprint.ValidHashes() {
+			return nil
+		}
+		if i > 0 && entry.Priority != persisted.Entries[0].Priority {
+			return nil
+		}
+		if _, duplicate := seen[entry.ID]; duplicate {
+			return nil
+		}
+		seen[entry.ID] = struct{}{}
+		priority := entry.Priority
+		active.Entries = append(active.Entries, RosterEntry{ID: entry.ID, AuthIndex: entry.AuthIndex, Provider: "codex", Priority: &priority})
+		active.Instances = append(active.Instances, entry.ID)
+		active.HighestPriority = entry.Priority
+	}
+	sort.Strings(active.Instances)
+	return active
+}
+
+func (r *QuotaRefresher) VerifyProvisionalRoster(ctx context.Context, roster ActiveRoster) bool {
+	if r == nil || r.runtimeStore == nil || r.bindings == nil || r.host == nil || !roster.Provisional || roster.Confirmed || roster.Capability != CapabilityB || roster.ConfirmedAt.IsZero() || r.now().Sub(roster.ConfirmedAt) >= provisionalMaxAge {
+		r.clearProvisionalPermit()
+		return false
+	}
+	state, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil || state.LastConfirmedRoster == nil {
+		r.clearProvisionalPermit()
+		return false
+	}
+	persisted := state.LastConfirmedRoster
+	if persisted.Generation != roster.Generation || !persisted.ConfirmedAt.Equal(roster.ConfirmedAt) || len(persisted.Entries) != len(roster.Entries) {
+		r.clearProvisionalPermit()
+		return false
+	}
+	want := make(map[string]RosterEntry, len(roster.Entries))
+	for _, entry := range roster.Entries {
+		want[entry.ID] = entry
+	}
+	for _, entry := range persisted.Entries {
+		current, ok := want[entry.ID]
+		if !ok || current.AuthIndex != entry.AuthIndex || current.Priority == nil || *current.Priority != entry.Priority {
+			r.clearProvisionalPermit()
+			return false
+		}
+		binding, bound := r.bindings.Lookup(entry.ID)
+		if !bound || binding.AuthIndex != entry.AuthIndex || binding.Fingerprint != entry.Fingerprint {
+			r.clearProvisionalPermit()
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			r.clearProvisionalPermit()
+			return false
+		default:
+		}
+		auth, getErr := r.host.GetAuth(entry.AuthIndex)
+		if getErr != nil {
+			r.clearProvisionalPermit()
+			return false
+		}
+		credentials, extractErr := ExtractCodexCredentials(auth.JSON)
+		if extractErr != nil || NewCredentialFingerprint(credentials.ChatGPTAccountID, credentials.RefreshToken, entry.AuthIndex) != entry.Fingerprint {
+			r.clearProvisionalPermit()
+			return false
+		}
+	}
+	r.provisionalMu.Lock()
+	r.provisionalPermit = true
+	r.provisionalMu.Unlock()
+	return true
+}
+
+func (r *QuotaRefresher) VerifyConfiguredProvisionalRoster(ctx context.Context, roster ActiveRoster) bool {
+	if r == nil || r.state == nil || !r.state.Config().ProbeOnProvisionalRoster {
+		r.clearProvisionalPermit()
+		return false
+	}
+	return r.VerifyProvisionalRoster(ctx, roster)
+}
+
+func (r *QuotaRefresher) clearProvisionalPermit() {
+	if r == nil {
+		return
+	}
+	r.provisionalMu.Lock()
+	r.provisionalPermit = false
+	r.provisionalMu.Unlock()
+}
+
+func (r *QuotaRefresher) consumeProvisionalPermit() bool {
+	r.provisionalMu.Lock()
+	defer r.provisionalMu.Unlock()
+	allowed := r.provisionalPermit
+	r.provisionalPermit = false
+	return allowed
 }
 
 func (r *QuotaRefresher) BootstrapBinding(ctx context.Context, authID string) (RuntimeBinding, bool, error) {
@@ -171,6 +292,14 @@ func (r *QuotaRefresher) probeBackgroundAllowed() bool {
 	return provisionalProbeBackgroundAllowed(roster)
 }
 
+func (r *QuotaRefresher) provisionalProbeRiskConfigured() bool {
+	if r == nil || r.state == nil || !r.state.Config().ProbeOnProvisionalRoster {
+		return false
+	}
+	roster := normalizeHostRosterLifecycle(r.runtimeRoster())
+	return roster.Capability == CapabilityB && roster.Provisional && !roster.Confirmed && !roster.ConfirmedAt.IsZero() && r.now().Sub(roster.ConfirmedAt) < provisionalMaxAge
+}
+
 func normalRosterBackgroundAllowed(roster HostRosterSnapshot) bool {
 	return roster.Capability == CapabilityA && roster.Confirmed && roster.BackgroundAllowed && (roster.Health == RosterHealthy || roster.Health == RosterDegraded)
 }
@@ -213,6 +342,23 @@ func (r *QuotaRefresher) PublishAuthoritativeRoster(ctx context.Context, roster 
 		return err
 	}
 	filtered.Generation = uint64(reconciled.Generation)
+	if filtered.ConfirmedAt.IsZero() {
+		filtered.ConfirmedAt = r.now()
+	}
+	persistedRoster := &PersistedConfirmedRoster{Generation: filtered.Generation, ConfirmedAt: filtered.ConfirmedAt}
+	for _, entry := range filtered.Entries {
+		binding, found := reconciled.Bindings[entry.ID]
+		if !found || entry.Priority == nil {
+			return ErrBindingNotRosterConfirmed
+		}
+		persistedRoster.Entries = append(persistedRoster.Entries, PersistedRosterEntry{ID: entry.ID, AuthIndex: entry.AuthIndex, Priority: *entry.Priority, Fingerprint: binding.Fingerprint})
+	}
+	if _, err = r.runtimeStore.UpdateMirrored(func(s *PersistentState) error {
+		s.LastConfirmedRoster = persistedRoster
+		return nil
+	}); err != nil {
+		return err
+	}
 	activeGenerations := make(map[AuthInstanceID]TierGeneration, len(reconciled.Bindings))
 	for _, binding := range reconciled.Bindings {
 		activeGenerations[binding.Instance] = TierGeneration(binding.Generation)
@@ -654,7 +800,7 @@ func (r *QuotaRefresher) Start() {
 	r.mu.Lock()
 	r.startRequested = true
 	r.mu.Unlock()
-	if !r.normalBackgroundAllowed() && !r.probeBackgroundAllowed() {
+	if !r.normalBackgroundAllowed() && !r.probeBackgroundAllowed() && !r.provisionalProbeRiskConfigured() {
 		return
 	}
 	r.mu.Lock()
@@ -1101,6 +1247,9 @@ func (r *QuotaRefresher) doBackgroundHTTPRequest(req pluginapi.HTTPRequest, prob
 	allowed := normalRosterBackgroundAllowed(roster)
 	if probe {
 		allowed = allowed || provisionalProbeBackgroundAllowed(roster)
+	}
+	if roster.Provisional && (owner.state == nil || !owner.state.Config().ProbeOnProvisionalRoster) {
+		allowed = false
 	}
 	if !allowed {
 		return pluginapi.HTTPResponse{}, ErrCapabilityB

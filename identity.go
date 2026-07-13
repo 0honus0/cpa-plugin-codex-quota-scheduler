@@ -43,6 +43,18 @@ func NewCredentialFingerprint(subject, refresh, metadata string) CredentialFinge
 	b = append(b, m[:]...)
 	return CredentialFingerprint{s, r, m, sha256.Sum256(b)}
 }
+
+func (f CredentialFingerprint) ValidHashes() bool {
+	zero := [32]byte{}
+	if f.SubjectHash == zero || f.RefreshTokenHash == zero || f.MetadataHash == zero || f.CompositeHash == zero {
+		return false
+	}
+	b := make([]byte, 0, 96)
+	b = append(b, f.SubjectHash[:]...)
+	b = append(b, f.RefreshTokenHash[:]...)
+	b = append(b, f.MetadataHash[:]...)
+	return sha256.Sum256(b) == f.CompositeHash
+}
 func canonicalMetadata(value string) string {
 	var decoded any
 	if json.Unmarshal([]byte(value), &decoded) == nil {

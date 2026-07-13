@@ -189,6 +189,69 @@ func TestCapabilityBProvisionalProbeRequiresRiskOptionAgeAndFingerprint(t *testi
 	}
 }
 
+func TestProvisionalVerificationFailureRevokesPreviouslyPublishedProbeAccess(t *testing.T) { //inv:INV-02,INV-35
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	verified := true
+	base := ActiveRoster{Capability: CapabilityB, Provisional: true, Generation: 4, ConfirmedAt: now.Add(-time.Hour), Health: RosterWaiting}
+	var observed []ActiveRoster
+	c := NewRosterController(RosterControllerOptions{
+		Now:                func() time.Time { return now },
+		Provisional:        &base,
+		ProbeOnProvisional: true,
+		VerifyProvisional:  func(context.Context, ActiveRoster) bool { return verified },
+		Observe:            func(active ActiveRoster) { observed = append(observed, active) },
+	})
+	if got, _ := c.WakeForProbe(context.Background()); !got.BackgroundAllowed {
+		t.Fatalf("first verified wake=%#v", got)
+	}
+	verified = false
+	got, _ := c.WakeForProbe(context.Background())
+	if got.BackgroundAllowed {
+		t.Fatalf("failed verification retained access: %#v", got)
+	}
+	if len(observed) < 2 || observed[len(observed)-1].BackgroundAllowed {
+		t.Fatalf("revocation not published: %#v", observed)
+	}
+}
+
+func TestProvisionalRiskDisableFencesInFlightVerificationCommit(t *testing.T) { //inv:INV-02,INV-35
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	cfg := DefaultConfig()
+	cfg.ProbeOnProvisionalRoster = true
+	state := NewPluginState(cfg)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	base := ActiveRoster{Capability: CapabilityB, Provisional: true, Generation: 4, ConfirmedAt: now.Add(-time.Hour), Health: RosterWaiting}
+	c := NewRosterController(RosterControllerOptions{
+		Now:                func() time.Time { return now },
+		Provisional:        &base,
+		ProbeOnProvisional: true,
+		VerifyProvisional: func(context.Context, ActiveRoster) bool {
+			close(entered)
+			<-release
+			return true
+		},
+		CommitProvisional: func(commit func()) bool {
+			state.mu.RLock()
+			defer state.mu.RUnlock()
+			if !state.cfg.ProbeOnProvisionalRoster {
+				return false
+			}
+			commit()
+			return true
+		},
+	})
+	done := make(chan ActiveRoster, 1)
+	go func() { got, _ := c.WakeForProbe(context.Background()); done <- got }()
+	<-entered
+	cfg.ProbeOnProvisionalRoster = false
+	state.ReplaceConfig(cfg)
+	close(release)
+	if got := <-done; got.BackgroundAllowed || c.Snapshot().BackgroundAllowed {
+		t.Fatalf("disabled risk committed stale verification: got=%#v snapshot=%#v", got, c.Snapshot())
+	}
+}
+
 func TestProductionProbePrewakesRosterController(t *testing.T) {
 	p := 1
 	host := &rosterTestHost{entries: []RosterEntry{{ID: "a", Provider: "codex", Priority: &p}}}

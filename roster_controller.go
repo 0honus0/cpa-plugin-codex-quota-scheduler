@@ -51,6 +51,7 @@ type RosterControllerOptions struct {
 	Provisional        *ActiveRoster
 	ProbeOnProvisional bool
 	VerifyProvisional  func(context.Context, ActiveRoster) bool
+	CommitProvisional  func(func()) bool
 }
 
 type RosterController struct {
@@ -65,6 +66,7 @@ type RosterController struct {
 	lastErr            error
 	probeOnProvisional bool
 	verifyProvisional  func(context.Context, ActiveRoster) bool
+	commitProvisional  func(func()) bool
 }
 
 func NewRosterController(opts RosterControllerOptions) *RosterController {
@@ -72,7 +74,7 @@ func NewRosterController(opts RosterControllerOptions) *RosterController {
 	if now == nil {
 		now = time.Now
 	}
-	c := &RosterController{host: opts.Host, now: now, publish: opts.Publish, observe: opts.Observe, cancel: opts.Cancel, probeOnProvisional: opts.ProbeOnProvisional, verifyProvisional: opts.VerifyProvisional}
+	c := &RosterController{host: opts.Host, now: now, publish: opts.Publish, observe: opts.Observe, cancel: opts.Cancel, probeOnProvisional: opts.ProbeOnProvisional, verifyProvisional: opts.VerifyProvisional, commitProvisional: opts.CommitProvisional}
 	c.current = ActiveRoster{Capability: CapabilityB, Health: RosterWaiting}
 	if opts.Provisional != nil {
 		p := cloneActiveRoster(*opts.Provisional)
@@ -101,19 +103,39 @@ func (c *RosterController) WakeForManagement(ctx context.Context) (ActiveRoster,
 }
 func (c *RosterController) WakeForProbe(ctx context.Context) (ActiveRoster, error) {
 	got, err := c.sync(ctx, false)
-	if got.Provisional && c.probeOnProvisional && c.verifyProvisional != nil && c.now().Sub(got.ConfirmedAt) < provisionalMaxAge && c.verifyProvisional(ctx, cloneActiveRoster(got)) {
-		committed := false
+	resetProvisional := false
+	if got.Provisional {
 		c.mu.Lock()
-		if c.current.Provisional && c.current.Generation == got.Generation {
-			c.current.BackgroundAllowed = true
+		if c.current.Provisional && c.current.Generation == got.Generation && c.current.BackgroundAllowed {
+			c.current.BackgroundAllowed = false
 			c.current.LifecycleRevision++
 			got = cloneActiveRoster(c.current)
-			committed = true
+			resetProvisional = true
 		}
 		c.mu.Unlock()
+	}
+	if got.Provisional && c.probeOnProvisional && c.verifyProvisional != nil && c.now().Sub(got.ConfirmedAt) < provisionalMaxAge && c.verifyProvisional(ctx, cloneActiveRoster(got)) {
+		committed := false
+		commit := func() {
+			c.mu.Lock()
+			if c.current.Provisional && c.current.Generation == got.Generation {
+				c.current.BackgroundAllowed = true
+				c.current.LifecycleRevision++
+				got = cloneActiveRoster(c.current)
+				committed = true
+			}
+			c.mu.Unlock()
+		}
+		if c.commitProvisional != nil {
+			_ = c.commitProvisional(commit)
+		} else {
+			commit()
+		}
 		if committed {
 			c.notify(got)
 		}
+	} else if resetProvisional {
+		c.notify(got)
 	}
 	return got, err
 }

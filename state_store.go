@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 const CurrentStateSchema = 1
@@ -14,17 +15,31 @@ const CurrentStateSchema = 1
 var ErrStateReadOnly = errors.New("state store is read-only")
 
 type PersistentState struct {
-	SchemaVersion    int                                                `json:"schema_version"`
-	ReservedCeiling  uint64                                             `json:"reserved_ceiling"`
-	NextSaveSeq      uint64                                             `json:"next_save_seq"`
-	TierGeneration   TierGeneration                                     `json:"tier_generation,omitempty"`
-	AdmissionEpochs  map[AuthInstanceID]InstanceAdmissionEpoch          `json:"admission_epochs,omitempty"`
-	CredentialChains map[AuthInstanceID]TransitionChain                 `json:"credential_chains,omitempty"`
-	FenceUnsafe      bool                                               `json:"fence_unsafe,omitempty"`
-	Bindings         map[string]RuntimeBinding                          `json:"bindings,omitempty"`
-	ProbeAttempts    map[AuthInstanceID]ProbeAttemptSeam                `json:"probe_attempts,omitempty"`
-	ProbeAttemptSeq  uint64                                             `json:"probe_attempt_seq,omitempty"`
-	ProbeWindows     map[AuthInstanceID]map[ProbeWindowKind]ProbeWindow `json:"probe_windows,omitempty"`
+	SchemaVersion       int                                                `json:"schema_version"`
+	ReservedCeiling     uint64                                             `json:"reserved_ceiling"`
+	NextSaveSeq         uint64                                             `json:"next_save_seq"`
+	TierGeneration      TierGeneration                                     `json:"tier_generation,omitempty"`
+	AdmissionEpochs     map[AuthInstanceID]InstanceAdmissionEpoch          `json:"admission_epochs,omitempty"`
+	CredentialChains    map[AuthInstanceID]TransitionChain                 `json:"credential_chains,omitempty"`
+	FenceUnsafe         bool                                               `json:"fence_unsafe,omitempty"`
+	Bindings            map[string]RuntimeBinding                          `json:"bindings,omitempty"`
+	ProbeAttempts       map[AuthInstanceID]ProbeAttemptSeam                `json:"probe_attempts,omitempty"`
+	ProbeAttemptSeq     uint64                                             `json:"probe_attempt_seq,omitempty"`
+	ProbeWindows        map[AuthInstanceID]map[ProbeWindowKind]ProbeWindow `json:"probe_windows,omitempty"`
+	LastConfirmedRoster *PersistedConfirmedRoster                          `json:"last_confirmed_roster,omitempty"`
+}
+
+type PersistedRosterEntry struct {
+	ID          string                `json:"id"`
+	AuthIndex   string                `json:"auth_index"`
+	Priority    int                   `json:"priority"`
+	Fingerprint CredentialFingerprint `json:"fingerprint"`
+}
+
+type PersistedConfirmedRoster struct {
+	Generation  uint64                 `json:"generation"`
+	ConfirmedAt time.Time              `json:"confirmed_at"`
+	Entries     []PersistedRosterEntry `json:"entries"`
 }
 
 func NewPersistentState() PersistentState {

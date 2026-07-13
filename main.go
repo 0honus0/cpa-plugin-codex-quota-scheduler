@@ -134,6 +134,12 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 	}
 	globalRosterController = NewRosterController(RosterControllerOptions{
 		Host: ABIHostAuthLister{},
+		Provisional: func() *ActiveRoster {
+			if production == nil {
+				return nil
+			}
+			return production.ProvisionalRoster()
+		}(),
 		Publish: func(ctx context.Context, active ActiveRoster) (ActiveRoster, error) {
 			snapshot := hostRosterSnapshotFromActive(active)
 			hostRosterLatest.Store(&snapshot)
@@ -154,8 +160,32 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 			}
 			hostRosterLatest.Store(&snapshot)
 		},
-		ProbeOnProvisional: globalState.Config().ProbeOnProvisionalRoster,
+		ProbeOnProvisional: true,
+		VerifyProvisional: func(ctx context.Context, active ActiveRoster) bool {
+			return production != nil && production.VerifyConfiguredProvisionalRoster(ctx, active)
+		},
+		CommitProvisional: func(commit func()) bool {
+			globalState.mu.RLock()
+			defer globalState.mu.RUnlock()
+			if !globalState.cfg.ProbeOnProvisionalRoster {
+				return false
+			}
+			commit()
+			return true
+		},
 	})
+	managementProvisionalRiskChanged = func(enabled bool) {
+		refresherMu.Lock()
+		controller := globalRosterController
+		refresher := globalRefresher
+		refresherMu.Unlock()
+		if controller != nil {
+			_, _ = controller.WakeForProbe(context.Background())
+		}
+		if enabled && refresher != nil {
+			refresher.Start()
+		}
+	}
 	managementRefreshSoon = refreshGlobalRefresherSoon
 	managementRefreshOneSoon = refreshGlobalRefresherOneSoon
 	refresherMu.Unlock()

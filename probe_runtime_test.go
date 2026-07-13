@@ -20,9 +20,11 @@ import (
 type sequenceProbeHost struct {
 	mu         sync.Mutex
 	auth       pluginapi.HostAuthGetResponse
+	authReads  []pluginapi.HostAuthGetResponse
 	quota      [][]byte
 	urls       []string
 	requests   []pluginapi.HTTPRequest
+	gets       int
 	getStarted chan struct{}
 	releaseGet chan struct{}
 }
@@ -64,7 +66,12 @@ func (h *sequenceProbeHost) ListAuths() ([]pluginapi.HostAuthFileEntry, error) {
 }
 func (h *sequenceProbeHost) GetAuth(string) (pluginapi.HostAuthGetResponse, error) {
 	h.mu.Lock()
+	h.gets++
 	auth, started, release := h.auth, h.getStarted, h.releaseGet
+	if len(h.authReads) > 0 {
+		auth = h.authReads[0]
+		h.authReads = h.authReads[1:]
+	}
 	h.mu.Unlock()
 	if started != nil {
 		select {
@@ -400,8 +407,20 @@ func TestProductionProvisionalProbeMarkerEndToEnd(t *testing.T) {
 	active := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(4*time.Hour).Format(time.RFC3339)))
 	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)}, quota: [][]byte{lazy, active}}
 	r := newDueProbeRuntime(t, now, host)
-	entries := []RosterEntry{{ID: "a", AuthIndex: "idx", Provider: "codex", Priority: intPtr(9)}}
-	r.ObserveRosterLifecycle(ActiveRoster{Capability: CapabilityB, Provisional: true, Health: RosterWaiting, BackgroundAllowed: true, Entries: entries})
+	confirmed := r.runtimeRoster()
+	confirmed.ConfirmedAt = now
+	if err := r.PublishAuthoritativeRoster(context.Background(), confirmed); err != nil {
+		t.Fatal(err)
+	}
+	provisional := r.ProvisionalRoster()
+	cfg := r.state.Config()
+	cfg.ProbeOnProvisionalRoster = true
+	r.state.ReplaceConfig(cfg)
+	if provisional == nil || !r.VerifyProvisionalRoster(context.Background(), *provisional) {
+		t.Fatalf("verified provisional=%#v", provisional)
+	}
+	provisional.BackgroundAllowed = true
+	r.ObserveRosterLifecycle(*provisional)
 	if err := r.RunProbeDueOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -414,6 +433,181 @@ func TestProductionProvisionalProbeMarkerEndToEnd(t *testing.T) {
 	for i, req := range requests {
 		if got := req.Headers.Get(rosterLifecycleRequestHeader); got != rosterLifecycleProvisional {
 			t.Fatalf("request %d marker=%q request=%#v", i, got, req)
+		}
+	}
+}
+
+func TestProductionProvisionalVerificationRejectsMismatchWithoutOpenAI(t *testing.T) { //inv:INV-02,INV-34,INV-35
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	legacyPath := filepath.Join(t.TempDir(), "state.json")
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
+	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","refresh_token":"original","id_token":"` + idToken + `"}`)}}
+	state := NewPluginState(DefaultConfig())
+	adapter := &rosterCredentialHost{host: host, roster: HostRosterSnapshot{Capability: CapabilityB}}
+	r, err := NewProductionQuotaRefresher(host, state, adapter, HostRosterSnapshot{Capability: CapabilityB}, legacyPath, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.bindings = r.bindings
+	confirmed := HostRosterSnapshot{Capability: CapabilityA, Confirmed: true, Health: RosterHealthy, BackgroundAllowed: true, Generation: 3, ConfirmedAt: now, Entries: []RosterEntry{{ID: "a", AuthIndex: "idx", Provider: "codex", Priority: intPtr(9)}}}
+	if err = r.PublishAuthoritativeRoster(context.Background(), confirmed); err != nil {
+		t.Fatal(err)
+	}
+	host.mu.Lock()
+	host.auth.JSON = json.RawMessage(`{"access_token":"access","refresh_token":"changed","id_token":"` + idToken + `"}`)
+	host.mu.Unlock()
+	provisional := r.ProvisionalRoster()
+	if provisional == nil {
+		t.Fatal("missing provisional snapshot")
+	}
+	if r.VerifyProvisionalRoster(context.Background(), *provisional) {
+		t.Fatal("fingerprint mismatch verified")
+	}
+	r.ObserveRosterLifecycle(*provisional)
+	if err = r.RunProbeDueOnce(context.Background()); !errors.Is(err, ErrCapabilityB) {
+		t.Fatalf("RunProbeDueOnce err=%v", err)
+	}
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	if len(host.requests) != 0 || len(host.urls) != 0 {
+		t.Fatalf("mismatch made OpenAI calls requests=%#v urls=%v", host.requests, host.urls)
+	}
+}
+
+func TestProductionProvisionalVerificationRechecksActualPrecheckFingerprint(t *testing.T) { //inv:INV-02,INV-34,INV-35
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
+	original := pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","refresh_token":"original","id_token":"` + idToken + `"}`)}
+	changed := pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"changed-access","refresh_token":"changed","id_token":"` + idToken + `"}`)}
+	host := &sequenceProbeHost{auth: original}
+	r := newDueProbeRuntime(t, now, host)
+	confirmed := r.runtimeRoster()
+	confirmed.ConfirmedAt = now
+	if err := r.PublishAuthoritativeRoster(context.Background(), confirmed); err != nil {
+		t.Fatal(err)
+	}
+	provisional := r.ProvisionalRoster()
+	if provisional == nil {
+		t.Fatal("missing provisional")
+	}
+	cfg := r.state.Config()
+	cfg.ProbeOnProvisionalRoster = true
+	r.state.ReplaceConfig(cfg)
+	host.mu.Lock()
+	host.authReads = []pluginapi.HostAuthGetResponse{original, changed}
+	host.mu.Unlock()
+	if !r.VerifyProvisionalRoster(context.Background(), *provisional) {
+		t.Fatal("initial verification failed")
+	}
+	provisional.BackgroundAllowed = true
+	r.ObserveRosterLifecycle(*provisional)
+	if err := r.RunProbeDueOnce(context.Background()); !errors.Is(err, ErrProvisionalFingerprintMismatch) {
+		t.Fatalf("RunProbeDueOnce err=%v", err)
+	}
+	host.mu.Lock()
+	requests := append([]pluginapi.HTTPRequest(nil), host.requests...)
+	host.mu.Unlock()
+	if len(requests) != 0 {
+		t.Fatalf("rotated precheck made OpenAI calls: %#v", requests)
+	}
+	persisted, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, _ := r.bindings.Lookup("a")
+	if got := persisted.ProbeWindows[binding.Instance][ProbeWindowFiveHour]; got.State != ProbeWaitingRoster {
+		t.Fatalf("mismatch window=%#v", got)
+	}
+}
+
+func TestProductionProvisionalRequestMarkerEndToEnd(t *testing.T) { //inv:INV-02,INV-34
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
+	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":80,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(-time.Hour).Format(time.RFC3339)))
+	active := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(4*time.Hour).Format(time.RFC3339)))
+	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","refresh_token":"r0","id_token":"` + idToken + `"}`)}, quota: [][]byte{lazy, active}}
+	r := newDueProbeRuntime(t, now, host)
+	confirmed := r.runtimeRoster()
+	confirmed.ConfirmedAt = now
+	confirmed.Generation = 5
+	if err := r.PublishAuthoritativeRoster(context.Background(), confirmed); err != nil {
+		t.Fatal(err)
+	}
+	provisional := r.ProvisionalRoster()
+	cfg := r.state.Config()
+	cfg.ProbeOnProvisionalRoster = true
+	r.state.ReplaceConfig(cfg)
+	if provisional == nil || !r.VerifyProvisionalRoster(context.Background(), *provisional) {
+		t.Fatalf("verified provisional=%#v", provisional)
+	}
+	provisional.BackgroundAllowed = true
+	r.ObserveRosterLifecycle(*provisional)
+	if err := r.RunProbeDueOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	host.mu.Lock()
+	requests := append([]pluginapi.HTTPRequest(nil), host.requests...)
+	host.mu.Unlock()
+	if len(requests) != 3 {
+		t.Fatalf("requests=%#v", requests)
+	}
+	for i, req := range requests {
+		if got := req.Headers.Get(rosterLifecycleRequestHeader); got != rosterLifecycleProvisional {
+			t.Fatalf("request %d marker=%q", i, got)
+		}
+	}
+}
+
+func TestProductionProvisionalRecoveryRiskStartRunsVerifiedProbe(t *testing.T) { //inv:INV-02,INV-34,INV-35
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
+	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":80,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(-time.Hour).Format(time.RFC3339)))
+	active := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(4*time.Hour).Format(time.RFC3339)))
+	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","refresh_token":"r0","id_token":"` + idToken + `"}`)}, quota: [][]byte{lazy, active}}
+	r := newDueProbeRuntime(t, now, host)
+	confirmed := r.runtimeRoster()
+	confirmed.ConfirmedAt = now
+	if err := r.PublishAuthoritativeRoster(context.Background(), confirmed); err != nil {
+		t.Fatal(err)
+	}
+	provisional := r.ProvisionalRoster()
+	if provisional == nil {
+		t.Fatal("missing provisional")
+	}
+	cfg := r.state.Config()
+	cfg.ProbeOnProvisionalRoster = true
+	r.state.ReplaceConfig(cfg)
+	r.ObserveRosterLifecycle(*provisional)
+	controller := NewRosterController(RosterControllerOptions{
+		Now:                func() time.Time { return now },
+		Provisional:        provisional,
+		ProbeOnProvisional: true,
+		VerifyProvisional:  r.VerifyConfiguredProvisionalRoster,
+		Observe:            r.ObserveRosterLifecycle,
+	})
+	refresherMu.Lock()
+	globalRosterController = controller
+	refresherMu.Unlock()
+	r.Start()
+	t.Cleanup(r.Stop)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		host.mu.Lock()
+		count := len(host.requests)
+		host.mu.Unlock()
+		if count == 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("verified risk start did not run Probe, requests=%d", count)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	for i, req := range host.requests {
+		if got := req.Headers.Get(rosterLifecycleRequestHeader); got != rosterLifecycleProvisional {
+			t.Fatalf("request %d marker=%q", i, got)
 		}
 	}
 }

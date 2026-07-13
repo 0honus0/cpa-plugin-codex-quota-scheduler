@@ -17,6 +17,7 @@ const managementBasePath = "/plugins/" + PluginID
 
 var managementRefreshSoon = func() {}
 var managementRefreshOneSoon = func(authID string) {}
+var managementProvisionalRiskChanged = func(bool) {}
 
 type StatusPayload struct {
 	PluginID              string            `json:"plugin_id"`
@@ -365,6 +366,7 @@ func handlePutSettings(store *PluginState, req pluginapi.ManagementRequest, now 
 }
 
 func saveSettingsPayload(store *PluginState, payload SettingsPayload) pluginapi.ManagementResponse {
+	previousRisk := store.Config().ProbeOnProvisionalRoster
 	cfg, err := ConfigFromSettings(store.Config(), payload)
 	if err != nil {
 		return jsonManagementResponse(http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -376,6 +378,9 @@ func saveSettingsPayload(store *PluginState, payload SettingsPayload) pluginapi.
 	}
 	store.ReplaceConfig(cfg)
 	currentConfig.Store(cfg)
+	if cfg.ProbeOnProvisionalRoster != previousRisk {
+		managementProvisionalRiskChanged(cfg.ProbeOnProvisionalRoster)
+	}
 	return jsonManagementResponse(http.StatusOK, SettingsFromConfig(cfg))
 }
 
