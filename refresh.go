@@ -355,6 +355,7 @@ func (r *QuotaRefresher) PublishAuthoritativeRoster(ctx context.Context, roster 
 	if err != nil {
 		return err
 	}
+	r.reconcileActiveCredentialTails(ctx, reconciled.Bindings)
 	filtered.Generation = uint64(reconciled.Generation)
 	if filtered.ConfirmedAt.IsZero() {
 		filtered.ConfirmedAt = r.now()
@@ -402,6 +403,26 @@ func (r *QuotaRefresher) PublishAuthoritativeRoster(ctx context.Context, roster 
 		r.Start()
 	}
 	return nil
+}
+
+func (r *QuotaRefresher) reconcileActiveCredentialTails(ctx context.Context, bindings map[string]RuntimeBinding) {
+	if r == nil || r.credentials == nil || len(bindings) == 0 {
+		return
+	}
+	authIDs := make([]string, 0, len(bindings))
+	for authID := range bindings {
+		authIDs = append(authIDs, authID)
+	}
+	sort.Strings(authIDs)
+	for _, authID := range authIDs {
+		binding := bindings[authID]
+		if binding.Instance == 0 {
+			continue
+		}
+		if _, err := r.credentials.Reconcile(ctx, binding.Instance); err != nil && r.state != nil {
+			r.state.RecordLog("warn", "credential.reconcile_failed", "credential reconciliation will retry on a later authoritative roster sync", map[string]any{"auth_id": authID}, r.now())
+		}
+	}
 }
 
 func (r *QuotaRefresher) CancelRosterInstances(authIDs []string) error {

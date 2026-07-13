@@ -54,7 +54,7 @@ go test ./... -run TestManagementCredentialAmbiguityReadsDurableChains -count=1
 
 Result: exit 1 at compile time because the old global helper accepted no active roster or observation time. The replacement API is active-scoped and the GREEN regression proves that removed ambiguity is ignored, active reconciliation ambiguity is exposed, and an expired reachable credential generation is exposed.
 
-The follow-up reviewer identified one more unresolved-tail edge. A new assertion for `OutcomeUnknown + observed == Next` failed because the generic classifier called it ambiguous even though reconciliation deterministically applies it. The implementation now treats unresolved tails exclusively: Prev and Next are resolvable; only neither is ambiguous; terminal chains continue through the expiry/capacity classifier.
+The follow-up reviewer initially treated the durable binding fingerprint as a fresh observation and concluded that unresolved Prev/Next could be resolved in Management. That conclusion is superseded: the durable binding is stale evidence, so Management must keep every active unresolved tail ambiguous. Fresh Prev/Next/third classification belongs to authoritative synchronization through `CredentialManager.Reconcile`, as documented in the later production-reconciliation follow-up below.
 
 ### GREEN: Management security/write-through focus
 
@@ -114,7 +114,7 @@ The first commit-gate review found one Important issue and no Critical issues: t
 
 ## Post-commit main-review follow-up
 
-Main review of `7771991` found three blockers. The selected correction is conservative and side-effect free: authenticated Management never treats a durable binding fingerprint as a fresh credential observation and never calls GetAuth or mutates credential WAL state. An active `Planned`/`OutcomeUnknown` tail remains `CredentialAmbiguous` until the existing runtime reconciliation path resolves and persists it.
+Main review of `7771991` found three blockers. The selected Management correction is conservative and side-effect free: authenticated Management never treats a durable binding fingerprint as a fresh credential observation and never calls GetAuth or mutates credential WAL state. An active `Planned`/`OutcomeUnknown` tail remains `CredentialAmbiguous` until an authoritative synchronization resolves and persists it. At `d96f3c9`, that production reconciliation call was still missing; the next follow-up adds it.
 
 ### Follow-up RED
 
@@ -153,6 +153,49 @@ Exit 0; main package passed in 3.173s and all selected packages passed.
 - `git diff --check`: exit 0.
 
 Independent follow-up review: **approved, no blockers**. It confirmed conservative unresolved-tail behavior, empty-roster short-circuit, non-ambiguous store failure, explicit nil-controller Capability-B/WaitingRoster projection with zero cards, and unchanged Resource shell behavior.
+
+## Production CredentialAmbiguous auto-resolution follow-up
+
+Approval review then identified the missing frozen §2.5 runtime mechanism: production constructed `CredentialManager` but no authoritative synchronization called `Reconcile`, so unresolved tails could remain frozen forever and later credential saves returned `ErrCredentialUnresolved`.
+
+### RED: restart and authoritative sync
+
+```powershell
+go test ./... -run 'TestProductionRosterSync(ReconcilesCredentialTailsAfterRestart|CredentialReconcileFailureIsPerInstance)' -count=1
+```
+
+Exit 1 with the expected evidence: every case made zero credential GetAuth calls, Prev/Next remained `OutcomeUnknown`, and a healthy instance remained `Planned` when another active instance had a host error.
+
+Production now calls the existing `CredentialManager.Reconcile` for each sorted active binding immediately after authoritative highest-tier binding reconciliation and before roster publication. Reconciliation uses fresh GetAuth and the existing WAL protocol:
+
+- observed Prev persists `Aborted`;
+- observed Next persists `Applied`;
+- a third fingerprint remains unresolved and Management-visible as ambiguous;
+- a host error remains unresolved, is logged generically, and does not block unrelated active instances or roster publication;
+- terminal cases have a usable `SaveTail`; ambiguous/error cases retain `ErrCredentialUnresolved`;
+- Management projection performs no credential host call or persistence mutation.
+
+### Commit-gate stale-state RED
+
+The first review of that wiring found an AuthIndex-reset interleaving: `BindingRegistry` could replace the durable chain while `CredentialManager` retained the old cached unresolved transition.
+
+```powershell
+go test ./... -run TestProductionRosterSyncAuthIndexChangeDoesNotReconcileResetChain -count=1
+```
+
+Exit 1: publication made two GetAuth calls instead of the single binding-replacement observation, proving stale manager reconciliation ran after the chain reset.
+
+`CredentialManager.Reconcile` now reloads `PersistentSnapshot` under its lock before inspecting a chain. Terminal persistence searches and revalidates `SaveSeq`, Prev, Next, and unresolved phase rather than indexing a cached position. A concurrently replaced/reset transition returns a neutral report without resurrecting old WAL state. The AuthIndex-change regression is GREEN and proves the reset chain remains empty at the new cursor with exactly one GetAuth.
+
+### Final evidence
+
+- Focused credential/WAL/roster/Management: `go test ./... -run 'Test(Credential|ProductionRosterSync|Management|SuiteRosterManagement|SuiteRuntimeWiring|Binding)' -count=1` — exit 0, main package 2.892s.
+- Full: `go test ./... -count=1` — exit 0, main package 7.868s.
+- Race: `go test -race ./...` — exit 0, main package 13.079s.
+- Vet: `go vet ./...` — exit 0, no diagnostics.
+- S7: `./scripts/check_refactor_gates.ps1 -Stage S7` — exit 0; all roster lifecycle, traceability, K-point, pick-I/O, sensitive-state, and Mock A-E gates passed.
+- Diff: `git diff --check` — exit 0.
+- Independent final re-review: **approved, no blockers**.
 
 ## Invariant notes
 

@@ -281,6 +281,7 @@ func TestProbeAttemptSeamRuntimeRoundTrip(t *testing.T) {
 
 type runtimeCredentialHost struct {
 	current map[AuthInstanceID]HostAuth
+	getErr  map[AuthInstanceID]error
 	saves   int
 	gets    int
 }
@@ -292,11 +293,158 @@ func (h *runtimeCredentialHost) SaveAuth(_ context.Context, id AuthInstanceID, a
 }
 func (h *runtimeCredentialHost) GetAuth(_ context.Context, id AuthInstanceID) (HostAuth, error) {
 	h.gets++
+	if err := h.getErr[id]; err != nil {
+		return HostAuth{}, err
+	}
 	a, ok := h.current[id]
 	if !ok {
 		return HostAuth{}, os.ErrNotExist
 	}
 	return a, nil
+}
+
+func TestProductionRosterSyncReconcilesCredentialTailsAfterRestart(t *testing.T) { //inv:INV-23,INV-40 positive
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	prev := NewCredentialFingerprint("subject", "refresh-prev", "meta")
+	next := NewCredentialFingerprint("subject", "refresh-next", "meta")
+	third := NewCredentialFingerprint("other", "refresh-third", "meta")
+	tests := []struct {
+		name       string
+		observed   CredentialFingerprint
+		getErr     error
+		wantPhase  TransitionPhase
+		ambiguous  bool
+		wantGetOne bool
+	}{
+		{name: "observed-prev-aborts", observed: prev, wantPhase: TransitionAborted, wantGetOne: true},
+		{name: "observed-next-applies", observed: next, wantPhase: TransitionApplied, wantGetOne: true},
+		{name: "observed-third-stays-ambiguous", observed: third, wantPhase: TransitionOutcomeUnknown, ambiguous: true, wantGetOne: true},
+		{name: "host-error-stays-ambiguous", getErr: errors.New("credential host unavailable"), wantPhase: TransitionOutcomeUnknown, ambiguous: true, wantGetOne: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			legacyPath := filepath.Join(t.TempDir(), "state.json")
+			instance := legacyAuthInstanceID("active")
+			persistent := NewPersistentState()
+			persistent.TierGeneration = 4
+			persistent.AdmissionEpochs[instance] = 1
+			persistent.Bindings["active"] = RuntimeBinding{AuthID: "active", AuthIndex: "idx-active", Instance: instance, Admission: 1, Generation: 4, Login: 1, Token: 1, Fingerprint: prev}
+			persistent.CredentialChains[instance] = TransitionChain{Cursor: prev, Transitions: []CredentialTransition{{Prev: prev, Next: next, SaveSeq: 1, Phase: TransitionOutcomeUnknown, CreatedAt: now.Add(-time.Minute)}}}
+			if err := NewStateStore(semanticStatePaths(legacyPath).Runtime, OSFileHooks(), nil).WriteThrough(persistent); err != nil {
+				t.Fatal(err)
+			}
+			host := &runtimeCredentialHost{current: map[AuthInstanceID]HostAuth{instance: {Fingerprint: tc.observed}}, getErr: map[AuthInstanceID]error{instance: tc.getErr}}
+			roster := HostRosterSnapshot{Capability: CapabilityA, Confirmed: true, Generation: 4, Entries: []RosterEntry{{ID: "active", AuthIndex: "idx-active", Provider: "codex", Priority: intPtr(9)}}}
+			r, err := NewProductionQuotaRefresher(&fakeHostClient{}, NewPluginState(DefaultConfig()), host, roster, legacyPath, func() time.Time { return now })
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := r.PublishAuthoritativeRoster(context.Background(), roster); err != nil {
+				t.Fatalf("PublishAuthoritativeRoster: %v", err)
+			}
+			persisted, err := r.runtimeStore.PersistentSnapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := persisted.CredentialChains[instance].Transitions[0].Phase
+			if got != tc.wantPhase || (host.gets == 1) != tc.wantGetOne {
+				t.Fatalf("phase=%s gets=%d, want phase=%s getOne=%v", got, host.gets, tc.wantPhase, tc.wantGetOne)
+			}
+			_, tailErr := persisted.CredentialChains[instance].SaveTail()
+			if tc.ambiguous != errors.Is(tailErr, ErrCredentialUnresolved) {
+				t.Fatalf("SaveTail err=%v ambiguous=%v", tailErr, tc.ambiguous)
+			}
+			active := ActiveRoster{Instances: []string{"active"}}
+			if gotAmbiguous := managementCredentialAmbiguous(r, active, now); gotAmbiguous != tc.ambiguous {
+				t.Fatalf("Management ambiguity=%v, want %v", gotAmbiguous, tc.ambiguous)
+			}
+			before := clonePersistentState(persisted)
+			_ = buildCurrentStatusPayloadWithLifecycle(r.state, now, ManagementLifecycleSnapshot{Roster: active, CredentialAmbiguous: tc.ambiguous})
+			after, _ := r.runtimeStore.PersistentSnapshot()
+			if !reflect.DeepEqual(before, after) || host.gets != 1 {
+				t.Fatalf("Management projection mutated reconciliation state or called host: before=%#v after=%#v gets=%d", before, after, host.gets)
+			}
+		})
+	}
+}
+
+func TestProductionRosterSyncCredentialReconcileFailureIsPerInstance(t *testing.T) { //inv:INV-23,INV-40 negative
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	legacyPath := filepath.Join(t.TempDir(), "state.json")
+	prev := NewCredentialFingerprint("subject", "refresh-prev", "meta")
+	next := NewCredentialFingerprint("subject", "refresh-next", "meta")
+	persistent := NewPersistentState()
+	persistent.TierGeneration = 4
+	host := &runtimeCredentialHost{current: map[AuthInstanceID]HostAuth{}, getErr: map[AuthInstanceID]error{}}
+	entries := make([]RosterEntry, 0, 2)
+	for _, id := range []string{"broken", "healthy"} {
+		instance := legacyAuthInstanceID(id)
+		persistent.AdmissionEpochs[instance] = 1
+		persistent.Bindings[id] = RuntimeBinding{AuthID: id, AuthIndex: "idx-" + id, Instance: instance, Admission: 1, Generation: 4, Login: 1, Token: 1, Fingerprint: prev}
+		persistent.CredentialChains[instance] = TransitionChain{Cursor: prev, Transitions: []CredentialTransition{{Prev: prev, Next: next, SaveSeq: uint64(len(entries) + 1), Phase: TransitionPlanned, CreatedAt: now.Add(-time.Minute)}}}
+		entries = append(entries, RosterEntry{ID: id, AuthIndex: "idx-" + id, Provider: "codex", Priority: intPtr(9)})
+		host.current[instance] = HostAuth{Fingerprint: next}
+	}
+	host.getErr[legacyAuthInstanceID("broken")] = errors.New("broken auth")
+	if err := NewStateStore(semanticStatePaths(legacyPath).Runtime, OSFileHooks(), nil).WriteThrough(persistent); err != nil {
+		t.Fatal(err)
+	}
+	roster := HostRosterSnapshot{Capability: CapabilityA, Confirmed: true, Generation: 4, Entries: entries}
+	r, err := NewProductionQuotaRefresher(&fakeHostClient{}, NewPluginState(DefaultConfig()), host, roster, legacyPath, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.PublishAuthoritativeRoster(context.Background(), roster); err != nil {
+		t.Fatalf("one credential reconciliation blocked roster publication: %v", err)
+	}
+	persisted, _ := r.runtimeStore.PersistentSnapshot()
+	if got := persisted.CredentialChains[legacyAuthInstanceID("broken")].Transitions[0].Phase; got != TransitionPlanned {
+		t.Fatalf("broken phase=%s", got)
+	}
+	if got := persisted.CredentialChains[legacyAuthInstanceID("healthy")].Transitions[0].Phase; got != TransitionApplied {
+		t.Fatalf("healthy phase=%s, unrelated failure blocked reconciliation", got)
+	}
+	if host.gets != 2 {
+		t.Fatalf("GetAuth calls=%d, want one per active unresolved instance", host.gets)
+	}
+}
+
+func TestProductionRosterSyncAuthIndexChangeDoesNotReconcileResetChain(t *testing.T) { //inv:INV-33,INV-40 negative
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	legacyPath := filepath.Join(t.TempDir(), "state.json")
+	instance := legacyAuthInstanceID("active")
+	prev := NewCredentialFingerprint("subject", "refresh-prev", "old-index")
+	next := NewCredentialFingerprint("subject", "refresh-next", "old-index")
+	replaced := NewCredentialFingerprint("subject", "refresh-live", "new-index")
+	persistent := NewPersistentState()
+	persistent.TierGeneration = 4
+	persistent.AdmissionEpochs[instance] = 1
+	persistent.Bindings["active"] = RuntimeBinding{AuthID: "active", AuthIndex: "old-index", Instance: instance, Admission: 1, Generation: 4, Login: 1, Token: 1, Fingerprint: prev}
+	persistent.CredentialChains[instance] = TransitionChain{Cursor: prev, Transitions: []CredentialTransition{{Prev: prev, Next: next, SaveSeq: 1, Phase: TransitionOutcomeUnknown, CreatedAt: now.Add(-time.Minute)}}}
+	if err := NewStateStore(semanticStatePaths(legacyPath).Runtime, OSFileHooks(), nil).WriteThrough(persistent); err != nil {
+		t.Fatal(err)
+	}
+	host := &runtimeCredentialHost{current: map[AuthInstanceID]HostAuth{instance: {Fingerprint: replaced}}}
+	startupRoster := HostRosterSnapshot{Capability: CapabilityA, Confirmed: true, Generation: 4, Entries: []RosterEntry{{ID: "active", AuthIndex: "old-index", Provider: "codex", Priority: intPtr(9)}}}
+	r, err := NewProductionQuotaRefresher(&fakeHostClient{}, NewPluginState(DefaultConfig()), host, startupRoster, legacyPath, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := HostRosterSnapshot{Capability: CapabilityA, Confirmed: true, Generation: 5, Entries: []RosterEntry{{ID: "active", AuthIndex: "new-index", Provider: "codex", Priority: intPtr(9)}}}
+	if err := r.PublishAuthoritativeRoster(context.Background(), changed); err != nil {
+		t.Fatalf("PublishAuthoritativeRoster after AuthIndex change: %v", err)
+	}
+	persisted, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain := persisted.CredentialChains[instance]
+	if len(chain.Transitions) != 0 || chain.Cursor != replaced {
+		t.Fatalf("reset chain was reconciled from stale manager state: %#v", chain)
+	}
+	if host.gets != 1 {
+		t.Fatalf("GetAuth calls=%d, want only binding replacement observation", host.gets)
+	}
 }
 
 func TestBindingGenesisAndInjectedCredentialWAL(t *testing.T) { //inv:INV-33

@@ -199,6 +199,15 @@ func (m *CredentialManager) saveVersionedWithHost(ctx context.Context, instance 
 func (m *CredentialManager) Reconcile(ctx context.Context, instance AuthInstanceID) (CredentialRecoveryReport, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if ss, ok := m.store.(interface {
+		PersistentSnapshot() (PersistentState, error)
+	}); ok {
+		fresh, err := ss.PersistentSnapshot()
+		if err != nil {
+			return CredentialRecoveryReport{}, err
+		}
+		m.state = fresh
+	}
 	chain := m.state.CredentialChains[instance]
 	if len(chain.Transitions) == 0 {
 		return CredentialRecoveryReport{}, nil
@@ -220,10 +229,26 @@ func (m *CredentialManager) Reconcile(ctx context.Context, instance AuthInstance
 	default:
 		return CredentialRecoveryReport{Ambiguous: true, Phase: tr.Phase}, nil
 	}
-	return CredentialRecoveryReport{Phase: tr.Phase}, m.mutate(func(s *PersistentState) error {
+	updated := false
+	err = m.mutate(func(s *PersistentState) error {
 		ch := s.CredentialChains[instance]
-		ch.Transitions[i] = tr
+		for j := range ch.Transitions {
+			candidate := ch.Transitions[j]
+			if candidate.SaveSeq != tr.SaveSeq || candidate.Prev != tr.Prev || candidate.Next != tr.Next || (candidate.Phase != TransitionPlanned && candidate.Phase != TransitionOutcomeUnknown) {
+				continue
+			}
+			ch.Transitions[j] = tr
+			updated = true
+			break
+		}
 		s.CredentialChains[instance] = ch
 		return nil
 	})
+	if err != nil {
+		return CredentialRecoveryReport{Phase: tr.Phase}, err
+	}
+	if !updated {
+		return CredentialRecoveryReport{}, nil
+	}
+	return CredentialRecoveryReport{Phase: tr.Phase}, nil
 }
