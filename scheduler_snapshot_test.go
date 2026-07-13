@@ -8,7 +8,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
-// inv:INV-43,INV-44
 func TestSchedulerPickABIPathSnapshotOnly(t *testing.T) {
 	now := time.Now()
 	s := &SchedulerSnapshot{HandleEnabled: true, Accounts: []AccountView{{ID: "a", Instance: 1, Cache: CacheFresh}, {ID: "outside", Instance: 2, Cache: CacheFresh, PluginPriority: 99}}, ActiveHighestTier: map[string]struct{}{"a": {}}}

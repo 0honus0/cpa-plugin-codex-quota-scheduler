@@ -33,7 +33,6 @@ func boundaryLeaks(body string, sentinels []string) []string {
 }
 
 func TestSuiteBoundary(t *testing.T) {
-	//inv:INV-01 positive
 	sentinels := BoundarySentinels{
 		AuthID:       "SENTINEL_AUTH_X9K",
 		AccountID:    "SENTINEL_ACCOUNT_Q7M",
@@ -67,8 +66,6 @@ func TestSuiteBoundary(t *testing.T) {
 			t.Fatalf("leaked sample reported %q, want %q", leaked, sentinels.LogMessage)
 		}
 	})
-
-	//inv:INV-01 negative
 	resp := requestResourceMutationForTest(t, store, "/refresh")
 	if resp.StatusCode < 400 {
 		t.Fatalf("resource mutation status = %d", resp.StatusCode)

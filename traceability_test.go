@@ -12,9 +12,9 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"unicode"
+	"unicode/utf8"
 )
-
-var invariantTagPattern = regexp.MustCompile(`^//inv:(INV-[0-9]{2}(?:,INV-[0-9]{2})*) (positive|negative)$`)
 
 type testFunction struct {
 	Name string
@@ -34,12 +34,18 @@ type mockCoverageRow struct {
 	Owners   []string `json:"owners"`
 }
 
-func isExecutableTestFunc(fn *ast.FuncDecl) bool {
+func isExecutableTestFunc(fn *ast.FuncDecl, testingAliases map[string]struct{}) bool {
 	if fn == nil || fn.Recv != nil || fn.Body == nil || fn.Type.Results != nil || !strings.HasPrefix(fn.Name.Name, "Test") {
 		return false
 	}
+	if suffix := strings.TrimPrefix(fn.Name.Name, "Test"); suffix != "" {
+		first, _ := utf8.DecodeRuneInString(suffix)
+		if unicode.IsLower(first) {
+			return false
+		}
+	}
 	params := fn.Type.Params
-	if params == nil || len(params.List) != 1 || len(params.List[0].Names) != 1 {
+	if params == nil || len(params.List) != 1 || len(params.List[0].Names) != 1 || params.List[0].Names[0].Name != "t" {
 		return false
 	}
 	star, ok := params.List[0].Type.(*ast.StarExpr)
@@ -47,7 +53,15 @@ func isExecutableTestFunc(fn *ast.FuncDecl) bool {
 		return false
 	}
 	selector, ok := star.X.(*ast.SelectorExpr)
-	return ok && selector.Sel.Name == "T"
+	if !ok || selector.Sel.Name != "T" {
+		return false
+	}
+	pkg, ok := selector.X.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	_, ok = testingAliases[pkg.Name]
+	return ok
 }
 
 var frozenSection12RowIDs = []string{
@@ -58,56 +72,114 @@ var frozenSection12RowIDs = []string{
 	"E01", "E02", "E03", "E04", "E05", "E06",
 }
 
+var frozenSection12Rows = map[string]struct {
+	Group    string
+	Scenario string
+}{
+	"A01": {"A", "Probe sent then crash before sent WAL recovers verify-first"},
+	"A02": {"A", "Crash after sending WAL and before HTTP has SentUnknown semantics"},
+	"A03": {"A", "Fence reservation crash points preserve durable ceiling safety"},
+	"A04": {"A", "Credential F0 to F1 to F2 skip and out-of-order observations reconcile"},
+	"A05": {"A", "Delete and re-add identity combinations advance admission fencing safely"},
+	"A06": {"A", "Thirty-minute degraded boundary fails background closed while real pick remains independent"},
+	"A07": {"A", "Legacy envelope interleaves safely with manual and quota intents"},
+	"A08": {"A", "All five Probe baselines plus UsageOnly table rows"},
+	"A09": {"A", "Window lengths cross reset rollback jump plausibility and missing values"},
+	"A10": {"A", "Concurrent picks retain one trial and force TrialUnknown at evidence budget"},
+	"B01": {"B", "All 1440 single-instance scheduling vectors match independent oracle"},
+	"B02": {"B", "All representative multi-instance vectors and candidate relations match oracle"},
+	"B03": {"B", "Two-to-four concurrent picks preserve single trial and hot-path safety"},
+	"B04": {"B", "Deterministic property-style scheduling vectors compare with independent oracle"},
+	"C01": {"C", "All legal and illegal Probe state-event transitions"},
+	"C02": {"C", "Full Probe classifier Cartesian golden grid"},
+	"C03": {"C", "Ten-by-ten dual-window isolation product"},
+	"C04": {"C", "Probe crash points restart to convergent persisted state"},
+	"C05": {"C", "Time jumps across zero one and multiple deadlines emit at most one sequence"},
+	"C06": {"C", "Normal recovery and SentUnknown suppression entrances cross verify outcomes"},
+	"D01": {"D", "Credential transition order SaveAuth outcomes and identity ambiguity boundaries"},
+	"D02": {"D", "Resource endpoints contain no runtime-sensitive account data"},
+	"E01": {"E", "Two-to-three event coordinator interleavings preserve dedupe barriers fencing and lock order"},
+	"E02": {"E", "Refresh timeline boundaries and source-priority truth table"},
+	"E03": {"E", "Business circuit transitions remain isolated from Probe and usage-limit feedback"},
+	"E04": {"E", "Degraded failure boundary and authoritative recovery"},
+	"E05": {"E", "Lease returns before and after reclaim across operation classes"},
+	"E06": {"E", "S3 drain completion and timeout paths fence old work and inherit uncertain Probe"},
+}
+
 // invariantExplicitOwners is reserved for evidence whose behavioral test is
 // clearer to name directly than to annotate in place. Every entry is checked
 // against the AST-discovered executable Test functions before it is accepted.
 var invariantExplicitOwners = map[string][]string{
+	"INV-01 positive": {"TestSuiteBoundary"},
+	"INV-01 negative": {"TestResourceStatusQueryActionsDoNotMutateState"},
 	"INV-02 positive": {"TestProductionProvisionalRequestMarkerEndToEnd"},
 	"INV-02 negative": {"TestProductionProvisionalVerificationRejectsMismatchWithoutOpenAI"},
 	"INV-03 positive": {"TestAuthoritativeDurableGenerationSurvivesFailureObservation"},
 	"INV-03 negative": {"TestRosterRemovalCancelsInFlightAndFencesWriteback"},
-	"INV-06 positive": {"TestTypedProbeSendNeverJoinsSameAttempt"},
+	"INV-04 positive": {"TestCredentialSaveWALOrdering"},
+	"INV-04 negative": {"TestBindingValidatorRejectsEveryStaleComponent"},
+	"INV-05 positive": {"TestTypedQuotaReadAllocatesAtActualStartAndBarrierJoin"},
+	"INV-05 negative": {"TestSection12A07LegacyManualQuotaConcurrent"},
+	"INV-06 positive": {"TestProductionProbeRunsWhileNormalRefreshDormant"},
 	"INV-06 negative": {"TestTypedProbeSendNeverJoinsSameAttempt"},
 	"INV-07 positive": {"TestProbeSequenceHoldsInstanceLeaseThroughVerify"},
 	"INV-07 negative": {"TestTypedPropagationLeaseReclaimEntersSentUnknownWithoutResign"},
 	"INV-08 positive": {"TestProbeDueFailureContinuesOtherConfirmedInstance"},
 	"INV-08 negative": {"TestProbeRecoveryFailureContinuesOtherConfirmedInstance"},
+	"INV-09 positive": {"TestTypedPropagationWaitRetainsLeaseWithoutSlot"},
+	"INV-09 negative": {"TestLegacyProbeMarksSendOnlyAfterHTTPSlotAcquired"},
 	"INV-10 positive": {"TestNormalRefreshDeadlineHasSingleControllerOwner"},
-	"INV-10 negative": {"TestSuiteRefresh"},
-	"INV-11 positive": {"TestSuiteRefresh"},
-	"INV-11 negative": {"TestSuiteRefresh"},
-	"INV-12 positive": {"TestMockGroupB"},
-	"INV-12 negative": {"TestProductionEvidenceQueueAndDynamicTrial"},
+	"INV-10 negative": {"TestExactCutoffDoesNotAssignLegacyRetryResetOrProbeOwnership"},
+	"INV-11 positive": {"TestRefreshSourcePriorityTruthTable"},
+	"INV-11 negative": {"TestStaleAfterRemainsClassificationOnlyConfig"},
+	"INV-12 positive": {"TestInvariant12FirstRealRequestSingleRefresh"},
+	"INV-12 negative": {"TestInvariant12ConcurrentRequestsRejectDuplicateRefresh"},
 	"INV-13 positive": {"TestPickAllowsWeeklyWhenExhaustedFiveHourResetPassed"},
 	"INV-13 negative": {"TestPickSkipsWeeklyWhenFiveHourExhausted"},
-	"INV-14 positive": {"TestProductionProbeRunsWhileNormalRefreshDormant"},
+	"INV-14 positive": {"TestProbeControllerDormantDeadlineStillEmitsProbe"},
 	"INV-14 negative": {"TestProductionProbeRunsWhileNormalRefreshDormant"},
 	"INV-15 positive": {"TestPluginStateHalfOpenSuccessClosesCircuit"},
 	"INV-15 negative": {"TestProductionProbeRunsWhileNormalRefreshDormant"},
 	"INV-16 positive": {"TestUsageQuotaFailureMarksTemporaryExhaustedWithoutOpeningCircuit"},
-	"INV-16 negative": {"TestUsageQuotaFailureMarksTemporaryExhaustedWithoutOpeningCircuit"},
+	"INV-16 negative": {"TestUsageHandleMarksTemporaryExhaustedByAuthIndex"},
 	"INV-17 positive": {"TestProbeControllerDualWindowIndependent"},
 	"INV-17 negative": {"TestProbeAllStateEventsAndDualWindowProduct"},
 	"INV-18 positive": {"TestProbeTimeJumpsProduceAtMostOneSequence"},
 	"INV-18 negative": {"TestProbeDeadlineConsumedOnceWithoutSpin"},
 	"INV-19 positive": {"TestProbeControllerPersistentStateSetAndIllegalNoop"},
 	"INV-19 negative": {"TestStateStoreBackupAndDualCorruptionRecovery"},
+	"INV-20 positive": {"TestManagementUsesActiveRosterOnly"},
 	"INV-20 negative": {"TestRosterRemovalCancelsInFlightAndFencesWriteback"},
 	"INV-21 positive": {"TestAuthoritativeDurableGenerationSurvivesFailureObservation"},
 	"INV-21 negative": {"TestFailClosedHoldsAndRecoveryRecomputesProbe"},
-	"INV-22 positive": {"TestSuiteRefresh"},
-	"INV-22 negative": {"TestSuiteRefresh"},
+	"INV-22 positive": {"TestStatusPayloadNotesStaleAccountWhileSleeping"},
+	"INV-22 negative": {"TestRefreshDueOnceDoesNothingOutsideActiveWindow"},
+	"INV-23 positive": {"TestProbeAuthBlockedResumesOnlyAfterExternalLoginEpoch"},
+	"INV-23 negative": {"TestBindingGenesisFailsClosedForCapabilityBAndAuthBlocked"},
+	"INV-24 positive": {"TestRefreshSourcePriorityTruthTable"},
+	"INV-24 negative": {"TestLegacyRefreshCompleteOutboundEnvelope"},
+	"INV-25 positive": {"TestRosterRemovalCancelsInFlightAndFencesWriteback"},
+	"INV-25 negative": {"TestRefreshAuthDiscardsInFlightSuccessAfterPriorityGenerationChange"},
+	"INV-26 positive": {"TestTypedQuotaReadAllocatesAtActualStartAndBarrierJoin"},
+	"INV-26 negative": {"TestCompletedFenceAndReadStartSeqRemainDistinct"},
 	"INV-27 positive": {"TestProductionProbeKPointCrashRestartVerifyFirst"},
 	"INV-27 negative": {"TestProbeRecoveryWaitsForGraceAndNeverResendsDuringSuppression"},
 	"INV-28 positive": {"TestBindingAdmissionEpochMonotonicAcrossDeleteReaddAndRestart"},
 	"INV-28 negative": {"TestCredentialSaveRejectsOldInstance"},
 	"INV-29 positive": {"TestTrialRegistryCASAndEvidence"},
-	"INV-29 negative": {"TestProductionEvidenceQueueAndDynamicTrial"},
+	"INV-29 negative": {"TestSection12B03ConcurrentPicksOneTrial"},
 	"INV-30 positive": {"TestStateStoreBackupAndDualCorruptionRecovery"},
 	"INV-30 negative": {"TestRuntimeAndUserArtifactsNeverPersistSensitiveValues"},
+	"INV-31 positive": {"TestSuiteRosterManagement"},
+	"INV-31 negative": {"TestRosterObserverRejectsOutOfOrderTransition"},
 	"INV-32 positive": {"TestProductionProbeRunsWhileNormalRefreshDormant"},
-	"INV-32 negative": {"TestSuiteRefresh"},
+	"INV-32 negative": {"TestRefreshDueOnceDoesNothingOutsideActiveWindow"},
 	"INV-33 positive": {"TestProbeAuthBlockedResumesOnlyAfterExternalLoginEpoch"},
+	"INV-33 negative": {"TestCredentialAmbiguityManagementExitsEpochSemantics"},
+	"INV-34 positive": {"TestManagementUsesActiveRosterOnly"},
+	"INV-34 negative": {"TestRosterCandidatesHaveNoRosterSideEffects"},
+	"INV-35 positive": {"TestProductionRosterLifecycleGatesBackgroundRequests"},
+	"INV-35 negative": {"TestFailClosedHoldsAndRecoveryRecomputesProbe"},
 	"INV-36 positive": {"TestProductionProbeKPointCrashRestartVerifyFirst"},
 	"INV-36 negative": {"TestProbeRecoveryWaitsForGraceAndNeverResendsDuringSuppression"},
 	"INV-37 positive": {"TestAnnotationsEndpointsNormalizePatchAndPersist"},
@@ -116,14 +188,20 @@ var invariantExplicitOwners = map[string][]string{
 	"INV-38 negative": {"TestFenceDoesNotIssueWhenCeilingPersistenceFails"},
 	"INV-39 positive": {"TestFencePersistsCeilingBeforeIssuing"},
 	"INV-39 negative": {"TestFenceDoesNotIssueWhenCeilingPersistenceFails"},
+	"INV-40 positive": {"TestSection12D01CredentialIdentityMatrix"},
+	"INV-40 negative": {"TestCredentialSaveFailureAndUnknown"},
 	"INV-41 positive": {"TestTrialPendingAtSixtySecondsAndBudget"},
 	"INV-41 negative": {"TestTrialThreeRetriesForceUnknown"},
+	"INV-42 positive": {"TestLegacyRefreshCompleteOutboundEnvelope"},
+	"INV-42 negative": {"TestCoordinatorDrainCancelsQueuedWithoutStarting"},
 	"INV-43 positive": {"TestSchedulerPickABIPathSnapshotOnly"},
-	"INV-43 negative": {"TestSchedulerPickObservesOneImmutablePublication"},
+	"INV-43 negative": {"TestSchedulerPickPublishesWhileOlderHostCallIsBlocked"},
 	"INV-44 positive": {"TestSchedulerPickRefreshesOnlyActivePriorityCandidates"},
 	"INV-44 negative": {"TestRosterCandidatesHaveNoRosterSideEffects"},
 	"INV-45 positive": {"TestTrialPendingAtSixtySecondsAndBudget"},
 	"INV-45 negative": {"TestTrialThreeRetriesForceUnknown"},
+	"INV-46 positive": {"TestLegacyDrainSentUnknownPersistsAcrossRestart"},
+	"INV-46 negative": {"TestCoordinatorSentUnknownPersistenceFailureBlocksDrainHandoff"},
 }
 
 func discoverTestFunctions(root string) (map[string]testFunction, error) {
@@ -138,9 +216,22 @@ func discoverTestFunctions(root string) (map[string]testFunction, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parse %s: %w", name, err)
 		}
+		testingAliases := make(map[string]struct{})
+		for _, spec := range file.Imports {
+			if strings.Trim(spec.Path.Value, `"`) != "testing" {
+				continue
+			}
+			alias := "testing"
+			if spec.Name != nil {
+				alias = spec.Name.Name
+			}
+			if alias != "." && alias != "_" {
+				testingAliases[alias] = struct{}{}
+			}
+		}
 		for _, decl := range file.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || !isExecutableTestFunc(fn) {
+			if !ok || !isExecutableTestFunc(fn, testingAliases) {
 				continue
 			}
 			functions[fn.Name.Name] = testFunction{Name: fn.Name.Name, File: name, Decl: fn}
@@ -155,38 +246,9 @@ func scanInvariantEvidence(root string, explicit map[string][]string) (map[strin
 		return nil, err
 	}
 	evidence := make(map[string][]string)
-	files, err := filepath.Glob(filepath.Join(root, "*_test.go"))
-	if err != nil {
-		return nil, err
-	}
-	for _, name := range files {
-		fset := token.NewFileSet()
-		file, err := parser.ParseFile(fset, name, nil, parser.ParseComments)
-		if err != nil {
-			return nil, fmt.Errorf("parse %s: %w", name, err)
-		}
-		for _, decl := range file.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || !isExecutableTestFunc(fn) {
-				continue
-			}
-			for _, group := range file.Comments {
-				if group.Pos() < fn.Body.Lbrace || group.End() > fn.Body.Rbrace {
-					continue
-				}
-				for _, comment := range group.List {
-					match := invariantTagPattern.FindStringSubmatch(strings.TrimSpace(comment.Text))
-					if match == nil {
-						continue
-					}
-					for _, id := range strings.Split(match[1], ",") {
-						key := id + " " + match[2]
-						evidence[key] = append(evidence[key], fn.Name.Name)
-					}
-				}
-			}
-		}
-	}
+	// Inline tags are deliberately not evidence: they are too easy to bulk-dump
+	// into an aggregation test. The semantic manifest below must name executable
+	// behavioral owners explicitly.
 	for key, owners := range explicit {
 		if !regexp.MustCompile(`^INV-[0-9]{2} (positive|negative)$`).MatchString(key) {
 			return nil, fmt.Errorf("invalid invariant mapping key %q", key)
@@ -204,6 +266,18 @@ func scanInvariantEvidence(root string, explicit map[string][]string) (map[strin
 	for key := range evidence {
 		sort.Strings(evidence[key])
 		evidence[key] = slicesCompact(evidence[key])
+	}
+	for i := 1; i <= 46; i++ {
+		id := fmt.Sprintf("INV-%02d", i)
+		positive := make(map[string]struct{}, len(evidence[id+" positive"]))
+		for _, owner := range evidence[id+" positive"] {
+			positive[owner] = struct{}{}
+		}
+		for _, owner := range evidence[id+" negative"] {
+			if _, duplicate := positive[owner]; duplicate {
+				return nil, fmt.Errorf("invariant %s positive and negative owners must be distinct: %s", id, owner)
+			}
+		}
 	}
 	return evidence, nil
 }
@@ -256,6 +330,13 @@ func validateMockCoverage(root string, matrix mockCoverageMatrix) error {
 			problems = append(problems, fmt.Sprintf("duplicate section-12 row %s", row.ID))
 		}
 		seen[row.ID] = struct{}{}
+		frozen := frozenSection12Rows[row.ID]
+		if row.Group != frozen.Group {
+			problems = append(problems, fmt.Sprintf("section-12 row %s group = %q, want %q", row.ID, row.Group, frozen.Group))
+		}
+		if row.Scenario != frozen.Scenario {
+			problems = append(problems, fmt.Sprintf("section-12 row %s scenario drift", row.ID))
+		}
 		if len(row.Owners) == 0 {
 			problems = append(problems, fmt.Sprintf("section-12 row %s missing owner", row.ID))
 		}
@@ -337,6 +418,86 @@ func TestBehavior(t *testing.T) {}
 	}
 }
 
+func TestInvariantTraceabilityRejectsCentralizedTestTagBlocks(t *testing.T) {
+	root := t.TempDir()
+	source := `package fixture
+
+import "testing"
+
+func TestBehavior(t *testing.T) {
+	//inv:INV-01 positive
+	//inv:INV-01 negative
+	//inv:INV-02 positive
+	//inv:INV-02 negative
+	if 1 + 1 != 2 { t.Fatal("arithmetic") }
+}
+`
+	if err := os.WriteFile(filepath.Join(root, "aggregation_test.go"), []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := scanInvariantEvidence(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evidence) != 0 {
+		t.Fatalf("centralized test-body tag block was accepted: %#v", evidence)
+	}
+}
+
+func TestInvariantManifestRejectsSameDirectionalOwner(t *testing.T) {
+	root := t.TempDir()
+	source := `package fixture
+import "testing"
+func TestBehavior(t *testing.T) { if false { t.Fatal("guard") } }
+`
+	if err := os.WriteFile(filepath.Join(root, "behavior_test.go"), []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := scanInvariantEvidence(root, map[string][]string{
+		"INV-01 positive": {"TestBehavior"},
+		"INV-01 negative": {"TestBehavior"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "distinct") {
+		t.Fatalf("scanInvariantEvidence() error=%v, want distinct-owner rejection", err)
+	}
+}
+
+func TestExecutableTestDiscoveryRequiresRealTestingImportAndExportedName(t *testing.T) {
+	root := t.TempDir()
+	fixtures := map[string]string{
+		"missing_import_test.go": `package fixture
+func TestMissingImport(t *testing.T) {}
+`,
+		"fake_testing_test.go": `package fixture
+type fakeT struct{}
+func TestFakeTesting(t *fakeT) {}
+`,
+		"lowercase_test.go": `package fixture
+import "testing"
+func Testlowercase(t *testing.T) {}
+`,
+		"valid_test.go": `package fixture
+import t "testing"
+func TestValid(t *t.T) {}
+`,
+	}
+	for name, source := range fixtures {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(source), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	functions, err := discoverTestFunctions(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(functions) != 1 {
+		t.Fatalf("discovered tests = %v, want only TestValid", functions)
+	}
+	if _, ok := functions["TestValid"]; !ok {
+		t.Fatalf("aliased real testing import was not resolved: %v", functions)
+	}
+}
+
 func TestMockCoverageRejectsMissingOwner(t *testing.T) {
 	root := t.TempDir()
 	source := `package fixture
@@ -375,6 +536,31 @@ func helperBehavior(t *testing.T) {}
 			err := validateMockCoverage(root, matrix)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("validateMockCoverage() error = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestMockCoverageRejectsGroupAndScenarioDrift(t *testing.T) {
+	matrix, err := loadMockCoverage(filepath.Join("testdata", "mock_group_coverage.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(*mockCoverageRow)
+		want string
+	}{
+		{name: "group", edit: func(row *mockCoverageRow) { row.Group = "E" }, want: "group"},
+		{name: "scenario", edit: func(row *mockCoverageRow) { row.Scenario = "hand-written drift" }, want: "scenario"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			copyMatrix := matrix
+			copyMatrix.Rows = append([]mockCoverageRow(nil), matrix.Rows...)
+			tc.edit(&copyMatrix.Rows[0])
+			err := validateMockCoverage(".", copyMatrix)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("validateMockCoverage() error = %v, want %q", err, tc.want)
 			}
 		})
 	}

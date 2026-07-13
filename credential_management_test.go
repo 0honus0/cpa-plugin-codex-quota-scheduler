@@ -1,0 +1,245 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"path/filepath"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+)
+
+type failingCredentialReadHost struct{ err error }
+
+func (h failingCredentialReadHost) SaveAuth(context.Context, AuthInstanceID, HostAuth) error {
+	return h.err
+}
+
+type gatedCredentialReadHost struct {
+	started chan struct{}
+	release chan struct{}
+	err     error
+}
+
+func (h *gatedCredentialReadHost) SaveAuth(context.Context, AuthInstanceID, HostAuth) error {
+	return h.err
+}
+func (h *gatedCredentialReadHost) GetAuth(context.Context, AuthInstanceID) (HostAuth, error) {
+	close(h.started)
+	<-h.release
+	return HostAuth{}, h.err
+}
+func (h failingCredentialReadHost) GetAuth(context.Context, AuthInstanceID) (HostAuth, error) {
+	return HostAuth{}, h.err
+}
+
+func newCredentialManagementFixture(t *testing.T, observed CredentialFingerprint) (*QuotaRefresher, *StateStore, *walHost, ActiveRoster) {
+	t.Helper()
+	now := time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC)
+	f0 := fp("subject", "refresh-0", "metadata")
+	f1 := fp("subject", "refresh-1", "metadata")
+	state := NewPersistentState()
+	state.TierGeneration = 5
+	state.Bindings["active"] = RuntimeBinding{AuthID: "active", AuthIndex: "idx", Instance: 1, Admission: 3, Generation: 5, Login: 7, Token: 11, Fingerprint: f0, AuthBlocked: true}
+	state.CredentialChains[1] = TransitionChain{Cursor: f0, Transitions: []CredentialTransition{{Prev: f0, Next: f1, SaveSeq: 1, Phase: TransitionOutcomeUnknown, CreatedAt: now}}}
+	store := NewStateStore(filepath.Join(t.TempDir(), "runtime.json"), OSFileHooks(), nil)
+	if err := store.WriteThrough(state); err != nil {
+		t.Fatal(err)
+	}
+	bindings, err := NewBindingRegistry(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := &walHost{current: HostAuth{Fingerprint: observed}}
+	credentials := mustCredentialManager(t, store, host, func() time.Time { return now }, nil)
+	refresher := &QuotaRefresher{runtimeStore: store, bindings: bindings, credentials: credentials}
+	return refresher, store, host, ActiveRoster{Confirmed: true, Health: RosterHealthy, Generation: 5, Instances: []string{"active"}}
+}
+
+func TestCredentialAmbiguityManagementExitsEpochSemantics(t *testing.T) {
+	f0 := fp("subject", "refresh-0", "metadata")
+	f1 := fp("subject", "refresh-1", "metadata")
+	external := fp("external", "refresh-x", "metadata")
+	for _, tc := range []struct {
+		name     string
+		action   CredentialResolutionAction
+		observed CredentialFingerprint
+		want     RuntimeBinding
+		wantG    TierGeneration
+	}{
+		{name: "confirm-owned", action: CredentialConfirmOwned, observed: f1, want: RuntimeBinding{Admission: 3, Generation: 5, Login: 7, Token: 12, Fingerprint: f1, AuthBlocked: true}, wantG: 5},
+		{name: "confirm-external", action: CredentialConfirmExternal, observed: external, want: RuntimeBinding{Admission: 4, Generation: 6, Login: 8, Token: 11, Fingerprint: external, AuthBlocked: false}, wantG: 6},
+		{name: "reread", action: CredentialReread, observed: f1, want: RuntimeBinding{Admission: 3, Generation: 5, Login: 7, Token: 11, Fingerprint: f0, AuthBlocked: true}, wantG: 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			refresher, store, _, roster := newCredentialManagementFixture(t, tc.observed)
+			if err := refresher.ResolveCredentialAmbiguity(context.Background(), roster, "active", tc.action); err != nil {
+				t.Fatal(err)
+			}
+			state, err := store.PersistentSnapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := state.Bindings["active"]
+			if got.Admission != tc.want.Admission || got.Generation != tc.want.Generation || got.Login != tc.want.Login || got.Token != tc.want.Token || got.Fingerprint != tc.want.Fingerprint || got.AuthBlocked != tc.want.AuthBlocked || state.TierGeneration != tc.wantG {
+				t.Fatalf("binding=%#v G=%d want=%#v G=%d", got, state.TierGeneration, tc.want, tc.wantG)
+			}
+			chain := state.CredentialChains[1]
+			if tc.action == CredentialReread {
+				if len(chain.Transitions) != 1 || chain.Transitions[0].Phase != TransitionApplied {
+					t.Fatalf("reread chain=%#v", chain)
+				}
+			} else if chain.Cursor != tc.observed || len(chain.Transitions) != 0 {
+				t.Fatalf("resolved chain=%#v", chain)
+			}
+		})
+	}
+}
+
+func TestCredentialAmbiguityManagementRouteScopesAndAudits(t *testing.T) {
+	f1 := fp("subject", "refresh-1", "metadata")
+	refresher, _, _, roster := newCredentialManagementFixture(t, f1)
+	store := NewPluginState(DefaultConfig())
+	resolver := func(ctx context.Context, authID string, action CredentialResolutionAction) error {
+		return refresher.ResolveCredentialAmbiguity(ctx, roster, authID, action)
+	}
+	body, _ := json.Marshal(map[string]string{"auth_id": "active", "action": string(CredentialConfirmOwned)})
+	resp := HandleManagementRequestWithLifecycle(store, pluginapi.ManagementRequest{Method: http.MethodPost, Path: managementBasePath + "/credentials/resolve", Body: body}, time.Now(), ManagementLifecycleSnapshot{Roster: roster, ResolveCredential: resolver})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.StatusCode, resp.Body)
+	}
+	logs := store.Snapshot(time.Now()).Logs
+	if len(logs) == 0 || logs[len(logs)-1].Event != "credential.ambiguity_resolved" {
+		t.Fatalf("audit logs=%#v", logs)
+	}
+
+	for _, authID := range []string{"removed", "lower-tier"} {
+		body, _ = json.Marshal(map[string]string{"auth_id": authID, "action": string(CredentialConfirmOwned)})
+		resp = HandleManagementRequestWithLifecycle(store, pluginapi.ManagementRequest{Method: http.MethodPost, Path: managementBasePath + "/credentials/resolve", Body: body}, time.Now(), ManagementLifecycleSnapshot{Roster: roster, ResolveCredential: resolver})
+		if resp.StatusCode != http.StatusConflict {
+			t.Fatalf("%s status=%d body=%s", authID, resp.StatusCode, resp.Body)
+		}
+	}
+
+	failing := func(context.Context, string, CredentialResolutionAction) error { return errors.New("disk unavailable") }
+	resp = HandleManagementRequestWithLifecycle(store, pluginapi.ManagementRequest{Method: http.MethodPost, Path: managementBasePath + "/credentials/resolve", Body: body}, time.Now(), ManagementLifecycleSnapshot{Roster: roster, ResolveCredential: failing})
+	if resp.StatusCode == http.StatusOK {
+		t.Fatal("durability failure returned success")
+	}
+}
+
+func TestCredentialConfirmExternalFencesPriorAdmissionBeforeReuse(t *testing.T) {
+	external := fp("external", "refresh-x", "metadata")
+	refresher, _, _, roster := newCredentialManagementFixture(t, external)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	coordinator := NewCoordinator(CoordinatorOptions{Execute: func(_ context.Context, intent Intent, _ *HeldLease) OperationResult {
+		if intent.Generation == 5 {
+			close(started)
+			<-release
+		}
+		return OperationResult{Token: intent.Token}
+	}})
+	t.Cleanup(coordinator.Close)
+	coordinator.activateInstances(map[AuthInstanceID]TierGeneration{1: 5})
+	refresher.coordinator = coordinator
+	old := coordinator.Submit(Intent{Instance: 1, Generation: 5, Class: OperationQuotaRead, Source: SourceManualRefresh, Token: ExecutionToken{Instance: 1, Admission: 3, Tier: 5}})
+	<-started
+	if err := refresher.ResolveCredentialAmbiguity(context.Background(), roster, "active", CredentialConfirmExternal); err != nil {
+		t.Fatal(err)
+	}
+	if got := old.Await(context.Background()); got.Disposition != ResultCancelled {
+		t.Fatalf("old disposition=%q", got.Disposition)
+	}
+	newResult := coordinator.Submit(Intent{Instance: 1, Generation: 6, Class: OperationQuotaRead, Source: SourceManualRefresh, Token: ExecutionToken{Instance: 1, Admission: 4, Tier: 6}}).Await(context.Background())
+	if newResult.Disposition != ResultApplied {
+		t.Fatalf("new disposition=%q", newResult.Disposition)
+	}
+	close(release)
+}
+
+func TestCredentialConfirmExternalReadFailureRestoresOldAdmission(t *testing.T) {
+	external := fp("external", "refresh-x", "metadata")
+	refresher, _, _, roster := newCredentialManagementFixture(t, external)
+	coordinator := NewCoordinator(CoordinatorOptions{Execute: func(_ context.Context, intent Intent, _ *HeldLease) OperationResult {
+		return OperationResult{Token: intent.Token}
+	}})
+	t.Cleanup(coordinator.Close)
+	coordinator.activateInstances(map[AuthInstanceID]TierGeneration{1: 5})
+	refresher.coordinator = coordinator
+	refresher.credentials.host = failingCredentialReadHost{err: errors.New("get auth failed")}
+	if err := refresher.ResolveCredentialAmbiguity(context.Background(), roster, "active", CredentialConfirmExternal); err == nil {
+		t.Fatal("GetAuth failure returned nil")
+	}
+	result := coordinator.Submit(Intent{Instance: 1, Generation: 5, Class: OperationQuotaRead, Source: SourceManualRefresh, Token: ExecutionToken{Instance: 1, Admission: 3, Tier: 5}}).Await(context.Background())
+	if result.Disposition != ResultApplied {
+		t.Fatalf("restored disposition=%q", result.Disposition)
+	}
+}
+
+func TestCredentialConfirmExternalRollbackDoesNotUndoConcurrentRemoval(t *testing.T) {
+	external := fp("external", "refresh-x", "metadata")
+	refresher, _, _, roster := newCredentialManagementFixture(t, external)
+	coordinator := NewCoordinator(CoordinatorOptions{Execute: func(_ context.Context, intent Intent, _ *HeldLease) OperationResult {
+		return OperationResult{Token: intent.Token}
+	}})
+	t.Cleanup(coordinator.Close)
+	coordinator.activateInstances(map[AuthInstanceID]TierGeneration{1: 5})
+	refresher.coordinator = coordinator
+	host := &gatedCredentialReadHost{started: make(chan struct{}), release: make(chan struct{}), err: errors.New("get auth failed")}
+	refresher.credentials.host = host
+	done := make(chan error, 1)
+	go func() {
+		done <- refresher.ResolveCredentialAmbiguity(context.Background(), roster, "active", CredentialConfirmExternal)
+	}()
+	<-host.started
+	coordinator.CancelInstances([]AuthInstanceID{1}) // authoritative removal after Management's suspension
+	close(host.release)
+	if err := <-done; err == nil {
+		t.Fatal("GetAuth failure returned nil")
+	}
+	result := coordinator.Submit(Intent{Instance: 1, Generation: 5, Class: OperationQuotaRead, Source: SourceManualRefresh, Token: ExecutionToken{Instance: 1, Admission: 3, Tier: 5}}).Await(context.Background())
+	if result.Disposition != ResultCancelled {
+		t.Fatalf("concurrent removal was undone: disposition=%q", result.Disposition)
+	}
+}
+
+func TestCredentialConfirmExternalRollbackClearsCancelledTypedJoin(t *testing.T) {
+	external := fp("external", "refresh-x", "metadata")
+	refresher, _, _, roster := newCredentialManagementFixture(t, external)
+	legacyStarted := make(chan struct{})
+	releaseLegacy := make(chan struct{})
+	var quotaStarts atomic.Int64
+	coordinator := NewCoordinator(CoordinatorOptions{Execute: func(_ context.Context, intent Intent, _ *HeldLease) OperationResult {
+		if intent.Class == OperationLegacyRefresh {
+			close(legacyStarted)
+			<-releaseLegacy
+		} else if intent.Class == OperationQuotaRead {
+			quotaStarts.Add(1)
+		}
+		return OperationResult{Token: intent.Token}
+	}})
+	t.Cleanup(coordinator.Close)
+	coordinator.activateInstances(map[AuthInstanceID]TierGeneration{1: 5})
+	refresher.coordinator = coordinator
+	legacy := coordinator.Submit(Intent{Instance: 1, Generation: 5, Class: OperationLegacyRefresh, Source: LegacyEnvelopeSource, Token: ExecutionToken{Instance: 1, Admission: 3, Tier: 5}})
+	<-legacyStarted
+	queued := coordinator.SubmitTyped(Intent{Instance: 1, Generation: 5, Class: OperationQuotaRead, Source: SourceManualRefresh, Token: ExecutionToken{Instance: 1, Admission: 3, Tier: 5}})
+	refresher.credentials.host = failingCredentialReadHost{err: errors.New("get auth failed")}
+	if err := refresher.ResolveCredentialAmbiguity(context.Background(), roster, "active", CredentialConfirmExternal); err == nil {
+		t.Fatal("GetAuth failure returned nil")
+	}
+	if got := queued.Await(context.Background()); got.Disposition != ResultCancelled {
+		t.Fatalf("queued disposition=%q", got.Disposition)
+	}
+	fresh := coordinator.SubmitTyped(Intent{Instance: 1, Generation: 5, Class: OperationQuotaRead, Source: SourceManualRefresh, Token: ExecutionToken{Instance: 1, Admission: 3, Tier: 5}}).Await(context.Background())
+	if fresh.Disposition != ResultApplied || quotaStarts.Load() != 1 {
+		t.Fatalf("fresh=%#v quotaStarts=%d", fresh, quotaStarts.Load())
+	}
+	_ = legacy.Await(context.Background())
+	close(releaseLegacy)
+}

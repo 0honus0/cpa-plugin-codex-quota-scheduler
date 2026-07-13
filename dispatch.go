@@ -250,6 +250,11 @@ func handleManagementHandle(raw []byte) ([]byte, error) {
 	active, _ := rosterController.WakeForManagement(context.Background())
 	now := time.Now()
 	lifecycle := ManagementLifecycleSnapshot{Roster: active, CredentialAmbiguous: managementCredentialAmbiguous(refresher, active, now)}
+	if refresher != nil {
+		lifecycle.ResolveCredential = func(ctx context.Context, authID string, action CredentialResolutionAction) error {
+			return refresher.ResolveCredentialAmbiguity(ctx, active, authID, action)
+		}
+	}
 	return okEnvelope(HandleManagementRequestWithLifecycle(globalState, req, now, lifecycle))
 }
 

@@ -32,7 +32,7 @@ type sequenceProbeHost struct {
 	releaseDo  chan struct{}
 }
 
-func TestProbeAuthBlockedResumesOnlyAfterExternalLoginEpoch(t *testing.T) { //inv:INV-23,INV-33
+func TestProbeAuthBlockedResumesOnlyAfterExternalLoginEpoch(t *testing.T) {
 	store := NewStateStore(filepath.Join(t.TempDir(), "state.json"), OSFileHooks(), nil)
 	finger := NewCredentialFingerprint("acct", "r0", "idx")
 	if _, err := store.Update(func(s *PersistentState) error {
@@ -177,7 +177,7 @@ func TestProductionProbeFinalStartDeniedEndToEnd(t *testing.T) {
 	}
 }
 
-func TestFailClosedHoldsAndRecoveryRecomputesProbe(t *testing.T) { //inv:INV-21,INV-35
+func TestFailClosedHoldsAndRecoveryRecomputesProbe(t *testing.T) {
 	now := time.Date(2026, 7, 14, 8, 30, 0, 0, time.UTC)
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
 	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":80,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(-time.Hour).Format(time.RFC3339)))
@@ -228,7 +228,7 @@ func TestFailClosedHoldsAndRecoveryRecomputesProbe(t *testing.T) { //inv:INV-21,
 	}
 }
 
-func TestFailClosedHoldPreservesSentAttemptOnlyForItsWindows(t *testing.T) { //inv:INV-17,INV-35
+func TestFailClosedHoldPreservesSentAttemptOnlyForItsWindows(t *testing.T) {
 	now := time.Date(2026, 7, 14, 8, 40, 0, 0, time.UTC)
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
 	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)}}
@@ -257,7 +257,7 @@ func TestFailClosedHoldPreservesSentAttemptOnlyForItsWindows(t *testing.T) { //i
 	}
 }
 
-func TestActiveProbeLifecycleDenialPreservesRosterHold(t *testing.T) { //inv:INV-03,INV-35
+func TestActiveProbeLifecycleDenialPreservesRosterHold(t *testing.T) {
 	now := time.Date(2026, 7, 14, 8, 42, 0, 0, time.UTC)
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
 	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)}}
@@ -290,7 +290,7 @@ func TestActiveProbeLifecycleDenialPreservesRosterHold(t *testing.T) { //inv:INV
 	}
 }
 
-func TestActiveProbeParseFailureAfterFailClosedPreservesRosterHold(t *testing.T) { //inv:INV-03,INV-35
+func TestActiveProbeParseFailureAfterFailClosedPreservesRosterHold(t *testing.T) {
 	now := time.Date(2026, 7, 14, 8, 43, 0, 0, time.UTC)
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
 	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)}}
@@ -324,7 +324,7 @@ func TestActiveProbeParseFailureAfterFailClosedPreservesRosterHold(t *testing.T)
 	}
 }
 
-func TestFailClosedRetriesProbeHoldPersistence(t *testing.T) { //inv:INV-19,INV-35
+func TestFailClosedRetriesProbeHoldPersistence(t *testing.T) {
 	now := time.Date(2026, 7, 14, 8, 44, 0, 0, time.UTC)
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
 	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)}}
@@ -358,7 +358,7 @@ func TestFailClosedRetriesProbeHoldPersistence(t *testing.T) { //inv:INV-19,INV-
 	}
 }
 
-func TestRemovedProbeLateGetDoesNotRecreateState(t *testing.T) { //inv:INV-03,INV-20
+func TestRemovedProbeLateGetDoesNotRecreateState(t *testing.T) {
 	now := time.Date(2026, 7, 14, 8, 45, 0, 0, time.UTC)
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
 	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "auth.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)}}
@@ -453,7 +453,7 @@ func TestProductionProvisionalProbeMarkerEndToEnd(t *testing.T) {
 	}
 }
 
-func TestProductionProvisionalVerificationRejectsMismatchWithoutOpenAI(t *testing.T) { //inv:INV-02,INV-34,INV-35
+func TestProductionProvisionalVerificationRejectsMismatchWithoutOpenAI(t *testing.T) {
 	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
 	legacyPath := filepath.Join(t.TempDir(), "state.json")
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
@@ -490,7 +490,7 @@ func TestProductionProvisionalVerificationRejectsMismatchWithoutOpenAI(t *testin
 	}
 }
 
-func TestProductionProvisionalVerificationRechecksActualPrecheckFingerprint(t *testing.T) { //inv:INV-02,INV-34,INV-35
+func TestProductionProvisionalVerificationRechecksActualPrecheckFingerprint(t *testing.T) {
 	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
 	original := pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","refresh_token":"original","id_token":"` + idToken + `"}`)}
@@ -536,7 +536,7 @@ func TestProductionProvisionalVerificationRechecksActualPrecheckFingerprint(t *t
 	}
 }
 
-func TestProductionProvisionalRequestExpiryDuringPrecheckReturnsWaitingRoster(t *testing.T) { //inv:INV-02,INV-34,INV-35
+func TestProductionProvisionalRequestExpiryDuringPrecheckReturnsWaitingRoster(t *testing.T) {
 	confirmedAt := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
 	initialNow := confirmedAt.Add(provisionalMaxAge - time.Nanosecond)
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
@@ -589,7 +589,7 @@ func TestProductionProvisionalRequestExpiryDuringPrecheckReturnsWaitingRoster(t 
 	}
 }
 
-func TestProductionProvisionalVerificationExpiryDuringGetAuthIssuesNoPermit(t *testing.T) { //inv:INV-02,INV-34,INV-35
+func TestProductionProvisionalVerificationExpiryDuringGetAuthIssuesNoPermit(t *testing.T) {
 	confirmedAt := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
 	initialNow := confirmedAt.Add(provisionalMaxAge - time.Nanosecond)
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
@@ -632,7 +632,7 @@ func TestProductionProvisionalVerificationExpiryDuringGetAuthIssuesNoPermit(t *t
 	}
 }
 
-func TestProductionProvisionalConfigDisableLinearizesWithHostStart(t *testing.T) { //inv:INV-02,INV-35
+func TestProductionProvisionalConfigDisableLinearizesWithHostStart(t *testing.T) {
 	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
 	host := &sequenceProbeHost{doStarted: make(chan struct{}), releaseDo: make(chan struct{})}
 	cfg := DefaultConfig()
@@ -671,7 +671,7 @@ func TestProductionProvisionalConfigDisableLinearizesWithHostStart(t *testing.T)
 	}
 }
 
-func TestProductionProvisionalRequestMarkerEndToEnd(t *testing.T) { //inv:INV-02,INV-34
+func TestProductionProvisionalRequestMarkerEndToEnd(t *testing.T) {
 	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
 	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":80,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(-time.Hour).Format(time.RFC3339)))
@@ -709,7 +709,7 @@ func TestProductionProvisionalRequestMarkerEndToEnd(t *testing.T) { //inv:INV-02
 	}
 }
 
-func TestProductionProvisionalRecoveryRiskStartRunsVerifiedProbe(t *testing.T) { //inv:INV-02,INV-34,INV-35
+func TestProductionProvisionalRecoveryRiskStartRunsVerifiedProbe(t *testing.T) {
 	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
 	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":80,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(-time.Hour).Format(time.RFC3339)))
@@ -763,7 +763,7 @@ func TestProductionProvisionalRecoveryRiskStartRunsVerifiedProbe(t *testing.T) {
 	}
 }
 
-func TestProductionProbeRunsWhileNormalRefreshDormant(t *testing.T) { //inv:INV-07,INV-14,INV-17,INV-26,INV-32
+func TestProductionProbeRunsWhileNormalRefreshDormant(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
 	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)}, quota: [][]byte{[]byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":80,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(-time.Hour).Format(time.RFC3339))), []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(4*time.Hour).Format(time.RFC3339)))}}
@@ -816,7 +816,7 @@ func TestProductionProbeRunsWhileNormalRefreshDormant(t *testing.T) { //inv:INV-
 	}
 }
 
-func TestProductionProbeKPointCrashRestartVerifyFirst(t *testing.T) { //inv:INV-27,INV-36,INV-38
+func TestProductionProbeKPointCrashRestartVerifyFirst(t *testing.T) {
 	points := []string{"K_PROBE_SENDING_WRITE", "K_PROBE_AFTER_SENDING", "K_PROBE_BEFORE_HTTP", "K_PROBE_AFTER_HTTP", "K_PROBE_SENT_WRITE"}
 	for _, point := range points {
 		t.Run(point, func(t *testing.T) {

@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-func TestProbeControllerPersistentStateSetAndIllegalNoop(t *testing.T) { //inv:INV-17,INV-19
+func TestProbeControllerPersistentStateSetAndIllegalNoop(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	c := NewProbeController(now)
 	c.SetWindow(1, ProbeWindowFiveHour, ProbeWindow{State: ProbeIdle})
@@ -20,7 +20,7 @@ func TestProbeControllerPersistentStateSetAndIllegalNoop(t *testing.T) { //inv:I
 	}
 }
 
-func TestProbeControllerDualWindowIndependent(t *testing.T) { //inv:INV-17
+func TestProbeControllerDualWindowIndependent(t *testing.T) {
 	now := time.Unix(1000, 0).UTC()
 	c := NewProbeController(now)
 	c.SetWindow(1, ProbeWindowFiveHour, ProbeWindow{State: ProbePendingCheck, Baseline: ResetProbeBaseline(now.Add(-time.Hour), 80, 5*time.Hour)})
@@ -36,7 +36,7 @@ func TestProbeControllerDualWindowIndependent(t *testing.T) { //inv:INV-17
 	}
 }
 
-func TestProbeControllerDormantDeadlineStillEmitsProbe(t *testing.T) { //inv:INV-14,INV-32
+func TestProbeControllerDormantDeadlineStillEmitsProbe(t *testing.T) {
 	now := time.Unix(2000, 0).UTC()
 	c := NewProbeController(now)
 	c.SetWindow(2, ProbeWindowFiveHour, ProbeWindow{State: ProbeWaitingReset, Deadline: now})
@@ -51,7 +51,7 @@ func TestMockGroupC(t *testing.T) {
 	t.Run("dual", TestProbeControllerDualWindowIndependent)
 }
 
-func TestProbeAllStateEventsAndDualWindowProduct(t *testing.T) { //inv:INV-17,INV-18,INV-19
+func TestProbeAllStateEventsAndDualWindowProduct(t *testing.T) {
 	states := []ProbeWindowState{ProbeIdle, ProbeWaitingReset, ProbePendingCheck, ProbeSentAwaitingVerify, ProbeSentUnknown, ProbeRetryWait, ProbeConfirmed, ProbeAuthBlocked, ProbeAnomalyHold, ProbeWaitingRoster}
 	events := []ProbeEventKind{ProbeEventDeadline, ProbeEventPrecheckResult, ProbeEventVerifyResult, ProbeEventAuthFailed, ProbeEventExternalLogin, ProbeEventRosterConfirmed, ProbeEventInstanceRemoved}
 	now := time.Unix(9000, 0).UTC()

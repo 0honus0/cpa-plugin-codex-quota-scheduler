@@ -330,6 +330,9 @@ func (r *QuotaRefresher) RunProbeRecoveryOnce(ctx context.Context) error {
 	if r.probeWAL == nil || r.probeController == nil {
 		return nil
 	}
+	if err := r.recoverPreparedProbeAttempts(); err != nil {
+		return err
+	}
 	intents, err := r.probeWAL.RecoverChecked(r.now())
 	if err != nil {
 		return err
@@ -391,6 +394,50 @@ func (r *QuotaRefresher) RunProbeRecoveryOnce(ctx context.Context) error {
 		}
 	}
 	return firstErr
+}
+
+func (r *QuotaRefresher) recoverPreparedProbeAttempts() error {
+	if r.runtimeStore == nil || r.probeController == nil {
+		return nil
+	}
+	state, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		return err
+	}
+	changed := false
+	now := r.now()
+	for instance, attempt := range state.ProbeAttempts {
+		if attempt.Phase != ProbeAttemptPrepared {
+			continue
+		}
+		for _, kind := range attempt.Windows {
+			window, ok := r.probeController.Window(instance, kind)
+			if !ok {
+				continue
+			}
+			window.State = ProbeRetryWait
+			window.AttemptID = ""
+			window.RetryCount++
+			window.Deadline = now
+			r.probeController.SetWindow(instance, kind, window)
+		}
+		delete(state.ProbeAttempts, instance)
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	windows := r.probeController.Snapshot()
+	_, err = r.runtimeStore.Update(func(persisted *PersistentState) error {
+		persisted.ProbeWindows = windows
+		for instance, attempt := range persisted.ProbeAttempts {
+			if attempt.Phase == ProbeAttemptPrepared {
+				delete(persisted.ProbeAttempts, instance)
+			}
+		}
+		return nil
+	})
+	return err
 }
 
 func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *HeldLease) OperationResult {

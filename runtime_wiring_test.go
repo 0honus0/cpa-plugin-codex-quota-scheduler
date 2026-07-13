@@ -303,7 +303,7 @@ func (h *runtimeCredentialHost) GetAuth(_ context.Context, id AuthInstanceID) (H
 	return a, nil
 }
 
-func TestProductionRosterSyncReconcilesCredentialTailsAfterRestart(t *testing.T) { //inv:INV-23,INV-40 positive
+func TestProductionRosterSyncReconcilesCredentialTailsAfterRestart(t *testing.T) {
 	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
 	prev := NewCredentialFingerprint("subject", "refresh-prev", "meta")
 	next := NewCredentialFingerprint("subject", "refresh-next", "meta")
@@ -368,7 +368,7 @@ func TestProductionRosterSyncReconcilesCredentialTailsAfterRestart(t *testing.T)
 	}
 }
 
-func TestProductionRosterSyncCredentialReconcileFailureIsPerInstance(t *testing.T) { //inv:INV-23,INV-40 negative
+func TestProductionRosterSyncCredentialReconcileFailureIsPerInstance(t *testing.T) {
 	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
 	legacyPath := filepath.Join(t.TempDir(), "state.json")
 	prev := NewCredentialFingerprint("subject", "refresh-prev", "meta")
@@ -409,7 +409,7 @@ func TestProductionRosterSyncCredentialReconcileFailureIsPerInstance(t *testing.
 	}
 }
 
-func TestProductionRosterSyncAuthIndexChangeDoesNotReconcileResetChain(t *testing.T) { //inv:INV-33,INV-40 negative
+func TestProductionRosterSyncAuthIndexChangeDoesNotReconcileResetChain(t *testing.T) {
 	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
 	legacyPath := filepath.Join(t.TempDir(), "state.json")
 	instance := legacyAuthInstanceID("active")
@@ -447,7 +447,7 @@ func TestProductionRosterSyncAuthIndexChangeDoesNotReconcileResetChain(t *testin
 	}
 }
 
-func TestBindingGenesisAndInjectedCredentialWAL(t *testing.T) { //inv:INV-33
+func TestBindingGenesisAndInjectedCredentialWAL(t *testing.T) {
 	store := NewStateStore(filepath.Join(t.TempDir(), ".runtime-state.json"), OSFileHooks(), nil)
 	host := &runtimeCredentialHost{current: map[AuthInstanceID]HostAuth{}}
 	registry, err := NewBindingRegistry(store)
@@ -488,7 +488,7 @@ func TestBindingGenesisAndInjectedCredentialWAL(t *testing.T) { //inv:INV-33
 	}
 }
 
-func TestBindingGenesisFailsClosedForCapabilityBAndAuthBlocked(t *testing.T) { //inv:INV-33
+func TestBindingGenesisFailsClosedForCapabilityBAndAuthBlocked(t *testing.T) {
 	store := NewStateStore(filepath.Join(t.TempDir(), ".runtime-state.json"), OSFileHooks(), nil)
 	host := &runtimeCredentialHost{current: map[AuthInstanceID]HostAuth{}}
 	registry, err := NewBindingRegistry(store)
@@ -526,7 +526,7 @@ func TestBindingGenesisFailsClosedForCapabilityBAndAuthBlocked(t *testing.T) { /
 	}
 }
 
-func TestBindingRosterGenerationDoesNotRegressAcrossRestart(t *testing.T) { //inv:INV-03,INV-20
+func TestBindingRosterGenerationDoesNotRegressAcrossRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := NewStateStore(path, OSFileHooks(), nil)
 	host := &runtimeCredentialHost{current: map[AuthInstanceID]HostAuth{legacyAuthInstanceID("a"): {Name: "a.json", Fingerprint: fp("a", "ra", "ma")}, legacyAuthInstanceID("b"): {Name: "b.json", Fingerprint: fp("b", "rb", "mb")}}}
@@ -560,7 +560,7 @@ func TestBindingRosterGenerationDoesNotRegressAcrossRestart(t *testing.T) { //in
 	}
 }
 
-func TestBindingAdmissionEpochMonotonicAcrossDeleteReaddAndRestart(t *testing.T) { //inv:INV-28
+func TestBindingAdmissionEpochMonotonicAcrossDeleteReaddAndRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	host := &runtimeCredentialHost{current: map[AuthInstanceID]HostAuth{
 		legacyAuthInstanceID("keep"):   {Name: "keep.json", Fingerprint: fp("keep", "rk", "mk")},
@@ -600,7 +600,7 @@ func TestBindingAdmissionEpochMonotonicAcrossDeleteReaddAndRestart(t *testing.T)
 	}
 }
 
-func TestBindingChangedFingerprintReaddResetsCredentialChainAcrossRestart(t *testing.T) { //inv:INV-28,INV-40
+func TestBindingChangedFingerprintReaddResetsCredentialChainAcrossRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	keepInstance := legacyAuthInstanceID("keep")
 	targetInstance := legacyAuthInstanceID("target")
@@ -673,7 +673,7 @@ func TestBindingReconcileFailsBeforeHostReadWhenDurableStateUnavailable(t *testi
 	}
 }
 
-func TestBindingAuthIndexChangeAdvancesGenerationAndReobservesAcrossRestart(t *testing.T) { //inv:INV-03,INV-28
+func TestBindingAuthIndexChangeAdvancesGenerationAndReobservesAcrossRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	instance := legacyAuthInstanceID("a")
 	host := &runtimeCredentialHost{current: map[AuthInstanceID]HostAuth{instance: {Name: "old.json", Fingerprint: fp("a", "r-old", "old-index")}}}
@@ -717,7 +717,7 @@ func TestBindingAuthIndexChangeAdvancesGenerationAndReobservesAcrossRestart(t *t
 	}
 }
 
-func TestAuthoritativeDurableGenerationSurvivesFailureObservation(t *testing.T) { //inv:INV-03,INV-21
+func TestAuthoritativeDurableGenerationSurvivesFailureObservation(t *testing.T) {
 	now := time.Date(2026, 7, 14, 10, 0, 0, 0, time.UTC)
 	clock := now
 	legacyPath := filepath.Join(t.TempDir(), "state.json")
@@ -771,7 +771,7 @@ func TestAuthoritativeDurableGenerationSurvivesFailureObservation(t *testing.T) 
 	}
 }
 
-func TestProductionProvisionalRecoveryPersistsAndRestarts(t *testing.T) { //inv:INV-02,INV-30,INV-34
+func TestProductionProvisionalRecoveryPersistsAndRestarts(t *testing.T) {
 	now := time.Date(2026, 7, 14, 10, 0, 0, 0, time.UTC)
 	legacyPath := filepath.Join(t.TempDir(), "state.json")
 	host := &countingProductionHost{auth: map[string]pluginapi.HostAuthGetResponse{
@@ -827,7 +827,7 @@ func TestProductionProvisionalRecoveryPersistsAndRestarts(t *testing.T) { //inv:
 	}
 }
 
-func TestProductionProvisionalRecoveryRejectsCorruptFingerprintMetadata(t *testing.T) { //inv:INV-19,INV-30
+func TestProductionProvisionalRecoveryRejectsCorruptFingerprintMetadata(t *testing.T) {
 	now := time.Date(2026, 7, 14, 10, 0, 0, 0, time.UTC)
 	bad := CredentialFingerprint{}
 	bad.CompositeHash[0] = 1
@@ -866,7 +866,7 @@ func TestProductionProvisionalRecoveryRejectsCorruptFingerprintMetadata(t *testi
 	}
 }
 
-func TestProductionProvisionalVerificationMissingAndErrorMakeZeroOpenAI(t *testing.T) { //inv:INV-02,INV-34,INV-35
+func TestProductionProvisionalVerificationMissingAndErrorMakeZeroOpenAI(t *testing.T) {
 	now := time.Date(2026, 7, 14, 10, 0, 0, 0, time.UTC)
 	fingerprint := NewCredentialFingerprint("acct", "refresh", "idx")
 	for _, tc := range []struct {
@@ -907,7 +907,7 @@ func TestProductionProvisionalVerificationMissingAndErrorMakeZeroOpenAI(t *testi
 	}
 }
 
-func TestProductionProvisionalVerificationTracksRiskConfig(t *testing.T) { //inv:INV-02,INV-35
+func TestProductionProvisionalVerificationTracksRiskConfig(t *testing.T) {
 	now := time.Date(2026, 7, 14, 10, 0, 0, 0, time.UTC)
 	fingerprint := NewCredentialFingerprint("acct", "refresh", "idx")
 	legacyPath := filepath.Join(t.TempDir(), "state.json")
@@ -946,7 +946,7 @@ func TestProductionProvisionalVerificationTracksRiskConfig(t *testing.T) { //inv
 	}
 }
 
-func TestProductionProvisionalVerificationRejectsCorruptBindingIdentity(t *testing.T) { //inv:INV-02,INV-20,INV-30,INV-34
+func TestProductionProvisionalVerificationRejectsCorruptBindingIdentity(t *testing.T) {
 	now := time.Date(2026, 7, 14, 10, 0, 0, 0, time.UTC)
 	fingerprint := NewCredentialFingerprint("acct", "refresh", "idx")
 	valid := RuntimeBinding{AuthID: "a", AuthIndex: "idx", Instance: legacyAuthInstanceID("a"), Generation: 7, Fingerprint: fingerprint}
@@ -1134,7 +1134,7 @@ func TestProductionRosterPublicationBootstrapsHighestTierAndUsesWAL(t *testing.T
 	}
 }
 
-func TestProductionRosterReplacementPersistsFencesBeforePublication(t *testing.T) { //inv:INV-03,INV-20
+func TestProductionRosterReplacementPersistsFencesBeforePublication(t *testing.T) {
 	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
 	host := &countingProductionHost{auth: map[string]pluginapi.HostAuthGetResponse{
 		"a": {AuthIndex: "a", Name: "a.json", JSON: json.RawMessage(`{"access_token":"a","refresh_token":"ra","account_id":"acct-a"}`)},

@@ -47,7 +47,7 @@ func (h *rosterTestHost) update(entries []RosterEntry, err error, gate chan stru
 func (h *rosterTestHost) setGate(gate chan struct{}) { h.mu.Lock(); defer h.mu.Unlock(); h.gate = gate }
 func (h *rosterTestHost) setError(err error)         { h.mu.Lock(); defer h.mu.Unlock(); h.err = err }
 
-func TestManagementDispatchUsesImmutableRosterSnapshotWithoutGlobalHostLock(t *testing.T) { //inv:INV-01,INV-34 positive
+func TestManagementDispatchUsesImmutableRosterSnapshotWithoutGlobalHostLock(t *testing.T) {
 	now := time.Now()
 	priority := 9
 	gate := make(chan struct{})
@@ -112,7 +112,7 @@ func TestManagementDispatchUsesImmutableRosterSnapshotWithoutGlobalHostLock(t *t
 	}
 }
 
-func TestManagementCredentialAmbiguityReadsDurableChains(t *testing.T) { //inv:INV-23 negative
+func TestManagementCredentialAmbiguityReadsDurableChains(t *testing.T) {
 	store := NewStateStore(filepath.Join(t.TempDir(), "runtime.json"), OSFileHooks(), nil)
 	state := NewPersistentState()
 	first := NewCredentialFingerprint("subject", "refresh-1", "meta")
@@ -173,7 +173,7 @@ func TestManagementCredentialAmbiguitySeparatesEmptyRosterAndStoreFailure(t *tes
 	}
 }
 
-func TestManagementDispatchWithoutControllerIsWaitingRoster(t *testing.T) { //inv:INV-34,INV-35 negative
+func TestManagementDispatchWithoutControllerIsWaitingRoster(t *testing.T) {
 	now := time.Now()
 	store := NewPluginState(DefaultConfig())
 	store.UpsertQuota(weeklyAccount("cached", 9, now.Add(24*time.Hour), false))
@@ -209,10 +209,6 @@ func TestManagementDispatchWithoutControllerIsWaitingRoster(t *testing.T) { //in
 }
 
 func TestSuiteRosterManagement(t *testing.T) {
-	//inv:INV-31 positive
-	//inv:INV-31 negative
-	//inv:INV-34 positive
-	//inv:INV-34 negative
 	now := time.Date(2026, 7, 13, 0, 0, 0, 0, time.UTC)
 	p9, p1 := 9, 1
 	host := &rosterTestHost{entries: []RosterEntry{
@@ -362,7 +358,7 @@ func TestCapabilityBProvisionalProbeRequiresRiskOptionAgeAndFingerprint(t *testi
 	}
 }
 
-func TestProvisionalVerificationFailureRevokesPreviouslyPublishedProbeAccess(t *testing.T) { //inv:INV-02,INV-35
+func TestProvisionalVerificationFailureRevokesPreviouslyPublishedProbeAccess(t *testing.T) {
 	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
 	verified := true
 	base := ActiveRoster{Capability: CapabilityB, Provisional: true, Generation: 4, ConfirmedAt: now.Add(-time.Hour), Health: RosterWaiting}
@@ -387,7 +383,7 @@ func TestProvisionalVerificationFailureRevokesPreviouslyPublishedProbeAccess(t *
 	}
 }
 
-func TestProvisionalRiskDisableFencesInFlightVerificationCommit(t *testing.T) { //inv:INV-02,INV-35
+func TestProvisionalRiskDisableFencesInFlightVerificationCommit(t *testing.T) {
 	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
 	cfg := DefaultConfig()
 	cfg.ProbeOnProvisionalRoster = true
@@ -425,7 +421,7 @@ func TestProvisionalRiskDisableFencesInFlightVerificationCommit(t *testing.T) { 
 	}
 }
 
-func TestProvisionalVerificationCannotCommitAfterAgeExpires(t *testing.T) { //inv:INV-02,INV-35
+func TestProvisionalVerificationCannotCommitAfterAgeExpires(t *testing.T) {
 	confirmedAt := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
 	now := confirmedAt.Add(provisionalMaxAge - time.Nanosecond)
 	base := ActiveRoster{Capability: CapabilityB, Provisional: true, Generation: 4, ConfirmedAt: confirmedAt, Health: RosterWaiting}

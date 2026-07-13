@@ -6,7 +6,6 @@ import (
 	"time"
 )
 
-// inv:INV-29,INV-41,INV-45
 func TestTrialRegistryCASAndEvidence(t *testing.T) {
 	now := time.Now()
 	r := NewTrialRegistry()
@@ -32,8 +31,6 @@ func TestTrialRegistryCASAndEvidence(t *testing.T) {
 		t.Fatal("real evidence did not release trial")
 	}
 }
-
-// inv:INV-41,INV-45
 func TestTrialPendingAtSixtySecondsAndBudget(t *testing.T) {
 	now := time.Now()
 	r := NewTrialRegistry()

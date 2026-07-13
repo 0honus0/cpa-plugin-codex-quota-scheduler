@@ -34,7 +34,134 @@ var (
 	bearerPattern                     = regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+/=-]+`)
 	errCPAAdmissionChanged            = errors.New("CPA admission changed during refresh")
 	ErrProvisionalFingerprintMismatch = errors.New("provisional credential fingerprint changed")
+	ErrCredentialResolutionScope      = errors.New("credential resolution requires an active roster instance")
 )
+
+type CredentialResolutionAction string
+
+const (
+	CredentialConfirmOwned    CredentialResolutionAction = "confirm_owned_rotation"
+	CredentialConfirmExternal CredentialResolutionAction = "confirm_external_login"
+	CredentialReread          CredentialResolutionAction = "reread"
+)
+
+func (a CredentialResolutionAction) Valid() bool {
+	return a == CredentialConfirmOwned || a == CredentialConfirmExternal || a == CredentialReread
+}
+
+func rosterContainsAuthID(roster ActiveRoster, authID string) bool {
+	if !roster.Confirmed || roster.Health == RosterFailClosed {
+		return false
+	}
+	for _, active := range roster.Instances {
+		if active == authID {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *QuotaRefresher) ResolveCredentialAmbiguity(ctx context.Context, roster ActiveRoster, authID string, action CredentialResolutionAction) error {
+	if r == nil || r.bindings == nil || r.credentials == nil || r.runtimeStore == nil || !action.Valid() || !rosterContainsAuthID(roster, authID) {
+		return ErrCredentialResolutionScope
+	}
+	binding, ok := r.bindings.Lookup(authID)
+	if !ok || binding.Instance == 0 || binding.AuthID != authID {
+		return ErrBindingNotRosterConfirmed
+	}
+	if action == CredentialReread {
+		report, err := r.credentials.Reconcile(ctx, binding.Instance)
+		if err != nil {
+			return err
+		}
+		if report.Ambiguous {
+			return ErrCredentialUnresolved
+		}
+		return nil
+	}
+	var oldGenerations map[AuthInstanceID]TierGeneration
+	var cancellationTokens map[AuthInstanceID]uint64
+	cancelledExternal := action == CredentialConfirmExternal && r.coordinator != nil
+	if cancelledExternal {
+		oldGenerations = map[AuthInstanceID]TierGeneration{binding.Instance: TierGeneration(binding.Generation)}
+		cancellationTokens = r.coordinator.suspendInstancesForRollback([]AuthInstanceID{binding.Instance})
+	}
+	restoreCoordinator := func() {
+		if cancelledExternal {
+			r.coordinator.restoreCancelledInstances(oldGenerations, cancellationTokens)
+		}
+	}
+	observed, err := r.credentials.host.GetAuth(ctx, binding.Instance)
+	if err != nil {
+		restoreCoordinator()
+		return err
+	}
+	if !observed.Fingerprint.ValidHashes() {
+		restoreCoordinator()
+		return ErrCredentialUnresolved
+	}
+
+	r.credentials.mu.Lock()
+	r.bindings.mu.Lock()
+	current, ok := r.bindings.bindings[authID]
+	if !ok || current.Instance != binding.Instance || current.Admission != binding.Admission || current.Generation != binding.Generation || current.Fingerprint != binding.Fingerprint {
+		r.bindings.mu.Unlock()
+		r.credentials.mu.Unlock()
+		restoreCoordinator()
+		return ErrCredentialResolutionScope
+	}
+	committed, err := r.runtimeStore.UpdateMirrored(func(state *PersistentState) error {
+		latest, ok := state.Bindings[authID]
+		if !ok || latest.Instance != current.Instance || latest.Admission != current.Admission || latest.Generation != current.Generation || latest.Fingerprint != current.Fingerprint {
+			return ErrCredentialResolutionScope
+		}
+		state.CredentialChains[current.Instance] = TransitionChain{Cursor: observed.Fingerprint}
+		switch action {
+		case CredentialConfirmOwned:
+			latest.Token++
+			latest.Fingerprint = observed.Fingerprint
+			state.Bindings[authID] = latest
+		case CredentialConfirmExternal:
+			latest.Login++
+			latest.Admission++
+			latest.Fingerprint = observed.Fingerprint
+			latest.AuthBlocked = false
+			state.TierGeneration++
+			if state.TierGeneration == 0 {
+				state.TierGeneration = 1
+			}
+			if state.AdmissionEpochs == nil {
+				state.AdmissionEpochs = map[AuthInstanceID]InstanceAdmissionEpoch{}
+			}
+			state.AdmissionEpochs[current.Instance] = latest.Admission
+			latest.Generation = AuthBindingEpoch(state.TierGeneration)
+			for id, active := range state.Bindings {
+				active.Generation = AuthBindingEpoch(state.TierGeneration)
+				state.Bindings[id] = active
+			}
+			state.Bindings[authID] = latest
+		}
+		return nil
+	})
+	if err != nil {
+		r.bindings.mu.Unlock()
+		r.credentials.mu.Unlock()
+		restoreCoordinator()
+		return err
+	}
+	r.bindings.bindings = committed.Bindings
+	r.credentials.state = committed
+	r.bindings.mu.Unlock()
+	r.credentials.mu.Unlock()
+	if cancelledExternal {
+		generations := make(map[AuthInstanceID]TierGeneration, len(committed.Bindings))
+		for _, active := range committed.Bindings {
+			generations[active.Instance] = TierGeneration(active.Generation)
+		}
+		r.coordinator.activateInstances(generations)
+	}
+	return nil
+}
 
 var callHostCallback = func(method string, payload any) (json.RawMessage, error) {
 	return nil, fmt.Errorf("host callback %s unavailable", method)

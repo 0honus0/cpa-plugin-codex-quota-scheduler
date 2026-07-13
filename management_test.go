@@ -177,7 +177,7 @@ func TestManagementRefreshAccountRejectsOutsideAdmission(t *testing.T) {
 	}
 }
 
-func TestManagementUsesActiveRosterOnly(t *testing.T) { //inv:INV-20,INV-34 positive
+func TestManagementUsesActiveRosterOnly(t *testing.T) {
 	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
 	store := NewPluginState(DefaultConfig())
 	for _, account := range []AccountState{
@@ -213,7 +213,7 @@ func TestManagementUsesActiveRosterOnly(t *testing.T) { //inv:INV-20,INV-34 posi
 	}
 }
 
-func TestManagementExposesRosterLifecycle(t *testing.T) { //inv:INV-23,INV-35 positive
+func TestManagementExposesRosterLifecycle(t *testing.T) {
 	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
 	store := NewPluginState(DefaultConfig())
 	cases := []struct {

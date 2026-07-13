@@ -46,8 +46,6 @@ func TestCredentialChainExpiryAndAmbiguousReconciliation(t *testing.T) {
 		t.Fatalf("unknown kind=%s", got.Kind)
 	}
 }
-
-// inv:INV-28 positive
 func TestExecutionTokenRejectsOldInstanceWriteback(t *testing.T) {
 	token := ExecutionToken{Instance: 2, Admission: 3, Tier: 4, Fence: 5}
 	if !token.ValidFor(2, 3, 4) || token.ValidFor(1, 3, 4) {
@@ -62,12 +60,6 @@ func TestPluginStateChecksExecutionTokenAgainstCurrentAccount(t *testing.T) {
 		t.Fatal("execution token fencing mismatch")
 	}
 }
-
-// inv:INV-28 negative
-// inv:INV-33 positive
-// inv:INV-33 negative
-// inv:INV-40 positive
-// inv:INV-40 negative
 func TestIdentityEpochTypesRemainDistinct(t *testing.T) {
 	var _ AccountIdentity = 1
 	var _ AuthInstanceID = 1

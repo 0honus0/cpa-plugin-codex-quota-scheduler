@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-func TestTypedQuotaReadAllocatesAtActualStartAndBarrierJoin(t *testing.T) { //inv:INV-05,INV-26
+func TestTypedQuotaReadAllocatesAtActualStartAndBarrierJoin(t *testing.T) {
 	var seq atomic.Uint64
 	started := make(chan Intent, 2)
 	releaseLegacy := make(chan struct{})
@@ -41,6 +41,32 @@ func TestTypedQuotaReadAllocatesAtActualStartAndBarrierJoin(t *testing.T) { //in
 	a, b := queued.Await(context.Background()), joined.Await(context.Background())
 	if a.ReadStartSeq != b.ReadStartSeq || a.ReadStartSeq != actual.ReadStartSeq {
 		t.Fatalf("queued=%d joined=%d actual=%d", a.ReadStartSeq, b.ReadStartSeq, actual.ReadStartSeq)
+	}
+}
+
+func TestQueuedTypedReadDoesNotJoinBeforeBarrierAllocation(t *testing.T) {
+	var seq atomic.Uint64
+	seq.Store(99)
+	legacyStarted := make(chan struct{})
+	releaseLegacy := make(chan struct{})
+	c := NewCoordinator(CoordinatorOptions{AllocateReadSeq: func() (uint64, error) { return seq.Add(1), nil }, Execute: func(_ context.Context, intent Intent, _ *HeldLease) OperationResult {
+		if intent.Class == OperationLegacyRefresh {
+			close(legacyStarted)
+			<-releaseLegacy
+		}
+		return OperationResult{Token: intent.Token, ReadStartSeq: intent.ReadStartSeq}
+	}})
+	t.Cleanup(c.Close)
+	legacy := c.Submit(Intent{Instance: 1, Class: OperationLegacyRefresh, Source: LegacyEnvelopeSource})
+	<-legacyStarted
+	first := c.SubmitTyped(Intent{Instance: 1, Class: OperationQuotaRead, Source: SourceManualRefresh})
+	barrier := c.SubmitTyped(Intent{Instance: 1, Class: OperationQuotaRead, Source: SourceSchedulerInterval, StartedAfter: 100})
+	close(releaseLegacy)
+	_ = legacy.Await(context.Background())
+	firstResult := first.Await(context.Background())
+	barrierResult := barrier.Await(context.Background())
+	if firstResult.ReadStartSeq != 100 || barrierResult.ReadStartSeq <= 100 {
+		t.Fatalf("first=%d barrier=%d", firstResult.ReadStartSeq, barrierResult.ReadStartSeq)
 	}
 }
 
@@ -76,7 +102,7 @@ func TestCompletedFenceAndReadStartSeqRemainDistinct(t *testing.T) {
 	}
 }
 
-func TestTypedProbeSendNeverJoinsSameAttempt(t *testing.T) { //inv:INV-06
+func TestTypedProbeSendNeverJoinsSameAttempt(t *testing.T) {
 	var mu sync.Mutex
 	starts := 0
 	release := make(chan struct{})
@@ -100,7 +126,7 @@ func TestTypedProbeSendNeverJoinsSameAttempt(t *testing.T) { //inv:INV-06
 	}
 }
 
-func TestTypedPropagationWaitRetainsLeaseWithoutSlot(t *testing.T) { //inv:INV-07,INV-09
+func TestTypedPropagationWaitRetainsLeaseWithoutSlot(t *testing.T) {
 	wait := make(chan struct{})
 	entered := make(chan struct{})
 	other := make(chan struct{})
@@ -139,7 +165,7 @@ func TestTypedPropagationWaitRetainsLeaseWithoutSlot(t *testing.T) { //inv:INV-0
 	_ = g.Await(context.Background())
 }
 
-func TestTypedPropagationLeaseReclaimEntersSentUnknownWithoutResign(t *testing.T) { //inv:INV-27,INV-36
+func TestTypedPropagationLeaseReclaimEntersSentUnknownWithoutResign(t *testing.T) {
 	var expire func()
 	entered := make(chan struct{})
 	var starts atomic.Int32

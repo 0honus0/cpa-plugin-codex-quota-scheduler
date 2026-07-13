@@ -90,8 +90,6 @@ func oracleBefore(a, b AccountView, mode MonthlyMode) bool {
 	}
 	return a.ID < b.ID
 }
-
-// inv:INV-12,INV-13,INV-44
 func TestMockGroupB(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	caches := []CacheClass{CacheFresh, CacheAging, CacheUnknown, CacheStale}
@@ -186,8 +184,6 @@ func TestSchedulingOracleDetectsPriorityBeforeClassMutation(t *testing.T) {
 		t.Fatal("oracle failed to kill priority-before-class mutant")
 	}
 }
-
-// inv:INV-44
 func TestPreferredAcrossAllPrioritiesBeforeOpportunistic(t *testing.T) {
 	now := time.Now()
 	s := SchedulerSnapshot{Accounts: []AccountView{{ID: "op-high", Instance: 1, Cache: CacheUnknown, PluginPriority: 99}, {ID: "preferred-low", Instance: 2, Cache: CacheFresh, PluginPriority: 0}}, ActiveHighestTier: map[string]struct{}{"op-high": {}, "preferred-low": {}}}

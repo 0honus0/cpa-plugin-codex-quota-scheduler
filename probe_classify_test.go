@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func TestProbeClassifierOrderedRules(t *testing.T) { //inv:INV-17,INV-19
+func TestProbeClassifierOrderedRules(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	prev := now.Add(-time.Hour)
 	usage := 80.0
@@ -35,7 +35,7 @@ func TestProbeClassifierOrderedRules(t *testing.T) { //inv:INV-17,INV-19
 	}
 }
 
-func TestUsageOnlyNeverEntersResetRules(t *testing.T) { //inv:INV-19
+func TestUsageOnlyNeverEntersResetRules(t *testing.T) {
 	now := time.Unix(1000, 0).UTC()
 	base := UsageOnlyProbeBaseline(75, now.Add(30*time.Minute))
 	got := ClassifyProbeWindow(base, QuotaSnapshot{Valid: true, Usage: ptrFloat(75)}, now)
@@ -85,7 +85,7 @@ func goldenProbeOracle(b string, o int, l, u, d string) string {
 	base, snap, now := materializeGolden(b, o, l, u, d)
 	return string(independentProbeOracle(base, snap, now))
 }
-func TestProbeClassifyGolden(t *testing.T) { //inv:INV-17,INV-19
+func TestProbeClassifyGolden(t *testing.T) {
 	want := generateProbeGolden()
 	if len(want) != 864 {
 		t.Fatalf("rows=%d", len(want))

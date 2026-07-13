@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -44,6 +46,7 @@ type StatusPayload struct {
 type ManagementLifecycleSnapshot struct {
 	Roster              ActiveRoster
 	CredentialAmbiguous bool
+	ResolveCredential   func(context.Context, string, CredentialResolutionAction) error
 }
 
 type RosterLifecyclePayload struct {
@@ -187,6 +190,7 @@ func RegisterManagement() pluginapi.ManagementRegistrationResponse {
 			{Method: http.MethodPut, Path: managementBasePath + "/annotations", Description: "Replace quota annotations."},
 			{Method: http.MethodPatch, Path: managementBasePath + "/annotations/account", Description: "Update one account annotation."},
 			{Method: http.MethodPatch, Path: managementBasePath + "/annotations/group", Description: "Update one group annotation."},
+			{Method: http.MethodPost, Path: managementBasePath + "/credentials/resolve", Description: "Resolve an active credential ambiguity."},
 		},
 	}
 }
@@ -239,9 +243,33 @@ func handleManagementRequest(store *PluginState, req pluginapi.ManagementRequest
 		return handlePatchAccountAnnotation(store, req, now)
 	case method == http.MethodPatch && path == "/annotations/group":
 		return handlePatchGroupAnnotation(store, req, now)
+	case method == http.MethodPost && path == "/credentials/resolve":
+		return handleCredentialResolution(store, req, now, lifecycle)
 	default:
 		return jsonManagementResponse(http.StatusNotFound, map[string]string{"error": "not found"})
 	}
+}
+
+func handleCredentialResolution(store *PluginState, req pluginapi.ManagementRequest, now time.Time, lifecycle *ManagementLifecycleSnapshot) pluginapi.ManagementResponse {
+	if lifecycle == nil || lifecycle.ResolveCredential == nil {
+		return jsonManagementResponse(http.StatusConflict, map[string]string{"error": "credential resolution unavailable"})
+	}
+	var payload struct {
+		AuthID string                     `json:"auth_id"`
+		Action CredentialResolutionAction `json:"action"`
+	}
+	if err := json.Unmarshal(req.Body, &payload); err != nil || strings.TrimSpace(payload.AuthID) == "" || !payload.Action.Valid() {
+		return jsonManagementResponse(http.StatusBadRequest, map[string]string{"error": "auth_id and valid action are required"})
+	}
+	if err := lifecycle.ResolveCredential(context.Background(), payload.AuthID, payload.Action); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, ErrCredentialResolutionScope) || errors.Is(err, ErrBindingNotRosterConfirmed) {
+			status = http.StatusConflict
+		}
+		return jsonManagementResponse(status, map[string]string{"error": err.Error()})
+	}
+	store.RecordLog("info", "credential.ambiguity_resolved", "credential ambiguity resolution completed", map[string]any{"auth_id": payload.AuthID, "action": payload.Action}, now)
+	return jsonManagementResponse(http.StatusOK, map[string]bool{"ok": true})
 }
 
 func isResourcePath(path string) bool {

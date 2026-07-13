@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func TestProbeWALSendingRecoversVerifyFirstAndSuppresses(t *testing.T) { //inv:INV-27,INV-36,INV-38
+func TestProbeWALSendingRecoversVerifyFirstAndSuppresses(t *testing.T) {
 	now := time.Unix(3000, 0).UTC()
 	store := NewStateStore(filepath.Join(t.TempDir(), "state.json"), OSFileHooks(), nil)
 	wal := NewProbeWAL(store)
@@ -53,7 +53,7 @@ func TestS6KPointRegistryMatchesSource(t *testing.T) {
 	}
 }
 
-func TestProbeKPointsReachableAndRegistered(t *testing.T) { //inv:INV-27,INV-38
+func TestProbeKPointsReachableAndRegistered(t *testing.T) {
 	points := []string{"K_PROBE_SENDING_WRITE", "K_PROBE_AFTER_SENDING", "K_PROBE_BEFORE_HTTP", "K_PROBE_AFTER_HTTP", "K_PROBE_SENT_WRITE"}
 	now := time.Unix(5000, 0).UTC()
 	for _, point := range points {
@@ -106,7 +106,7 @@ func TestProbeDeadlineConsumedOnceWithoutSpin(t *testing.T) {
 	}
 }
 
-func TestProbeRecoveryWaitsForGraceAndNeverResendsDuringSuppression(t *testing.T) { //inv:INV-27,INV-36
+func TestProbeRecoveryWaitsForGraceAndNeverResendsDuringSuppression(t *testing.T) {
 	now := time.Unix(4000, 0).UTC()
 	store := NewStateStore(filepath.Join(t.TempDir(), "state.json"), OSFileHooks(), nil)
 	wal := NewProbeWAL(store)
@@ -123,7 +123,7 @@ func TestProbeRecoveryWaitsForGraceAndNeverResendsDuringSuppression(t *testing.T
 	}
 }
 
-func TestProbeSuppressionEntrancesAndVerifyResults(t *testing.T) { //inv:INV-18,INV-27,INV-36
+func TestProbeSuppressionEntrancesAndVerifyResults(t *testing.T) {
 	now := time.Unix(8000, 0).UTC()
 	suppress := now.Add(10 * time.Minute)
 	for _, entrance := range []ProbeWindowState{ProbeSentAwaitingVerify, ProbeSentUnknown, ProbeSentAwaitingVerify} {

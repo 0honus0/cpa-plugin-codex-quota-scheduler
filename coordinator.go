@@ -238,11 +238,17 @@ type drainCommand struct {
 	reply chan DrainReport
 }
 type cancelInstancesCommand struct {
-	instances []AuthInstanceID
-	reply     chan struct{}
+	instances  []AuthInstanceID
+	reply      chan struct{}
+	tokenReply chan map[AuthInstanceID]uint64
 }
 type activateInstancesCommand struct {
 	generations map[AuthInstanceID]TierGeneration
+	reply       chan struct{}
+}
+type restoreInstancesCommand struct {
+	generations map[AuthInstanceID]TierGeneration
+	tokens      map[AuthInstanceID]uint64
 	reply       chan struct{}
 }
 type drainWaiter struct {
@@ -268,6 +274,7 @@ type typedReadEntry struct {
 	seq       atomic.Uint64
 	done      atomic.Bool
 	attemptID string
+	class     OperationClass
 }
 type typedPayload struct {
 	value any
@@ -308,7 +315,8 @@ func (c *Coordinator) SubmitTyped(intent Intent) Future[OperationResult] {
 			if intent.Class == OperationProbeVerify {
 				attemptOK = entry.attemptID == "" || entry.attemptID == intent.AttemptID
 			}
-			if !entry.done.Load() && seq > intent.StartedAfter && attemptOK {
+			queuedSameClass := seq == 0 && intent.StartedAfter == 0 && entry.class == intent.Class
+			if !entry.done.Load() && (seq > intent.StartedAfter || queuedSameClass) && attemptOK {
 				if intent.Class == OperationProbeVerify && entry.attemptID == "" {
 					entry.attemptID = intent.AttemptID
 				}
@@ -317,7 +325,7 @@ func (c *Coordinator) SubmitTyped(intent Intent) Future[OperationResult] {
 				return f
 			}
 		}
-		entry := &typedReadEntry{attemptID: intent.AttemptID}
+		entry := &typedReadEntry{attemptID: intent.AttemptID, class: intent.Class}
 		intent.AttemptID = fmt.Sprintf("read-%d", c.typedNonce.Add(1))
 		intent.Payload = typedPayload{value: intent.Payload, entry: entry}
 		f := c.Submit(intent)
@@ -395,6 +403,9 @@ func (c *Coordinator) CancelInstances(instances []AuthInstanceID) {
 		return
 	}
 	c.lifecycleMu.Unlock()
+	c.clearTypedReads(ids)
+}
+func (c *Coordinator) clearTypedReads(ids []AuthInstanceID) {
 	c.typedMu.Lock()
 	for _, instance := range ids {
 		for _, entry := range c.typedReads[instance] {
@@ -403,6 +414,28 @@ func (c *Coordinator) CancelInstances(instances []AuthInstanceID) {
 		delete(c.typedReads, instance)
 	}
 	c.typedMu.Unlock()
+}
+func (c *Coordinator) suspendInstancesForRollback(instances []AuthInstanceID) map[AuthInstanceID]uint64 {
+	if c == nil || len(instances) == 0 {
+		return nil
+	}
+	c.lifecycleMu.Lock()
+	if c.closing {
+		c.lifecycleMu.Unlock()
+		return nil
+	}
+	reply := make(chan map[AuthInstanceID]uint64, 1)
+	ids := append([]AuthInstanceID(nil), instances...)
+	select {
+	case c.commands <- cancelInstancesCommand{instances: ids, tokenReply: reply}:
+		tokens := <-reply
+		c.lifecycleMu.Unlock()
+		c.clearTypedReads(ids)
+		return tokens
+	case <-c.closed:
+		c.lifecycleMu.Unlock()
+		return nil
+	}
 }
 func (c *Coordinator) activateInstances(generations map[AuthInstanceID]TierGeneration) {
 	if c == nil || len(generations) == 0 {
@@ -420,6 +453,26 @@ func (c *Coordinator) activateInstances(generations map[AuthInstanceID]TierGener
 	reply := make(chan struct{}, 1)
 	select {
 	case c.commands <- activateInstancesCommand{generations: copyGenerations, reply: reply}:
+		<-reply
+	case <-c.closed:
+	}
+}
+func (c *Coordinator) restoreCancelledInstances(generations map[AuthInstanceID]TierGeneration, tokens map[AuthInstanceID]uint64) {
+	if c == nil || len(generations) == 0 {
+		return
+	}
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.closing {
+		return
+	}
+	copyGenerations := make(map[AuthInstanceID]TierGeneration, len(generations))
+	for instance, generation := range generations {
+		copyGenerations[instance] = generation
+	}
+	reply := make(chan struct{}, 1)
+	select {
+	case c.commands <- restoreInstancesCommand{generations: copyGenerations, tokens: tokens, reply: reply}:
 		<-reply
 	case <-c.closed:
 	}
@@ -474,6 +527,8 @@ func (c *Coordinator) loop() {
 	completedFence := map[AuthInstanceID]uint64{}
 	instanceGeneration := map[AuthInstanceID]TierGeneration{}
 	cancelledThrough := map[AuthInstanceID]TierGeneration{}
+	cancelTokens := map[AuthInstanceID]uint64{}
+	var cancelNonce uint64
 	var drains []*drainWaiter
 	start := func(key operationKey, job *coordinatorJob) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -723,7 +778,11 @@ func (c *Coordinator) loop() {
 				}
 				cmd.reply <- &CoordinatorSnapshot{Accepting: accepting, InFlight: len(inflight), Queued: queued, LeasedInstances: ids, HTTPSlotsInUse: len(c.httpSlots)}
 			case cancelInstancesCommand:
+				issuedTokens := make(map[AuthInstanceID]uint64, len(cmd.instances))
 				for _, instance := range cmd.instances {
+					cancelNonce++
+					cancelTokens[instance] = cancelNonce
+					issuedTokens[instance] = cancelNonce
 					cancelledThrough[instance] = instanceGeneration[instance]
 					for _, job := range queue[instance] {
 						if inflight[job.key] == job {
@@ -743,7 +802,11 @@ func (c *Coordinator) loop() {
 						completeFuture(job.future, OperationResult{Token: job.intent.Token, Err: context.Canceled, Disposition: ResultCancelled})
 					}
 				}
-				cmd.reply <- struct{}{}
+				if cmd.tokenReply != nil {
+					cmd.tokenReply <- issuedTokens
+				} else {
+					cmd.reply <- struct{}{}
+				}
 				finishDrains()
 			case activateInstancesCommand:
 				for instance, generation := range cmd.generations {
@@ -752,6 +815,15 @@ func (c *Coordinator) loop() {
 					}
 					if generation > cancelledThrough[instance] {
 						delete(cancelledThrough, instance)
+						delete(cancelTokens, instance)
+					}
+				}
+				cmd.reply <- struct{}{}
+			case restoreInstancesCommand:
+				for instance, generation := range cmd.generations {
+					if cancelledThrough[instance] == generation && cancelTokens[instance] == cmd.tokens[instance] {
+						delete(cancelledThrough, instance)
+						delete(cancelTokens, instance)
 					}
 				}
 				cmd.reply <- struct{}{}

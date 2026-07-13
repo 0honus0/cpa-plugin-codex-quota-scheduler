@@ -9,22 +9,6 @@ import (
 )
 
 func TestSuiteCoordinator(t *testing.T) {
-	//inv:INV-04 positive
-	//inv:INV-04 negative
-	//inv:INV-05 positive
-	//inv:INV-05 negative
-	//inv:INV-09 positive
-	//inv:INV-09 negative
-	//inv:INV-24 positive
-	//inv:INV-24 negative
-	//inv:INV-25 positive
-	//inv:INV-25 negative
-	//inv:INV-26 positive
-	//inv:INV-26 negative
-	//inv:INV-42 positive
-	//inv:INV-42 negative
-	//inv:INV-46 positive
-	//inv:INV-46 negative
 	t.Run("deduplicates same instance class and generation", func(t *testing.T) {
 		started := make(chan struct{}, 2)
 		release := make(chan struct{})
@@ -104,7 +88,7 @@ func TestSuiteCoordinator(t *testing.T) {
 	})
 }
 
-func TestRosterRemovalCancelsInFlightAndFencesWriteback(t *testing.T) { //inv:INV-03,INV-20
+func TestRosterRemovalCancelsInFlightAndFencesWriteback(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var applied int
@@ -186,7 +170,7 @@ func TestCancelInstancesDoesNotDeadlockTypedSubmission(t *testing.T) {
 	close(release)
 }
 
-func TestCancelledInstanceRejectsHigherGenerationUntilAuthoritativeActivation(t *testing.T) { //inv:INV-03,INV-20
+func TestCancelledInstanceRejectsHigherGenerationUntilAuthoritativeActivation(t *testing.T) {
 	var starts int
 	c := NewCoordinator(CoordinatorOptions{Execute: func(_ context.Context, intent Intent, _ *HeldLease) OperationResult {
 		starts++
