@@ -20,24 +20,48 @@ var managementRefreshOneSoon = func(authID string) {}
 var managementProvisionalRiskChanged = func(bool) {}
 
 type StatusPayload struct {
-	PluginID              string            `json:"plugin_id"`
-	GeneratedAt           time.Time         `json:"generated_at"`
-	Shell                 bool              `json:"shell,omitempty"`
-	NextAuthID            string            `json:"next_auth_id"`
-	MonthlyMode           MonthlyMode       `json:"monthly_mode"`
-	HandleEnabled         bool              `json:"handle_enabled"`
-	LastSelected          string            `json:"last_selected"`
-	LastReason            string            `json:"last_reason"`
-	RefreshActive         bool              `json:"refresh_active"`
-	RefreshState          string            `json:"refresh_state"`
-	LastCodexActivityText string            `json:"last_codex_activity_text,omitempty"`
-	LastAuthScanText      string            `json:"last_auth_scan_text,omitempty"`
-	CodexAuthCount        int               `json:"codex_auth_count"`
-	EmptyState            EmptyStatePayload `json:"empty_state,omitempty"`
-	Settings              SettingsPayload   `json:"settings"`
-	Accounts              []StatusAccount   `json:"accounts"`
-	Groups                []StatusGroup     `json:"groups,omitempty"`
-	Logs                  []LogEntry        `json:"logs"`
+	PluginID              string                 `json:"plugin_id"`
+	GeneratedAt           time.Time              `json:"generated_at"`
+	Shell                 bool                   `json:"shell,omitempty"`
+	NextAuthID            string                 `json:"next_auth_id"`
+	MonthlyMode           MonthlyMode            `json:"monthly_mode"`
+	HandleEnabled         bool                   `json:"handle_enabled"`
+	LastSelected          string                 `json:"last_selected"`
+	LastReason            string                 `json:"last_reason"`
+	RefreshActive         bool                   `json:"refresh_active"`
+	RefreshState          string                 `json:"refresh_state"`
+	LastCodexActivityText string                 `json:"last_codex_activity_text,omitempty"`
+	LastAuthScanText      string                 `json:"last_auth_scan_text,omitempty"`
+	CodexAuthCount        int                    `json:"codex_auth_count"`
+	Roster                RosterLifecyclePayload `json:"roster"`
+	EmptyState            EmptyStatePayload      `json:"empty_state,omitempty"`
+	Settings              SettingsPayload        `json:"settings"`
+	Accounts              []StatusAccount        `json:"accounts"`
+	Groups                []StatusGroup          `json:"groups,omitempty"`
+	Logs                  []LogEntry             `json:"logs"`
+}
+
+type ManagementLifecycleSnapshot struct {
+	Roster              ActiveRoster
+	CredentialAmbiguous bool
+}
+
+type RosterLifecyclePayload struct {
+	Capability          HostCapability `json:"capability"`
+	Health              RosterHealth   `json:"health"`
+	Confirmed           bool           `json:"confirmed"`
+	Provisional         bool           `json:"provisional"`
+	Degraded            bool           `json:"degraded"`
+	FailClosed          bool           `json:"fail_closed"`
+	WaitingRoster       bool           `json:"waiting_roster"`
+	BackgroundAllowed   bool           `json:"background_allowed"`
+	HighestPriority     int            `json:"highest_priority"`
+	Generation          uint64         `json:"generation"`
+	CredentialAmbiguous bool           `json:"credential_ambiguous"`
+	RiskOptionEnabled   bool           `json:"risk_option_enabled"`
+	RiskOptionAvailable bool           `json:"risk_option_available"`
+	Warning             string         `json:"warning,omitempty"`
+	RiskWarning         string         `json:"risk_warning,omitempty"`
 }
 
 type EmptyStatePayload struct {
@@ -168,6 +192,14 @@ func RegisterManagement() pluginapi.ManagementRegistrationResponse {
 }
 
 func HandleManagementRequest(store *PluginState, req pluginapi.ManagementRequest, now time.Time) pluginapi.ManagementResponse {
+	return handleManagementRequest(store, req, now, nil)
+}
+
+func HandleManagementRequestWithLifecycle(store *PluginState, req pluginapi.ManagementRequest, now time.Time, lifecycle ManagementLifecycleSnapshot) pluginapi.ManagementResponse {
+	return handleManagementRequest(store, req, now, &lifecycle)
+}
+
+func handleManagementRequest(store *PluginState, req pluginapi.ManagementRequest, now time.Time, lifecycle *ManagementLifecycleSnapshot) pluginapi.ManagementResponse {
 	if store == nil {
 		return jsonManagementResponse(http.StatusInternalServerError, map[string]string{"error": "plugin state unavailable"})
 	}
@@ -182,7 +214,7 @@ func HandleManagementRequest(store *PluginState, req pluginapi.ManagementRequest
 	}
 	switch {
 	case method == http.MethodGet && path == "/status":
-		return handleStatusRequest(store, req, now)
+		return handleStatusRequest(store, req, now, lifecycle)
 	case method == http.MethodGet && path == "/settings":
 		return jsonManagementResponse(http.StatusOK, SettingsFromConfig(store.Config()))
 	case method == http.MethodPut && path == "/settings":
@@ -440,6 +472,10 @@ func handleImportState(store *PluginState, body []byte, now time.Time) pluginapi
 }
 
 func BuildStatusPayload(snapshot StateSnapshot, ordered []ScheduledAccount) StatusPayload {
+	return buildStatusPayload(snapshot, ordered, nil)
+}
+
+func buildStatusPayload(snapshot StateSnapshot, ordered []ScheduledAccount, lifecycle *ManagementLifecycleSnapshot) StatusPayload {
 	accountsByAuthID := make(map[string]AccountState, len(snapshot.Accounts))
 	for _, account := range snapshot.Accounts {
 		if account.AuthID != "" {
@@ -462,6 +498,9 @@ func BuildStatusPayload(snapshot StateSnapshot, ordered []ScheduledAccount) Stat
 		Accounts:              make([]StatusAccount, 0, len(ordered)),
 		Groups:                make([]StatusGroup, 0, len(snapshot.Annotations.Groups)),
 		Logs:                  cloneLogs(snapshot.Logs),
+	}
+	if lifecycle != nil {
+		payload.Roster = rosterLifecyclePayload(*lifecycle, snapshot.Config, snapshot.Now)
 	}
 	if payload.RefreshActive {
 		payload.RefreshState = "active"
@@ -532,6 +571,39 @@ func BuildStatusPayload(snapshot StateSnapshot, ordered []ScheduledAccount) Stat
 	}
 	if len(payload.Accounts) == 0 {
 		payload.EmptyState = emptyStatePayload(snapshot, payload.RefreshActive)
+	}
+	return payload
+}
+
+func rosterLifecyclePayload(snapshot ManagementLifecycleSnapshot, cfg Config, now time.Time) RosterLifecyclePayload {
+	roster := snapshot.Roster
+	available := !snapshot.CredentialAmbiguous && roster.Capability == CapabilityB && roster.Provisional && !roster.Confirmed && provisionalAgeValid(now, roster.ConfirmedAt)
+	payload := RosterLifecyclePayload{
+		Capability: roster.Capability, Health: roster.Health, Confirmed: roster.Confirmed,
+		Provisional: roster.Provisional, Degraded: roster.Health == RosterDegraded,
+		FailClosed: roster.Health == RosterFailClosed, WaitingRoster: roster.Health == RosterWaiting,
+		BackgroundAllowed: roster.BackgroundAllowed, HighestPriority: roster.HighestPriority,
+		Generation: roster.Generation, CredentialAmbiguous: snapshot.CredentialAmbiguous,
+		RiskOptionEnabled: cfg.ProbeOnProvisionalRoster, RiskOptionAvailable: available,
+	}
+	switch {
+	case snapshot.CredentialAmbiguous:
+		payload.Warning = "CredentialAmbiguous: credential-chain conversion is frozen until a later observation can be classified; existing non-AuthBlocked credentials remain usable."
+	case payload.FailClosed:
+		payload.Warning = "FailClosed: authoritative roster synchronization exceeded the degraded limit; background requests are stopped."
+	case payload.Degraded:
+		payload.Warning = "Degraded: Management is showing the last confirmed active roster while synchronization recovers."
+	case payload.WaitingRoster:
+		payload.Warning = "WaitingRoster: no current authoritative roster is confirmed; normal background refresh is stopped."
+	}
+	if payload.RiskOptionEnabled {
+		if available {
+			payload.RiskWarning = "Provisional roster Probe risk mode is enabled. Tier membership cannot be proven; each Probe requires fresh credential verification."
+		} else {
+			payload.RiskWarning = "Provisional roster Probe risk mode is enabled but unavailable without a fresh provisional Capability-B roster."
+		}
+	} else if available {
+		payload.RiskWarning = "A fresh provisional roster is available, but Probe risk mode is disabled."
 	}
 	return payload
 }
@@ -781,7 +853,7 @@ func BuildStatusShellPayload(now time.Time) StatusPayload {
 	}
 }
 
-func handleStatusRequest(store *PluginState, req pluginapi.ManagementRequest, now time.Time) pluginapi.ManagementResponse {
+func handleStatusRequest(store *PluginState, req pluginapi.ManagementRequest, now time.Time, lifecycles ...*ManagementLifecycleSnapshot) pluginapi.ManagementResponse {
 	if isResourcePath(req.Path) {
 		return pluginapi.ManagementResponse{
 			StatusCode: http.StatusOK,
@@ -790,6 +862,9 @@ func handleStatusRequest(store *PluginState, req pluginapi.ManagementRequest, no
 		}
 	}
 	payload := buildCurrentStatusPayload(store, now)
+	if len(lifecycles) > 0 && lifecycles[0] != nil {
+		payload = buildCurrentStatusPayloadWithLifecycle(store, now, *lifecycles[0])
+	}
 	if req.Query.Get("format") == "json" {
 		return jsonManagementResponse(http.StatusOK, payload)
 	}
@@ -835,6 +910,38 @@ func buildCurrentStatusPayload(store *PluginState, now time.Time) StatusPayload 
 	snapshot := store.Snapshot(now)
 	ordered := BuildOrderedAccounts(syntheticStatusRequest(snapshot), snapshot, now)
 	return BuildStatusPayload(snapshot, ordered)
+}
+
+func buildCurrentStatusPayloadWithLifecycle(store *PluginState, now time.Time, lifecycle ManagementLifecycleSnapshot) StatusPayload {
+	snapshot := store.Snapshot(now)
+	active := make(map[string]struct{}, len(lifecycle.Roster.Instances))
+	for _, authID := range lifecycle.Roster.Instances {
+		if authID != "" {
+			active[authID] = struct{}{}
+		}
+	}
+	filtered := snapshot
+	filtered.Accounts = make([]AccountState, 0, len(active))
+	for _, account := range snapshot.Accounts {
+		if _, ok := active[account.AuthID]; !ok {
+			continue
+		}
+		account.Priority = lifecycle.Roster.HighestPriority
+		filtered.Accounts = append(filtered.Accounts, account)
+	}
+	ordered := BuildOrderedAccounts(syntheticRosterStatusRequest(filtered, lifecycle.Roster), filtered, now)
+	return buildStatusPayload(filtered, ordered, &lifecycle)
+}
+
+func syntheticRosterStatusRequest(snapshot StateSnapshot, roster ActiveRoster) pluginapi.SchedulerPickRequest {
+	candidates := make([]pluginapi.SchedulerAuthCandidate, 0, len(snapshot.Accounts))
+	for _, account := range snapshot.Accounts {
+		if account.AuthID == "" {
+			continue
+		}
+		candidates = append(candidates, pluginapi.SchedulerAuthCandidate{ID: account.AuthID, Provider: "codex", Priority: roster.HighestPriority})
+	}
+	return pluginapi.SchedulerPickRequest{Provider: "codex", Candidates: candidates}
 }
 
 func syntheticStatusRequest(snapshot StateSnapshot) pluginapi.SchedulerPickRequest {
@@ -1095,6 +1202,7 @@ var statusTemplateV2 = template.Must(template.New("status-v2").Funcs(template.Fu
 <label class="toggle"><span data-i18n="settings.handleEnabled">启用调度接管</span><input id="handleEnabled" type="checkbox"></label>
 <label class="toggle"><span data-i18n="settings.usageFeedback">失败反馈标记额度耗尽</span><input id="usageFeedback" type="checkbox"></label>
 <label class="toggle"><span data-i18n="settings.enableResetProbe">启用自动 reset probe</span><input id="enableResetProbe" name="enable_reset_probe" type="checkbox"></label>
+<label class="toggle"><span>启用 provisional roster Probe 风险模式</span><input id="probeOnProvisionalRoster" name="probe_on_provisional_roster" type="checkbox"></label>
 <label class="field"><span data-i18n="settings.monthlyMode">Monthly 模式</span><select id="monthlyMode"><option value="expiry_order" data-i18n="settings.expiryOrder">按到期时间排序</option><option value="priority" data-i18n="settings.monthlyPriority">优先使用 Monthly</option></select></label>
 <label class="field"><span data-i18n="settings.refreshInterval">额度刷新间隔</span><input id="refreshInterval" spellcheck="false"></label>
 <label class="field"><span data-i18n="settings.staleAfter">缓存过期判定</span><input id="staleAfter" spellcheck="false"></label>
@@ -1113,6 +1221,7 @@ var statusTemplateV2 = template.Must(template.New("status-v2").Funcs(template.Fu
 <div id="notice" class="notice" hidden></div>
 </aside>
 <main class="main" id="protectedMain" hidden>
+<div class="warning" id="rosterLifecycleWarning" hidden><strong id="rosterLifecycleTitle">Roster lifecycle</strong><span id="rosterLifecycleBody"></span></div>
 <div class="toolbar"><div><h2 data-i18n="queue.title">账号队列</h2><p data-i18n="queue.description">账号卡片按当前调度优先级排序。第一个可用账号就是下一次 Codex 请求会优先选择的账号。</p></div><div class="metrics"><span class="metric"><span data-i18n="metrics.nextAccount">下一账号</span>：<code id="metricNextAuthID">{{if .NextAuthID}}{{.NextAuthID}}{{else}}暂无{{end}}</code></span><span class="metric">Monthly：<code id="metricMonthlyMode">{{if eq .MonthlyMode "priority"}}优先使用{{else}}按到期时间{{end}}</code></span><span class="metric"><span data-i18n="metrics.lastSelected">最近选择</span>：<code id="metricLastSelected">{{if .LastSelected}}{{.LastSelected}}{{else}}暂无{{end}}</code></span></div></div>
 <section class="queue" aria-label="账号卡片">{{range .Accounts}}<article class="card {{if and $.NextAuthID (eq $.NextAuthID .AuthID)}}next{{end}}" data-auth-id="{{.AuthID}}">
 <div class="cardTop"><div class="identity"><div class="titleLine"><span class="title">{{if .Alias}}{{.Alias}}{{else}}{{.AuthID}}{{end}}</span>{{if .Group}}<span class="groupPill">{{.Group}}</span>{{end}}</div><div class="sub"><code>{{.AuthID}}</code></div>{{if .Tags}}<div class="metaLine">{{range .Tags}}<span class="chip">{{.}}</span>{{end}}</div>{{end}}</div><span class="rank">#{{.Rank}}</span></div>
@@ -1211,12 +1320,13 @@ function hasManagementKey(){const input=document.getElementById('managementKey')
 function settingsFocusedOrDirty(){const panel=document.getElementById('settingsPanel');return settingsDirty||(panel&&panel.contains(document.activeElement))}
 function updateResetProbeWarning(){const warning=document.getElementById('resetProbeWarning');if(warning)warning.hidden=!(statusLoaded&&STATUS.settings&&STATUS.settings.enable_reset_probe!==true)}
 function updateProtectedVisibility(){const loaded=statusLoaded;const show=(id,visible)=>{const item=document.getElementById(id);if(item)item.hidden=!visible};show('settingsPanel',loaded);show('protectedMain',loaded);show('refreshQuota',loaded);show('loadData',!loaded);updateResetProbeWarning()}
-function applyStatus(data,options){STATUS=data;statusLoaded=true;rebuildDerivedState();const shouldFillSettings=(options&&options.fillSettings)||!settingsInitialized||!settingsFocusedOrDirty();if(shouldFillSettings){fillSettings();settingsInitialized=true}renderMetrics();renderAccounts(STATUS.accounts||[]);renderLogs(STATUS.logs||[]);updateProtectedVisibility();applyLocale()}
+function renderRosterLifecycle(){const warning=document.getElementById('rosterLifecycleWarning');const title=document.getElementById('rosterLifecycleTitle');const body=document.getElementById('rosterLifecycleBody');if(!warning||!title||!body)return;const roster=STATUS.roster||{};const messages=[roster.warning,roster.risk_warning].filter(Boolean);warning.hidden=messages.length===0;title.textContent=[roster.capability,roster.health].filter(Boolean).join(' / ')||'Roster lifecycle';body.textContent=messages.join(' ')}
+function applyStatus(data,options){STATUS=data;statusLoaded=true;rebuildDerivedState();const shouldFillSettings=(options&&options.fillSettings)||!settingsInitialized||!settingsFocusedOrDirty();if(shouldFillSettings){fillSettings();settingsInitialized=true}renderMetrics();renderRosterLifecycle();renderAccounts(STATUS.accounts||[]);renderLogs(STATUS.logs||[]);updateProtectedVisibility();applyLocale()}
 async function refreshStatus(options){const opts=options||{};const data=await requestManagement('/status',{query:{format:'json'}});applyStatus(data,opts)}
 function startStatusPolling(){if(statusPollID)return;statusPollID=window.setInterval(()=>refreshStatus({management:true}).catch(()=>{}),15000)}
 async function loadStatus(){try{await refreshStatus({management:true,fillSettings:true});showNotice(t('notice.statusLoaded'),false);startStatusPolling()}catch(error){showNotice(error.message||String(error),true)}}
 async function pollStatus(times,delayMs){for(let i=0;i<times;i++){await new Promise((resolve)=>window.setTimeout(resolve,delayMs));await refreshStatus()}}
-function collectSettingsPayload(){return{handle_enabled:document.getElementById('handleEnabled').checked,enable_usage_feedback:document.getElementById('usageFeedback').checked,enable_reset_probe:document.getElementById('enableResetProbe').checked,monthly_mode:document.getElementById('monthlyMode').value,quota_refresh_interval:document.getElementById('refreshInterval').value.trim(),stale_after:document.getElementById('staleAfter').value.trim(),refresh_active_window:document.getElementById('refreshActiveWindow').value.trim(),refresh_after_reset_delay:document.getElementById('refreshAfterResetDelay').value.trim(),refresh_retry_delays:document.getElementById('refreshRetryDelays').value.trim(),refresh_on_startup:document.getElementById('refreshOnStartup').checked,max_refresh_concurrency:Number.parseInt(document.getElementById('maxConcurrency').value,10)||1,circuit_failure_threshold:Number.parseInt(document.getElementById('circuitFailureThreshold').value,10)||5,circuit_open_duration:document.getElementById('circuitOpenDuration').value.trim(),circuit_half_open_success_threshold:Number.parseInt(document.getElementById('circuitHalfOpenSuccessThreshold').value,10)||2,max_log_entries:Number.parseInt(document.getElementById('maxLogEntries').value,10)||200,log_retention:document.getElementById('logRetention').value.trim()}}
+function collectSettingsPayload(){return{handle_enabled:document.getElementById('handleEnabled').checked,enable_usage_feedback:document.getElementById('usageFeedback').checked,enable_reset_probe:document.getElementById('enableResetProbe').checked,probe_on_provisional_roster:document.getElementById('probeOnProvisionalRoster').checked,monthly_mode:document.getElementById('monthlyMode').value,quota_refresh_interval:document.getElementById('refreshInterval').value.trim(),stale_after:document.getElementById('staleAfter').value.trim(),refresh_active_window:document.getElementById('refreshActiveWindow').value.trim(),refresh_after_reset_delay:document.getElementById('refreshAfterResetDelay').value.trim(),refresh_retry_delays:document.getElementById('refreshRetryDelays').value.trim(),refresh_on_startup:document.getElementById('refreshOnStartup').checked,max_refresh_concurrency:Number.parseInt(document.getElementById('maxConcurrency').value,10)||1,circuit_failure_threshold:Number.parseInt(document.getElementById('circuitFailureThreshold').value,10)||5,circuit_open_duration:document.getElementById('circuitOpenDuration').value.trim(),circuit_half_open_success_threshold:Number.parseInt(document.getElementById('circuitHalfOpenSuccessThreshold').value,10)||2,max_log_entries:Number.parseInt(document.getElementById('maxLogEntries').value,10)||200,log_retention:document.getElementById('logRetention').value.trim()}}
 function node(tag,className,text){const item=document.createElement(tag);if(className)item.className=className;if(text!==undefined)item.textContent=text;return item}
 function addKV(parent,key,value){parent.append(node('span','',key),node('span','',value||'暂无'))}
 function addBadge(text,className){return node('span','badge '+(className||''),text)}
@@ -1229,7 +1339,7 @@ function renderAccounts(accounts){const queue=document.querySelector('section.qu
 async function readJSON(resp){const text=await resp.text();if(!text)return{};try{return JSON.parse(text)}catch{return{error:text}}}
 function authHeaders(){const input=document.getElementById('managementKey');const key=(input&&input.value||'').trim();if(!key)throw new Error(t('error.managementKeyRequired'));const name='Author'+'ization';const scheme='Bea'+'rer ';const headers={};headers[name]=key.toLowerCase().startsWith(scheme.toLowerCase())?key:scheme+key;return headers}
 async function requestManagement(path,options){const opts=options||{};const headers=authHeaders();let url=MANAGEMENT_BASE+path;if(opts.query){const params=new URLSearchParams(opts.query);url+='?'+params.toString()}const init={method:opts.method||'GET',headers};if(Object.prototype.hasOwnProperty.call(opts,'body')){headers['Content-Type']=opts.contentType||'application/json';init.body=typeof opts.body==='string'?opts.body:JSON.stringify(opts.body)}const resp=await fetch(url,init);const data=await readJSON(resp);if(!resp.ok)throw new Error(data.error||data.message||t('error.requestFailed',{status:resp.status}));return data}
-function fillSettings(){const s=STATUS.settings||{};document.getElementById('handleEnabled').checked=s.handle_enabled!==false;document.getElementById('usageFeedback').checked=s.enable_usage_feedback!==false;document.getElementById('enableResetProbe').checked=s.enable_reset_probe===true;document.getElementById('monthlyMode').value=s.monthly_mode||'expiry_order';document.getElementById('refreshInterval').value=s.quota_refresh_interval||'30m0s';document.getElementById('staleAfter').value=s.stale_after||'5h0m0s';document.getElementById('refreshActiveWindow').value=s.refresh_active_window||'1h0m0s';document.getElementById('refreshAfterResetDelay').value=s.refresh_after_reset_delay||'1m0s';document.getElementById('refreshRetryDelays').value=s.refresh_retry_delays||'1m0s,5m0s,15m0s';document.getElementById('refreshOnStartup').checked=s.refresh_on_startup===true;document.getElementById('maxConcurrency').value=s.max_refresh_concurrency||1;document.getElementById('circuitFailureThreshold').value=s.circuit_failure_threshold||5;document.getElementById('circuitOpenDuration').value=s.circuit_open_duration||'30m0s';document.getElementById('circuitHalfOpenSuccessThreshold').value=s.circuit_half_open_success_threshold||2;document.getElementById('maxLogEntries').value=s.max_log_entries||200;document.getElementById('logRetention').value=s.log_retention||'24h0m0s'}
+function fillSettings(){const s=STATUS.settings||{};document.getElementById('handleEnabled').checked=s.handle_enabled!==false;document.getElementById('usageFeedback').checked=s.enable_usage_feedback!==false;document.getElementById('enableResetProbe').checked=s.enable_reset_probe===true;document.getElementById('probeOnProvisionalRoster').checked=s.probe_on_provisional_roster===true;document.getElementById('monthlyMode').value=s.monthly_mode||'expiry_order';document.getElementById('refreshInterval').value=s.quota_refresh_interval||'30m0s';document.getElementById('staleAfter').value=s.stale_after||'5h0m0s';document.getElementById('refreshActiveWindow').value=s.refresh_active_window||'1h0m0s';document.getElementById('refreshAfterResetDelay').value=s.refresh_after_reset_delay||'1m0s';document.getElementById('refreshRetryDelays').value=s.refresh_retry_delays||'1m0s,5m0s,15m0s';document.getElementById('refreshOnStartup').checked=s.refresh_on_startup===true;document.getElementById('maxConcurrency').value=s.max_refresh_concurrency||1;document.getElementById('circuitFailureThreshold').value=s.circuit_failure_threshold||5;document.getElementById('circuitOpenDuration').value=s.circuit_open_duration||'30m0s';document.getElementById('circuitHalfOpenSuccessThreshold').value=s.circuit_half_open_success_threshold||2;document.getElementById('maxLogEntries').value=s.max_log_entries||200;document.getElementById('logRetention').value=s.log_retention||'24h0m0s'}
 async function saveSettings(){try{if(!statusLoaded){await loadStatus();return}await requestManagement('/settings',{method:'PUT',body:collectSettingsPayload()});settingsDirty=false;showNotice(t('notice.settingsSaved'),false);await refreshStatus({management:true,fillSettings:true})}catch(error){showNotice(error.message||String(error),true)}}
 async function refreshQuota(){try{await requestManagement('/refresh',{method:'POST'});showNotice(t('notice.refreshRequested'),false);await refreshStatus({management:true});pollStatus(3,1200)}catch(error){showNotice(error.message||String(error),true)}}
 function splitTags(text){return text.split(',').map((item)=>item.trim()).filter(Boolean)}
@@ -1267,6 +1377,7 @@ for(const button of document.querySelectorAll('.refreshOne')){button.addEventLis
 rebuildDerivedState();
 fillSettings();
 renderMetrics();
+renderRosterLifecycle();
 renderAccounts(STATUS.accounts||[]);
 formatLocalTimes();
 applyLocale();

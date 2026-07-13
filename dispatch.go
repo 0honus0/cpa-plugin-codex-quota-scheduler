@@ -237,11 +237,49 @@ func handleManagementHandle(raw []byte) ([]byte, error) {
 	}
 	refresherMu.Lock()
 	rosterController := globalRosterController
+	refresher := globalRefresher
 	refresherMu.Unlock()
-	if rosterController != nil {
-		_, _ = rosterController.WakeForManagement(context.Background())
+	if isResourcePath(req.Path) || rosterController == nil {
+		return okEnvelope(HandleManagementRequest(globalState, req, time.Now()))
 	}
-	return okEnvelope(HandleManagementRequest(globalState, req, time.Now()))
+	active, _ := rosterController.WakeForManagement(context.Background())
+	now := time.Now()
+	lifecycle := ManagementLifecycleSnapshot{Roster: active, CredentialAmbiguous: managementCredentialAmbiguous(refresher, active, now)}
+	return okEnvelope(HandleManagementRequestWithLifecycle(globalState, req, now, lifecycle))
+}
+
+func managementCredentialAmbiguous(refresher *QuotaRefresher, active ActiveRoster, now time.Time) bool {
+	if refresher == nil || refresher.runtimeStore == nil {
+		return false
+	}
+	state, err := refresher.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		return true
+	}
+	for _, authID := range active.Instances {
+		binding, ok := state.Bindings[authID]
+		if !ok || binding.AuthID != authID || binding.Instance == 0 {
+			continue
+		}
+		chain, ok := state.CredentialChains[binding.Instance]
+		if !ok {
+			continue
+		}
+		if len(chain.Transitions) > 0 {
+			last := chain.Transitions[len(chain.Transitions)-1]
+			if last.Phase == TransitionPlanned || last.Phase == TransitionOutcomeUnknown {
+				observed := binding.Fingerprint.CompositeHash
+				if observed != last.Prev.CompositeHash && observed != last.Next.CompositeHash {
+					return true
+				}
+				continue
+			}
+		}
+		if ClassifyObservedCredentialAt(chain, binding.Fingerprint, now).Kind == CredentialAmbiguous {
+			return true
+		}
+	}
+	return false
 }
 
 func okEnvelope(v any) ([]byte, error) {

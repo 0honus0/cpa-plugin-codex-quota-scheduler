@@ -2,10 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/url"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 type rosterTestHost struct {
@@ -40,6 +46,109 @@ func (h *rosterTestHost) update(entries []RosterEntry, err error, gate chan stru
 }
 func (h *rosterTestHost) setGate(gate chan struct{}) { h.mu.Lock(); defer h.mu.Unlock(); h.gate = gate }
 func (h *rosterTestHost) setError(err error)         { h.mu.Lock(); defer h.mu.Unlock(); h.err = err }
+
+func TestManagementDispatchUsesImmutableRosterSnapshotWithoutGlobalHostLock(t *testing.T) { //inv:INV-01,INV-34 positive
+	now := time.Now()
+	priority := 9
+	gate := make(chan struct{})
+	host := &rosterTestHost{entries: []RosterEntry{{ID: "active", Provider: "codex", Priority: &priority}}, gate: gate}
+	controller := NewRosterController(RosterControllerOptions{Host: host})
+	store := NewPluginState(DefaultConfig())
+	store.UpsertQuota(weeklyAccount("active", priority, now.Add(24*time.Hour), false))
+	store.UpsertQuota(weeklyAccount("removed-cache", priority, now.Add(24*time.Hour), false))
+
+	refresherMu.Lock()
+	previousState, previousController := globalState, globalRosterController
+	globalState, globalRosterController = store, controller
+	refresherMu.Unlock()
+	t.Cleanup(func() {
+		refresherMu.Lock()
+		globalState, globalRosterController = previousState, previousController
+		refresherMu.Unlock()
+	})
+
+	req, _ := json.Marshal(pluginapi.ManagementRequest{Method: http.MethodGet, Path: managementBasePath + "/status", Query: url.Values{"format": []string{"json"}}})
+	done := make(chan []byte, 1)
+	go func() { raw, _ := handleManagementHandle(req); done <- raw }()
+	deadline := time.Now().Add(time.Second)
+	for host.callCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if host.callCount() == 0 {
+		t.Fatal("Management did not wake the roster controller")
+	}
+	lockAvailable := make(chan struct{})
+	go func() { refresherMu.Lock(); refresherMu.Unlock(); close(lockAvailable) }()
+	select {
+	case <-lockAvailable:
+	case <-time.After(time.Second):
+		t.Fatal("Management held the global refresher lock through host.auth.list")
+	}
+	close(gate)
+
+	var outer envelope
+	if err := json.Unmarshal(<-done, &outer); err != nil {
+		t.Fatal(err)
+	}
+	var response pluginapi.ManagementResponse
+	if err := json.Unmarshal(outer.Result, &response); err != nil {
+		t.Fatal(err)
+	}
+	var payload StatusPayload
+	if err := json.Unmarshal(response.Body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Accounts) != 1 || payload.Accounts[0].AuthID != "active" || payload.Roster.Capability != CapabilityA {
+		t.Fatalf("dispatch payload did not use authoritative snapshot: %#v", payload)
+	}
+
+	before := host.callCount()
+	resourceReq, _ := json.Marshal(pluginapi.ManagementRequest{Method: http.MethodGet, Path: "/v0/resource" + managementBasePath + "/status"})
+	if _, err := handleManagementHandle(resourceReq); err != nil {
+		t.Fatal(err)
+	}
+	if host.callCount() != before {
+		t.Fatal("Resource status triggered an authoritative roster host call")
+	}
+}
+
+func TestManagementCredentialAmbiguityReadsDurableChains(t *testing.T) { //inv:INV-23 negative
+	store := NewStateStore(filepath.Join(t.TempDir(), "runtime.json"), OSFileHooks(), nil)
+	state := NewPersistentState()
+	first := NewCredentialFingerprint("subject", "refresh-1", "meta")
+	second := NewCredentialFingerprint("subject", "refresh-2", "meta")
+	other := NewCredentialFingerprint("subject", "refresh-3", "meta")
+	state.Bindings["active"] = RuntimeBinding{AuthID: "active", Instance: 1, Fingerprint: first}
+	state.Bindings["removed"] = RuntimeBinding{AuthID: "removed", Instance: 2, Fingerprint: other}
+	state.CredentialChains[1] = TransitionChain{Cursor: first}
+	state.CredentialChains[2] = TransitionChain{Cursor: first, Transitions: []CredentialTransition{{Prev: first, Next: second, SaveSeq: 1, Phase: TransitionOutcomeUnknown, CreatedAt: time.Now()}}}
+	if err := store.WriteThrough(state); err != nil {
+		t.Fatal(err)
+	}
+	refresher := &QuotaRefresher{runtimeStore: store}
+	if managementCredentialAmbiguous(refresher, ActiveRoster{Instances: []string{"active"}}, time.Now()) {
+		t.Fatal("removed credential ambiguity leaked into the active roster")
+	}
+	if !managementCredentialAmbiguous(refresher, ActiveRoster{Instances: []string{"removed"}}, time.Now()) {
+		t.Fatal("active ambiguous reconciliation was not exposed")
+	}
+	state.Bindings["active"] = RuntimeBinding{AuthID: "active", Instance: 1, Fingerprint: second}
+	state.CredentialChains[1] = TransitionChain{Cursor: first, Transitions: []CredentialTransition{{Prev: first, Next: second, SaveSeq: 1, Phase: TransitionOutcomeUnknown, CreatedAt: time.Now()}}}
+	if err := store.WriteThrough(state); err != nil {
+		t.Fatal(err)
+	}
+	if managementCredentialAmbiguous(refresher, ActiveRoster{Instances: []string{"active"}}, time.Now()) {
+		t.Fatal("unresolved transition observed at next fingerprint is deterministically applied, not ambiguous")
+	}
+	state.Bindings["active"] = RuntimeBinding{AuthID: "active", Instance: 1, Fingerprint: second}
+	state.CredentialChains[1] = TransitionChain{Cursor: first, Transitions: []CredentialTransition{{Prev: first, Next: second, SaveSeq: 1, Phase: TransitionApplied, CreatedAt: time.Now().Add(-25 * time.Hour)}}}
+	if err := store.WriteThrough(state); err != nil {
+		t.Fatal(err)
+	}
+	if !managementCredentialAmbiguous(refresher, ActiveRoster{Instances: []string{"active"}}, time.Now()) {
+		t.Fatal("expired reachable credential generation was not exposed as ambiguous")
+	}
+}
 
 func TestSuiteRosterManagement(t *testing.T) {
 	//inv:INV-31 positive

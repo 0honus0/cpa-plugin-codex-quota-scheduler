@@ -177,6 +177,111 @@ func TestManagementRefreshAccountRejectsOutsideAdmission(t *testing.T) {
 	}
 }
 
+func TestManagementUsesActiveRosterOnly(t *testing.T) { //inv:INV-20,INV-34 positive
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	for _, account := range []AccountState{
+		weeklyAccount("active-dormant", 9, now.Add(24*time.Hour), false),
+		weeklyAccount("removed-cache", 9, now.Add(24*time.Hour), false),
+		weeklyAccount("lower-tier-cache", 1, now.Add(24*time.Hour), false),
+	} {
+		store.UpsertQuota(account)
+	}
+
+	lifecycle := ManagementLifecycleSnapshot{Roster: ActiveRoster{
+		Capability: CapabilityA, Confirmed: true, HighestPriority: 9,
+		Generation: 7, Instances: []string{"active-dormant"},
+		Health: RosterHealthy, BackgroundAllowed: true,
+	}}
+	resp := HandleManagementRequestWithLifecycle(store, pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/plugins/codex-quota-scheduler/status",
+		Query:  url.Values{"format": []string{"json"}},
+	}, now, lifecycle)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", resp.StatusCode, resp.Body)
+	}
+	var body StatusPayload
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Accounts) != 1 || body.Accounts[0].AuthID != "active-dormant" {
+		t.Fatalf("authoritative accounts = %#v", body.Accounts)
+	}
+	if body.Accounts[0].CPAPriority != 9 || body.RefreshState != "sleeping" {
+		t.Fatalf("dormant active-tier card = %#v, refresh=%q", body.Accounts[0], body.RefreshState)
+	}
+}
+
+func TestManagementExposesRosterLifecycle(t *testing.T) { //inv:INV-23,INV-35 positive
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	cases := []struct {
+		name      string
+		roster    ActiveRoster
+		ambiguous bool
+		check     func(t *testing.T, got RosterLifecyclePayload)
+	}{
+		{"healthy", ActiveRoster{Capability: CapabilityA, Confirmed: true, Health: RosterHealthy, BackgroundAllowed: true}, false, func(t *testing.T, got RosterLifecyclePayload) {
+			if got.Capability != CapabilityA || got.Health != RosterHealthy || !got.Confirmed || got.Degraded || got.FailClosed || got.WaitingRoster {
+				t.Fatalf("healthy lifecycle = %#v", got)
+			}
+		}},
+		{"degraded", ActiveRoster{Capability: CapabilityA, Confirmed: true, Health: RosterDegraded, DegradedSince: now.Add(-time.Minute), BackgroundAllowed: true}, false, func(t *testing.T, got RosterLifecyclePayload) {
+			if !got.Degraded || got.FailClosed || got.Warning == "" {
+				t.Fatalf("degraded lifecycle = %#v", got)
+			}
+		}},
+		{"fail-closed", ActiveRoster{Capability: CapabilityA, Confirmed: true, Health: RosterFailClosed}, false, func(t *testing.T, got RosterLifecyclePayload) {
+			if !got.FailClosed || got.Degraded || got.Warning == "" {
+				t.Fatalf("fail-closed lifecycle = %#v", got)
+			}
+		}},
+		{"waiting-provisional", ActiveRoster{Capability: CapabilityB, Provisional: true, Health: RosterWaiting, ConfirmedAt: now.Add(-time.Hour)}, false, func(t *testing.T, got RosterLifecyclePayload) {
+			if !got.Provisional || !got.WaitingRoster || !got.RiskOptionAvailable || got.RiskOptionEnabled || got.RiskWarning == "" {
+				t.Fatalf("waiting lifecycle = %#v", got)
+			}
+		}},
+		{"credential-ambiguous", ActiveRoster{Capability: CapabilityB, Provisional: true, Health: RosterWaiting, ConfirmedAt: now.Add(-time.Hour)}, true, func(t *testing.T, got RosterLifecyclePayload) {
+			if !got.CredentialAmbiguous || got.RiskOptionAvailable || got.Warning == "" {
+				t.Fatalf("credential ambiguous lifecycle = %#v", got)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := buildCurrentStatusPayloadWithLifecycle(store, now, ManagementLifecycleSnapshot{Roster: tc.roster, CredentialAmbiguous: tc.ambiguous})
+			tc.check(t, payload.Roster)
+		})
+	}
+
+	cfg := store.Config()
+	cfg.ProbeOnProvisionalRoster = true
+	store.ReplaceConfig(cfg)
+	payload := buildCurrentStatusPayloadWithLifecycle(store, now, ManagementLifecycleSnapshot{Roster: ActiveRoster{Capability: CapabilityB, Provisional: true, Health: RosterWaiting, ConfirmedAt: now.Add(-time.Hour)}})
+	if !payload.Roster.RiskOptionEnabled || !payload.Roster.RiskOptionAvailable || payload.Roster.RiskWarning == "" {
+		t.Fatalf("enabled provisional risk = %#v", payload.Roster)
+	}
+}
+
+func TestManagementRoundTripsProvisionalRiskOption(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ProbeOnProvisionalRoster = true
+	store := NewPluginState(cfg)
+	page := string(RenderStatusHTML(buildCurrentStatusPayloadWithLifecycle(store, time.Now(), ManagementLifecycleSnapshot{Roster: ActiveRoster{Capability: CapabilityB, Provisional: true, Health: RosterWaiting, ConfirmedAt: time.Now().Add(-time.Hour)}})))
+	for _, want := range []string{
+		`id="probeOnProvisionalRoster"`,
+		"document.getElementById('probeOnProvisionalRoster').checked=s.probe_on_provisional_roster===true",
+		"probe_on_provisional_roster:document.getElementById('probeOnProvisionalRoster').checked",
+		`id="rosterLifecycleWarning"`,
+		"renderRosterLifecycle",
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("status UI missing %q", want)
+		}
+	}
+}
+
 func TestStatusJSONOrdersAccountsBySchedulerOrder(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	store := NewPluginState(DefaultConfig())
