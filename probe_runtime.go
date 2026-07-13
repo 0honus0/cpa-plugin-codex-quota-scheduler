@@ -396,7 +396,7 @@ func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *
 			return probeReadResult{Quota: quota, Credentials: credentials}, err
 		}
 		fail := func(err error, sent bool) OperationResult {
-			if errors.Is(err, ErrCapabilityB) && r.runtimeRoster().Health == RosterFailClosed {
+			if r.runtimeRoster().Health == RosterFailClosed {
 				return OperationResult{Token: intent.Token, Err: err}
 			}
 			if status, ok := err.(quotaStatusError); ok && status.status == http.StatusUnauthorized {

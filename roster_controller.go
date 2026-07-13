@@ -44,7 +44,7 @@ type ActiveRoster struct {
 type RosterControllerOptions struct {
 	Host               HostAuthLister
 	Now                func() time.Time
-	Publish            func(context.Context, ActiveRoster) error
+	Publish            func(context.Context, ActiveRoster) (ActiveRoster, error)
 	Observe            func(ActiveRoster)
 	Cancel             func([]string)
 	Candidates         func() []string // deliberately never consulted for roster truth
@@ -57,7 +57,7 @@ type RosterController struct {
 	mu                 sync.Mutex
 	host               HostAuthLister
 	now                func() time.Time
-	publish            func(context.Context, ActiveRoster) error
+	publish            func(context.Context, ActiveRoster) (ActiveRoster, error)
 	observe            func(ActiveRoster)
 	cancel             func([]string)
 	current            ActiveRoster
@@ -185,7 +185,11 @@ func (c *RosterController) finishSync(ctx context.Context, entries []RosterEntry
 			next := ActiveRoster{Capability: CapabilityA, Confirmed: true, HighestPriority: priority, Generation: generation, LifecycleRevision: old.LifecycleRevision + 1, Instances: ids, Entries: filtered, ConfirmedAt: now, LastSyncAt: now, Health: RosterHealthy, BackgroundAllowed: true}
 			c.mu.Unlock()
 			if c.publish != nil {
-				syncErr = c.publish(ctx, cloneActiveRoster(next))
+				var committed ActiveRoster
+				committed, syncErr = c.publish(ctx, cloneActiveRoster(next))
+				if syncErr == nil && committed.Generation > next.Generation {
+					next.Generation = committed.Generation
+				}
 			}
 			c.mu.Lock()
 			if syncErr == nil {

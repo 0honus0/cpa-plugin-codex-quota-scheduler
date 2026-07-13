@@ -267,6 +267,40 @@ func TestActiveProbeLifecycleDenialPreservesRosterHold(t *testing.T) { //inv:INV
 	}
 }
 
+func TestActiveProbeParseFailureAfterFailClosedPreservesRosterHold(t *testing.T) { //inv:INV-03,INV-35
+	now := time.Date(2026, 7, 14, 8, 43, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
+	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)}}
+	r := newDueProbeRuntime(t, now, host)
+	b, _ := r.bindings.Lookup("a")
+	host.mu.Lock()
+	host.auth.JSON = json.RawMessage(`{"access_token":`)
+	host.getStarted = make(chan struct{})
+	host.releaseGet = make(chan struct{})
+	started, releaseGet := host.getStarted, host.releaseGet
+	host.mu.Unlock()
+	done := make(chan error, 1)
+	go func() { done <- r.RunProbeDueOnce(context.Background()) }()
+	<-started
+	r.ObserveRosterLifecycle(ActiveRoster{Capability: CapabilityA, Confirmed: true, Health: RosterFailClosed, Generation: 1, LifecycleRevision: 2, Instances: []string{"a"}})
+	close(releaseGet)
+	if err := <-done; err == nil {
+		t.Fatal("parse failure unexpectedly succeeded")
+	}
+	time.Sleep(20 * time.Millisecond)
+	w, ok := r.probeController.Window(b.Instance, ProbeWindowFiveHour)
+	if !ok || w.State != ProbeWaitingRoster || !w.Deadline.IsZero() {
+		t.Fatalf("parse failure escaped roster hold: %#v ok=%v", w, ok)
+	}
+	persisted, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := persisted.ProbeWindows[b.Instance][ProbeWindowFiveHour]; got.State != ProbeWaitingRoster || !got.Deadline.IsZero() {
+		t.Fatalf("persisted parse failure state=%#v", got)
+	}
+}
+
 func TestFailClosedRetriesProbeHoldPersistence(t *testing.T) { //inv:INV-19,INV-35
 	now := time.Date(2026, 7, 14, 8, 44, 0, 0, time.UTC)
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})

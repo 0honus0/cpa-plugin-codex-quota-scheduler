@@ -473,6 +473,96 @@ func TestBindingReconcileFailsBeforeHostReadWhenDurableStateUnavailable(t *testi
 	}
 }
 
+func TestBindingAuthIndexChangeAdvancesGenerationAndReobservesAcrossRestart(t *testing.T) { //inv:INV-03,INV-28
+	path := filepath.Join(t.TempDir(), "state.json")
+	instance := legacyAuthInstanceID("a")
+	host := &runtimeCredentialHost{current: map[AuthInstanceID]HostAuth{instance: {Name: "old.json", Fingerprint: fp("a", "r-old", "old-index")}}}
+	registry, err := NewBindingRegistry(NewStateStore(path, OSFileHooks(), nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldRoster := HostRosterSnapshot{Capability: CapabilityA, Generation: 5, Entries: []RosterEntry{{ID: "a", AuthIndex: "old-index", Provider: "codex", Priority: intPtr(7)}}}
+	result, err := registry.ReconcileRoster(context.Background(), oldRoster, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := result.Bindings["a"]
+	host.current[instance] = HostAuth{Name: "new.json", Fingerprint: fp("a", "r-new", "new-index")}
+	restarted, err := NewBindingRegistry(NewStateStore(path, OSFileHooks(), nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	newRoster := HostRosterSnapshot{Capability: CapabilityA, Generation: 1, Entries: []RosterEntry{{ID: "a", AuthIndex: "new-index", Provider: "codex", Priority: intPtr(7)}}}
+	result, err = restarted.ReconcileRoster(context.Background(), newRoster, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := result.Bindings["a"]
+	if got.Generation != old.Generation+1 || got.Admission != old.Admission+1 {
+		t.Fatalf("generation/admission=%d/%d want %d/%d", got.Generation, got.Admission, old.Generation+1, old.Admission+1)
+	}
+	if got.AuthIndex != "new-index" || got.AuthName != "new.json" || got.Fingerprint != host.current[instance].Fingerprint {
+		t.Fatalf("changed binding not reobserved: %#v", got)
+	}
+	if host.gets != 2 {
+		t.Fatalf("GetAuth calls=%d want initial + changed metadata", host.gets)
+	}
+}
+
+func TestAuthoritativeDurableGenerationSurvivesFailureObservation(t *testing.T) { //inv:INV-03,INV-21
+	now := time.Date(2026, 7, 14, 10, 0, 0, 0, time.UTC)
+	clock := now
+	legacyPath := filepath.Join(t.TempDir(), "state.json")
+	runtimePath := semanticStatePaths(legacyPath).Runtime
+	instance := legacyAuthInstanceID("a")
+	fingerprint := fp("acct", "refresh", "idx")
+	seed := NewStateStore(runtimePath, OSFileHooks(), nil)
+	if _, err := seed.Update(func(s *PersistentState) error {
+		s.TierGeneration = 9
+		s.AdmissionEpochs[instance] = 1
+		s.Bindings["a"] = RuntimeBinding{AuthID: "a", AuthIndex: "idx", AuthName: "a.json", Instance: instance, Admission: 1, Generation: 9, Login: 1, Token: 1, Fingerprint: fingerprint}
+		s.CredentialChains[instance] = TransitionChain{Cursor: fingerprint}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	host := &countingProductionHost{auth: map[string]pluginapi.HostAuthGetResponse{"idx": {AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","refresh_token":"refresh","account_id":"acct"}`)}}}
+	adapter := &rosterCredentialHost{host: host, roster: HostRosterSnapshot{Capability: CapabilityB}}
+	runtime, err := NewProductionQuotaRefresher(host, NewPluginState(DefaultConfig()), adapter, HostRosterSnapshot{Capability: CapabilityB}, legacyPath, func() time.Time { return clock })
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.bindings = runtime.bindings
+	defer runtime.coordinator.Close()
+	priority := 7
+	lister := &rosterTestHost{entries: []RosterEntry{{ID: "a", AuthIndex: "idx", Provider: "codex", Priority: &priority}}}
+	controller := NewRosterController(RosterControllerOptions{
+		Host: lister,
+		Now:  func() time.Time { return clock },
+		Publish: func(ctx context.Context, active ActiveRoster) (ActiveRoster, error) {
+			if err := runtime.PublishAuthoritativeRoster(ctx, hostRosterSnapshotFromActive(active)); err != nil {
+				return active, err
+			}
+			active.Generation = runtime.runtimeRoster().Generation
+			return active, nil
+		},
+		Observe: runtime.ObserveRosterLifecycle,
+	})
+	confirmed, err := controller.Startup(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmed.Generation != 9 || runtime.runtimeRoster().Generation != 9 {
+		t.Fatalf("confirmed controller/runtime generation=%d/%d", confirmed.Generation, runtime.runtimeRoster().Generation)
+	}
+	lister.setError(errors.New("offline"))
+	clock = clock.Add(rosterActiveTTL)
+	degraded, _ := controller.WakeForManagement(context.Background())
+	if degraded.Generation != 9 || runtime.runtimeRoster().Generation != 9 || degraded.Health != RosterDegraded {
+		t.Fatalf("degraded controller/runtime=%#v / %#v", degraded, runtime.runtimeRoster())
+	}
+}
+
 func TestMarkAuthBlockedPropagatesFirstWriteAndBackupFailures(t *testing.T) {
 	for _, op := range []string{"backup-write", "backup-fsync"} {
 		t.Run(op, func(t *testing.T) {

@@ -136,7 +136,8 @@ func (r *BindingRegistry) ReconcileRoster(ctx context.Context, roster HostRoster
 	rosterChanged := len(r.bindings) != len(ids)
 	if !rosterChanged {
 		for _, id := range ids {
-			if _, found := r.bindings[id]; !found {
+			existing, found := r.bindings[id]
+			if !found || existing.AuthIndex != entries[id].AuthIndex {
 				rosterChanged = true
 				break
 			}
@@ -163,6 +164,21 @@ func (r *BindingRegistry) ReconcileRoster(ctx context.Context, roster HostRoster
 	for _, id := range ids {
 		entry := entries[id]
 		if existing, found := r.bindings[id]; found && existing.Instance != 0 {
+			if existing.AuthIndex != entry.AuthIndex {
+				observed, err := host.GetAuth(ctx, existing.Instance)
+				if err != nil {
+					return RosterReconcileResult{}, err
+				}
+				admission := durable.AdmissionEpochs[existing.Instance]
+				if admission < existing.Admission {
+					admission = existing.Admission
+				}
+				admission++
+				existing.Admission = admission
+				existing.AuthName = observed.Name
+				existing.Fingerprint = observed.Fingerprint
+				durable.AdmissionEpochs[existing.Instance] = admission
+			}
 			existing.AuthIndex = entry.AuthIndex
 			existing.Generation = AuthBindingEpoch(generation)
 			next[id] = existing

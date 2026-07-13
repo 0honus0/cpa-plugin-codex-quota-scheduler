@@ -57,7 +57,10 @@ func TestSuiteRosterManagement(t *testing.T) {
 	var published []ActiveRoster
 	c := NewRosterController(RosterControllerOptions{
 		Host: host, Now: func() time.Time { return clock },
-		Publish: func(_ context.Context, roster ActiveRoster) error { published = append(published, roster); return nil },
+		Publish: func(_ context.Context, roster ActiveRoster) (ActiveRoster, error) {
+			published = append(published, roster)
+			return roster, nil
+		},
 	})
 
 	t.Run("startup, ttl, idle, probe and management wakes", func(t *testing.T) {
