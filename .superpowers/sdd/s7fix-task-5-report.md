@@ -6,7 +6,7 @@
 - Missing invariant directions are sorted before failure. Aggregation-only file comments are ignored.
 - Replaced `uncovered: []` with the 28 frozen §12 scenario rows: A01-A10, B01-B04, C01-C06, D01-D02, and E01-E06.
 - Each §12 row carries one or more existing behavioral owner tests. Validation rejects missing rows, unknown rows, duplicates, missing descriptions, empty owners, non-`Test` owners, and nonexistent owners.
-- The S7 PowerShell gate validates traceability/coverage, K-point registries, pick-path I/O, and sensitive-state checks, then derives and runs the exact §12 owner set (54 distinct tests) from JSON.
+- The S7 PowerShell gate validates traceability/coverage, K-point registries, pick-path I/O, and sensitive-state checks, then derives and runs the exact §12 owner set (48 distinct tests) from JSON.
 - Dedicated behavioral owners were added where existing coverage did not execute the frozen scenario.
 
 ## Frozen §12 row interpretation
@@ -55,7 +55,7 @@ A second RED fixture used `func TestWrongSignature()` as an owner. It initially 
 - `go test ./... -run TestSuiteRosterManagement -count=1` — pass.
 - `go test ./... -run TestInvariantTraceability -count=1` — pass.
 - `go test ./... -run '^TestMockCoverage$' -count=1` — pass.
-- `./scripts/check_refactor_gates.ps1 -Stage S7` — pass; 54 distinct exact §12 owner tests executed with roster, traceability, K-point, pick-I/O, and sensitive-state gates.
+- `./scripts/check_refactor_gates.ps1 -Stage S7` — pass; 48 distinct exact §12 owner tests executed with roster, traceability, K-point, pick-I/O, and sensitive-state gates.
 - `go test ./... -run 'TestMockGroup(A|B|C|D|E)' -count=1` — pass.
 - `go test -race ./...` — pass; root package 14.313s.
 - `go vet ./...` — pass.
