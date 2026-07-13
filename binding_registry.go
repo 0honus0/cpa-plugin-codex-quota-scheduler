@@ -178,6 +178,7 @@ func (r *BindingRegistry) ReconcileRoster(ctx context.Context, roster HostRoster
 				existing.AuthName = observed.Name
 				existing.Fingerprint = observed.Fingerprint
 				durable.AdmissionEpochs[existing.Instance] = admission
+				chains[existing.Instance] = TransitionChain{Cursor: observed.Fingerprint}
 			}
 			existing.AuthIndex = entry.AuthIndex
 			existing.Generation = AuthBindingEpoch(generation)
@@ -227,9 +228,7 @@ func (r *BindingRegistry) ReconcileRoster(ctx context.Context, roster HostRoster
 			s.Bindings[id] = binding
 		}
 		for instance, chain := range chains {
-			if _, exists := s.CredentialChains[instance]; !exists {
-				s.CredentialChains[instance] = chain
-			}
+			s.CredentialChains[instance] = chain
 		}
 		return nil
 	})

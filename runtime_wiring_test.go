@@ -452,6 +452,58 @@ func TestBindingAdmissionEpochMonotonicAcrossDeleteReaddAndRestart(t *testing.T)
 	}
 }
 
+func TestBindingChangedFingerprintReaddResetsCredentialChainAcrossRestart(t *testing.T) { //inv:INV-28,INV-40
+	path := filepath.Join(t.TempDir(), "state.json")
+	keepInstance := legacyAuthInstanceID("keep")
+	targetInstance := legacyAuthInstanceID("target")
+	oldFingerprint := fp("target", "old-refresh", "target-index")
+	newFingerprint := fp("target", "new-refresh", "target-index")
+	host := &runtimeCredentialHost{current: map[AuthInstanceID]HostAuth{
+		keepInstance:   {Name: "keep.json", Fingerprint: fp("keep", "rk", "keep-index")},
+		targetInstance: {Name: "target.json", Fingerprint: oldFingerprint},
+	}}
+	registry, err := NewBindingRegistry(NewStateStore(path, OSFileHooks(), nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	withTarget := HostRosterSnapshot{Capability: CapabilityA, Generation: 1, Entries: []RosterEntry{{ID: "keep", AuthIndex: "keep-index", Provider: "codex", Priority: intPtr(7)}, {ID: "target", AuthIndex: "target-index", Provider: "codex", Priority: intPtr(7)}}}
+	withoutTarget := HostRosterSnapshot{Capability: CapabilityA, Generation: 2, Entries: withTarget.Entries[:1]}
+	if _, err = registry.ReconcileRoster(context.Background(), withTarget, host); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = registry.store.Update(func(s *PersistentState) error {
+		chain := s.CredentialChains[targetInstance]
+		chain.Transitions = []CredentialTransition{{Prev: oldFingerprint, Next: fp("target", "intermediate", "target-index"), SaveSeq: 1, Phase: TransitionApplied}}
+		s.CredentialChains[targetInstance] = chain
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = registry.ReconcileRoster(context.Background(), withoutTarget, host); err != nil {
+		t.Fatal(err)
+	}
+	host.current[targetInstance] = HostAuth{Name: "target-new.json", Fingerprint: newFingerprint}
+	restarted, err := NewBindingRegistry(NewStateStore(path, OSFileHooks(), nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := restarted.ReconcileRoster(context.Background(), withTarget, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Bindings["target"].Admission != 2 || result.Bindings["target"].Fingerprint != newFingerprint {
+		t.Fatalf("readded binding=%#v", result.Bindings["target"])
+	}
+	persisted, err := restarted.store.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain := persisted.CredentialChains[targetInstance]
+	if chain.Cursor != newFingerprint || len(chain.Transitions) != 0 {
+		t.Fatalf("readded chain not reset: %#v", chain)
+	}
+}
+
 func TestBindingReconcileFailsBeforeHostReadWhenDurableStateUnavailable(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := NewStateStore(path, OSFileHooks(), nil)
@@ -506,6 +558,14 @@ func TestBindingAuthIndexChangeAdvancesGenerationAndReobservesAcrossRestart(t *t
 	}
 	if host.gets != 2 {
 		t.Fatalf("GetAuth calls=%d want initial + changed metadata", host.gets)
+	}
+	persisted, err := restarted.store.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain := persisted.CredentialChains[instance]
+	if chain.Cursor != host.current[instance].Fingerprint || len(chain.Transitions) != 0 {
+		t.Fatalf("AuthIndex replacement chain not reset: %#v", chain)
 	}
 }
 
