@@ -234,6 +234,73 @@ func TestFailClosedHoldPreservesSentAttemptOnlyForItsWindows(t *testing.T) { //i
 	}
 }
 
+func TestActiveProbeLifecycleDenialPreservesRosterHold(t *testing.T) { //inv:INV-03,INV-35
+	now := time.Date(2026, 7, 14, 8, 42, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
+	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)}}
+	r := newDueProbeRuntime(t, now, host)
+	b, _ := r.bindings.Lookup("a")
+	host.mu.Lock()
+	host.getStarted = make(chan struct{})
+	host.releaseGet = make(chan struct{})
+	started, releaseGet := host.getStarted, host.releaseGet
+	host.mu.Unlock()
+	done := make(chan error, 1)
+	go func() { done <- r.RunProbeDueOnce(context.Background()) }()
+	<-started
+	r.ObserveRosterLifecycle(ActiveRoster{Capability: CapabilityA, Confirmed: true, Health: RosterFailClosed, Generation: 1, LifecycleRevision: 2, Instances: []string{"a"}})
+	close(releaseGet)
+	if err := <-done; err == nil {
+		t.Fatal("active Probe unexpectedly succeeded after FailClosed")
+	}
+	time.Sleep(20 * time.Millisecond)
+	w, ok := r.probeController.Window(b.Instance, ProbeWindowFiveHour)
+	if !ok || w.State != ProbeWaitingRoster || !w.Deadline.IsZero() {
+		t.Fatalf("lifecycle-denied Probe escaped roster hold: %#v ok=%v", w, ok)
+	}
+	persisted, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := persisted.ProbeWindows[b.Instance][ProbeWindowFiveHour]; got.State != ProbeWaitingRoster || !got.Deadline.IsZero() {
+		t.Fatalf("persisted lifecycle-denied state=%#v", got)
+	}
+}
+
+func TestFailClosedRetriesProbeHoldPersistence(t *testing.T) { //inv:INV-19,INV-35
+	now := time.Date(2026, 7, 14, 8, 44, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
+	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)}}
+	r := newDueProbeRuntime(t, now, host)
+	b, _ := r.bindings.Lookup("a")
+	fail := true
+	r.runtimeStore.hooks.Fail = func(op string) error {
+		if fail && op == "backup-write" {
+			return errors.New("hold persistence failed")
+		}
+		return nil
+	}
+	r.ObserveRosterLifecycle(ActiveRoster{Capability: CapabilityA, Confirmed: true, Health: RosterFailClosed, Generation: 1, LifecycleRevision: 2, Instances: []string{"a"}})
+	persisted, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.ProbeWindows[b.Instance][ProbeWindowFiveHour].State == ProbeWaitingRoster {
+		t.Fatal("injected failure unexpectedly persisted roster hold")
+	}
+	fail = false
+	if err = r.RunProbeDueOnce(context.Background()); !errors.Is(err, ErrCapabilityB) {
+		t.Fatalf("retry path err=%v", err)
+	}
+	persisted, err = r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := persisted.ProbeWindows[b.Instance][ProbeWindowFiveHour]; got.State != ProbeWaitingRoster || !got.Deadline.IsZero() {
+		t.Fatalf("retried hold not durable: %#v", got)
+	}
+}
+
 func TestRemovedProbeLateGetDoesNotRecreateState(t *testing.T) { //inv:INV-03,INV-20
 	now := time.Date(2026, 7, 14, 8, 45, 0, 0, time.UTC)
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})

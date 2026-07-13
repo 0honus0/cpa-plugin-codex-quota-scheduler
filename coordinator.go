@@ -566,9 +566,6 @@ func (c *Coordinator) loop() {
 		case raw := <-c.commands:
 			switch cmd := raw.(type) {
 			case submitCommand:
-				if cmd.intent.Generation > instanceGeneration[cmd.intent.Instance] {
-					instanceGeneration[cmd.intent.Instance] = cmd.intent.Generation
-				}
 				nonce := uint64(0)
 				if cmd.intent.Class == OperationProbeSend {
 					nonce = c.typedNonce.Add(1)
@@ -579,11 +576,14 @@ func (c *Coordinator) loop() {
 					continue
 				}
 				f := &futureState{done: make(chan struct{})}
-				cancelledGeneration, cancelled := cancelledThrough[cmd.intent.Instance]
-				if !accepting || (cancelled && cmd.intent.Generation <= cancelledGeneration) || !formalSource(cmd.intent.Source) || (cmd.intent.Source == LegacyEnvelopeSource && cmd.intent.Class != OperationLegacyRefresh) {
+				_, cancelled := cancelledThrough[cmd.intent.Instance]
+				if !accepting || cancelled || !formalSource(cmd.intent.Source) || (cmd.intent.Source == LegacyEnvelopeSource && cmd.intent.Class != OperationLegacyRefresh) {
 					completeFuture(f, OperationResult{Err: errors.New("legacy coordinator is draining"), Disposition: ResultCancelled})
 					cmd.reply <- Future[OperationResult]{f}
 					continue
+				}
+				if cmd.intent.Generation > instanceGeneration[cmd.intent.Instance] {
+					instanceGeneration[cmd.intent.Instance] = cmd.intent.Generation
 				}
 				job := &coordinatorJob{key: key, intent: cmd.intent, future: f}
 				inflight[key] = job

@@ -33,8 +33,9 @@ type BindingRegistry struct {
 }
 
 type RosterReconcileResult struct {
-	Bindings map[string]RuntimeBinding
-	Removed  []RuntimeBinding
+	Bindings   map[string]RuntimeBinding
+	Removed    []RuntimeBinding
+	Generation TierGeneration
 }
 
 func NewBindingRegistry(store *StateStore) (*BindingRegistry, error) {
@@ -115,20 +116,55 @@ func (r *BindingRegistry) ReconcileRoster(ctx context.Context, roster HostRoster
 			}
 		}
 	}
-	generation := AuthBindingEpoch(roster.Generation)
-	if generation == 0 {
-		generation = 1
-	}
-
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	durable, err := r.store.PersistentSnapshot()
+	if err != nil {
+		return RosterReconcileResult{}, err
+	}
+	if durable.AdmissionEpochs == nil {
+		durable.AdmissionEpochs = map[AuthInstanceID]InstanceAdmissionEpoch{}
+	}
+	for _, binding := range durable.Bindings {
+		if binding.Admission > durable.AdmissionEpochs[binding.Instance] {
+			durable.AdmissionEpochs[binding.Instance] = binding.Admission
+		}
+		if TierGeneration(binding.Generation) > durable.TierGeneration {
+			durable.TierGeneration = TierGeneration(binding.Generation)
+		}
+	}
+	rosterChanged := len(r.bindings) != len(ids)
+	if !rosterChanged {
+		for _, id := range ids {
+			if _, found := r.bindings[id]; !found {
+				rosterChanged = true
+				break
+			}
+		}
+	}
+	incomingGeneration := TierGeneration(roster.Generation)
+	generation := durable.TierGeneration
+	if generation == 0 {
+		generation = incomingGeneration
+		if generation == 0 {
+			generation = 1
+		}
+	} else if rosterChanged {
+		if incomingGeneration > generation {
+			generation = incomingGeneration
+		} else {
+			generation++
+		}
+	} else if incomingGeneration > generation {
+		generation = incomingGeneration
+	}
 	next := make(map[string]RuntimeBinding, len(ids))
 	chains := map[AuthInstanceID]TransitionChain{}
 	for _, id := range ids {
 		entry := entries[id]
 		if existing, found := r.bindings[id]; found && existing.Instance != 0 {
 			existing.AuthIndex = entry.AuthIndex
-			existing.Generation = generation
+			existing.Generation = AuthBindingEpoch(generation)
 			next[id] = existing
 			continue
 		}
@@ -138,13 +174,18 @@ func (r *BindingRegistry) ReconcileRoster(ctx context.Context, roster HostRoster
 			return RosterReconcileResult{}, err
 		}
 		blocked := r.bindings[id].AuthBlocked
-		admission := InstanceAdmissionEpoch(1)
-		if state, err := r.store.PersistentSnapshot(); err == nil {
-			if _, seen := state.CredentialChains[instance]; seen {
-				admission++
+		admission := durable.AdmissionEpochs[instance]
+		if admission == 0 {
+			if _, seen := durable.CredentialChains[instance]; seen {
+				admission = 2
+			} else {
+				admission = 1
 			}
+		} else {
+			admission++
 		}
-		next[id] = RuntimeBinding{AuthID: id, AuthIndex: entry.AuthIndex, AuthName: observed.Name, Instance: instance, Admission: admission, Generation: generation, Login: 1, Token: 1, Fingerprint: observed.Fingerprint, AuthBlocked: blocked}
+		next[id] = RuntimeBinding{AuthID: id, AuthIndex: entry.AuthIndex, AuthName: observed.Name, Instance: instance, Admission: admission, Generation: AuthBindingEpoch(generation), Login: 1, Token: 1, Fingerprint: observed.Fingerprint, AuthBlocked: blocked}
+		durable.AdmissionEpochs[instance] = admission
 		chains[instance] = TransitionChain{Cursor: observed.Fingerprint}
 	}
 	removed := make([]RuntimeBinding, 0)
@@ -154,6 +195,15 @@ func (r *BindingRegistry) ReconcileRoster(ctx context.Context, roster HostRoster
 		}
 	}
 	committed, err := r.store.UpdateMirrored(func(s *PersistentState) error {
+		s.TierGeneration = generation
+		if s.AdmissionEpochs == nil {
+			s.AdmissionEpochs = map[AuthInstanceID]InstanceAdmissionEpoch{}
+		}
+		for instance, admission := range durable.AdmissionEpochs {
+			if admission > s.AdmissionEpochs[instance] {
+				s.AdmissionEpochs[instance] = admission
+			}
+		}
 		for id := range s.Bindings {
 			delete(s.Bindings, id)
 		}
@@ -175,7 +225,7 @@ func (r *BindingRegistry) ReconcileRoster(ctx context.Context, roster HostRoster
 	for id, binding := range r.bindings {
 		out[id] = binding
 	}
-	return RosterReconcileResult{Bindings: out, Removed: removed}, nil
+	return RosterReconcileResult{Bindings: out, Removed: removed, Generation: generation}, nil
 }
 
 // ObserveAuthoritative performs the INV-33 read-only genesis bootstrap. It

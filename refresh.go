@@ -76,6 +76,9 @@ type QuotaRefresher struct {
 	probeController   *ProbeController
 	probeWAL          *ProbeWAL
 	probeFence        *FenceAllocator
+	probeHoldMu       sync.Mutex
+	probeHoldPending  bool
+	probeHoldErr      error
 	fenceMu           sync.Mutex
 	nextFence         uint64
 	txnIntent         *Intent
@@ -141,7 +144,7 @@ func (r *QuotaRefresher) ObserveRosterLifecycle(active ActiveRoster) {
 	owner.roster = next
 	owner.rosterMu.Unlock()
 	if next.Health == RosterFailClosed {
-		_ = owner.holdProbeForRoster()
+		_ = owner.persistProbeRosterHold()
 	}
 	owner.mu.Lock()
 	requested := owner.startRequested
@@ -180,6 +183,9 @@ func (r *QuotaRefresher) PublishAuthoritativeRoster(ctx context.Context, roster 
 		return errors.New("runtime wiring unavailable")
 	}
 	roster = normalizeHostRosterLifecycle(roster)
+	if err := r.retryProbeRosterHold(); err != nil {
+		return err
+	}
 	_, ids, ok := HighestCodexTier(roster.Entries)
 	if roster.Capability != CapabilityA || !ok {
 		r.rosterMu.Lock()
@@ -206,6 +212,7 @@ func (r *QuotaRefresher) PublishAuthoritativeRoster(ctx context.Context, roster 
 	if err != nil {
 		return err
 	}
+	filtered.Generation = uint64(reconciled.Generation)
 	activeGenerations := make(map[AuthInstanceID]TierGeneration, len(reconciled.Bindings))
 	for _, binding := range reconciled.Bindings {
 		activeGenerations[binding.Instance] = TierGeneration(binding.Generation)

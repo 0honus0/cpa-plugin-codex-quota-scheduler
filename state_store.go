@@ -17,6 +17,8 @@ type PersistentState struct {
 	SchemaVersion    int                                                `json:"schema_version"`
 	ReservedCeiling  uint64                                             `json:"reserved_ceiling"`
 	NextSaveSeq      uint64                                             `json:"next_save_seq"`
+	TierGeneration   TierGeneration                                     `json:"tier_generation,omitempty"`
+	AdmissionEpochs  map[AuthInstanceID]InstanceAdmissionEpoch          `json:"admission_epochs,omitempty"`
 	CredentialChains map[AuthInstanceID]TransitionChain                 `json:"credential_chains,omitempty"`
 	FenceUnsafe      bool                                               `json:"fence_unsafe,omitempty"`
 	Bindings         map[string]RuntimeBinding                          `json:"bindings,omitempty"`
@@ -26,13 +28,16 @@ type PersistentState struct {
 }
 
 func NewPersistentState() PersistentState {
-	return PersistentState{SchemaVersion: CurrentStateSchema, CredentialChains: map[AuthInstanceID]TransitionChain{}, Bindings: map[string]RuntimeBinding{}, ProbeAttempts: map[AuthInstanceID]ProbeAttemptSeam{}, ProbeWindows: map[AuthInstanceID]map[ProbeWindowKind]ProbeWindow{}}
+	return PersistentState{SchemaVersion: CurrentStateSchema, AdmissionEpochs: map[AuthInstanceID]InstanceAdmissionEpoch{}, CredentialChains: map[AuthInstanceID]TransitionChain{}, Bindings: map[string]RuntimeBinding{}, ProbeAttempts: map[AuthInstanceID]ProbeAttemptSeam{}, ProbeWindows: map[AuthInstanceID]map[ProbeWindowKind]ProbeWindow{}}
 }
 func clonePersistentState(s PersistentState) PersistentState {
 	raw, _ := json.Marshal(s)
 	var out PersistentState
 	_ = json.Unmarshal(raw, &out)
 	out.FenceUnsafe = s.FenceUnsafe
+	if out.AdmissionEpochs == nil {
+		out.AdmissionEpochs = map[AuthInstanceID]InstanceAdmissionEpoch{}
+	}
 	if out.CredentialChains == nil {
 		out.CredentialChains = map[AuthInstanceID]TransitionChain{}
 	}
@@ -160,6 +165,9 @@ func (s *StateStore) loadLocked() (PersistentState, RecoveryReport, error) {
 	if state.CredentialChains == nil {
 		state.CredentialChains = map[AuthInstanceID]TransitionChain{}
 	}
+	if state.AdmissionEpochs == nil {
+		state.AdmissionEpochs = map[AuthInstanceID]InstanceAdmissionEpoch{}
+	}
 	if state.Bindings == nil {
 		state.Bindings = map[string]RuntimeBinding{}
 	}
@@ -272,6 +280,9 @@ func (s *StateStore) writeLockedMode(state PersistentState, mirrorBackup bool) e
 	state.SchemaVersion = CurrentStateSchema
 	if state.CredentialChains == nil {
 		state.CredentialChains = map[AuthInstanceID]TransitionChain{}
+	}
+	if state.AdmissionEpochs == nil {
+		state.AdmissionEpochs = map[AuthInstanceID]InstanceAdmissionEpoch{}
 	}
 	if state.Bindings == nil {
 		state.Bindings = map[string]RuntimeBinding{}

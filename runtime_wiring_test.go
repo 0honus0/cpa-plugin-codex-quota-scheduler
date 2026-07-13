@@ -378,6 +378,101 @@ func TestBindingGenesisFailsClosedForCapabilityBAndAuthBlocked(t *testing.T) { /
 	}
 }
 
+func TestBindingRosterGenerationDoesNotRegressAcrossRestart(t *testing.T) { //inv:INV-03,INV-20
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := NewStateStore(path, OSFileHooks(), nil)
+	host := &runtimeCredentialHost{current: map[AuthInstanceID]HostAuth{legacyAuthInstanceID("a"): {Name: "a.json", Fingerprint: fp("a", "ra", "ma")}, legacyAuthInstanceID("b"): {Name: "b.json", Fingerprint: fp("b", "rb", "mb")}}}
+	registry, err := NewBindingRegistry(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := HostRosterSnapshot{Capability: CapabilityA, Generation: 9, Entries: []RosterEntry{{ID: "a", AuthIndex: "a", Provider: "codex", Priority: intPtr(7)}}}
+	if _, err = registry.ReconcileRoster(context.Background(), first, host); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := NewBindingRegistry(NewStateStore(path, OSFileHooks(), nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sameAfterRestart := HostRosterSnapshot{Capability: CapabilityA, Generation: 1, Entries: first.Entries}
+	result, err := restarted.ReconcileRoster(context.Background(), sameAfterRestart, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := result.Bindings["a"].Generation; got != 9 {
+		t.Fatalf("durable generation regressed to %d", got)
+	}
+	changed := HostRosterSnapshot{Capability: CapabilityA, Generation: 2, Entries: []RosterEntry{{ID: "a", AuthIndex: "a", Provider: "codex", Priority: intPtr(7)}, {ID: "b", AuthIndex: "b", Provider: "codex", Priority: intPtr(7)}}}
+	result, err = restarted.ReconcileRoster(context.Background(), changed, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Bindings["a"].Generation != 10 || result.Bindings["b"].Generation != 10 {
+		t.Fatalf("changed generations=%d/%d", result.Bindings["a"].Generation, result.Bindings["b"].Generation)
+	}
+}
+
+func TestBindingAdmissionEpochMonotonicAcrossDeleteReaddAndRestart(t *testing.T) { //inv:INV-28
+	path := filepath.Join(t.TempDir(), "state.json")
+	host := &runtimeCredentialHost{current: map[AuthInstanceID]HostAuth{
+		legacyAuthInstanceID("keep"):   {Name: "keep.json", Fingerprint: fp("keep", "rk", "mk")},
+		legacyAuthInstanceID("target"): {Name: "target.json", Fingerprint: fp("target", "rt", "mt")},
+	}}
+	registry, err := NewBindingRegistry(NewStateStore(path, OSFileHooks(), nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	withTarget := func(g uint64) HostRosterSnapshot {
+		return HostRosterSnapshot{Capability: CapabilityA, Generation: g, Entries: []RosterEntry{{ID: "keep", AuthIndex: "keep", Provider: "codex", Priority: intPtr(7)}, {ID: "target", AuthIndex: "target", Provider: "codex", Priority: intPtr(7)}}}
+	}
+	withoutTarget := func(g uint64) HostRosterSnapshot {
+		return HostRosterSnapshot{Capability: CapabilityA, Generation: g, Entries: []RosterEntry{{ID: "keep", AuthIndex: "keep", Provider: "codex", Priority: intPtr(7)}}}
+	}
+	result, err := registry.ReconcileRoster(context.Background(), withTarget(1), host)
+	if err != nil || result.Bindings["target"].Admission != 1 {
+		t.Fatalf("first admission=%d err=%v", result.Bindings["target"].Admission, err)
+	}
+	if _, err = registry.ReconcileRoster(context.Background(), withoutTarget(2), host); err != nil {
+		t.Fatal(err)
+	}
+	result, err = registry.ReconcileRoster(context.Background(), withTarget(3), host)
+	if err != nil || result.Bindings["target"].Admission != 2 {
+		t.Fatalf("second admission=%d err=%v", result.Bindings["target"].Admission, err)
+	}
+	if _, err = registry.ReconcileRoster(context.Background(), withoutTarget(4), host); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := NewBindingRegistry(NewStateStore(path, OSFileHooks(), nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err = restarted.ReconcileRoster(context.Background(), withTarget(1), host)
+	if err != nil || result.Bindings["target"].Admission != 3 {
+		t.Fatalf("third admission after restart=%d err=%v", result.Bindings["target"].Admission, err)
+	}
+}
+
+func TestBindingReconcileFailsBeforeHostReadWhenDurableStateUnavailable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := NewStateStore(path, OSFileHooks(), nil)
+	registry, err := NewBindingRegistry(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	store.loaded = false
+	store.hooks.ReadFile = func(string) ([]byte, error) { return nil, errors.New("durable read failed") }
+	store.mu.Unlock()
+	host := &runtimeCredentialHost{current: map[AuthInstanceID]HostAuth{legacyAuthInstanceID("a"): {Name: "a.json", Fingerprint: fp("a", "r", "m")}}}
+	roster := HostRosterSnapshot{Capability: CapabilityA, Generation: 1, Entries: []RosterEntry{{ID: "a", AuthIndex: "a", Provider: "codex", Priority: intPtr(7)}}}
+	if _, err = registry.ReconcileRoster(context.Background(), roster, host); err == nil {
+		t.Fatal("durable read failure was ignored")
+	}
+	if host.gets != 0 {
+		t.Fatalf("host GetAuth ran before durable state was available: %d", host.gets)
+	}
+}
+
 func TestMarkAuthBlockedPropagatesFirstWriteAndBackupFailures(t *testing.T) {
 	for _, op := range []string{"backup-write", "backup-fsync"} {
 		t.Run(op, func(t *testing.T) {

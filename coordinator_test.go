@@ -186,6 +186,29 @@ func TestCancelInstancesDoesNotDeadlockTypedSubmission(t *testing.T) {
 	close(release)
 }
 
+func TestCancelledInstanceRejectsHigherGenerationUntilAuthoritativeActivation(t *testing.T) { //inv:INV-03,INV-20
+	var starts int
+	c := NewCoordinator(CoordinatorOptions{Execute: func(_ context.Context, intent Intent, _ *HeldLease) OperationResult {
+		starts++
+		return OperationResult{Token: intent.Token}
+	}})
+	defer c.Close()
+	initial := c.Submit(Intent{Instance: 61, Generation: 3, Class: OperationQuotaRead, Source: SourceSchedulerInterval, Token: ExecutionToken{Instance: 61, Tier: 3}}).Await(context.Background())
+	if initial.Disposition != ResultApplied {
+		t.Fatalf("initial disposition=%q", initial.Disposition)
+	}
+	c.CancelInstances([]AuthInstanceID{61})
+	bypass := c.Submit(Intent{Instance: 61, Generation: 99, Class: OperationQuotaRead, Source: SourceSchedulerInterval, Token: ExecutionToken{Instance: 61, Tier: 99}}).Await(context.Background())
+	if bypass.Disposition != ResultCancelled || starts != 1 {
+		t.Fatalf("higher-generation bypass disposition=%q starts=%d", bypass.Disposition, starts)
+	}
+	c.activateInstances(map[AuthInstanceID]TierGeneration{61: 99})
+	reactivated := c.Submit(Intent{Instance: 61, Generation: 99, Class: OperationQuotaRead, Source: SourceSchedulerInterval, Token: ExecutionToken{Instance: 61, Tier: 99}}).Await(context.Background())
+	if reactivated.Disposition != ResultApplied || starts != 2 {
+		t.Fatalf("reactivated disposition=%q starts=%d", reactivated.Disposition, starts)
+	}
+}
+
 func TestMockGroupECoordinatorInterleavings(t *testing.T) { TestSuiteCoordinator(t) }
 
 func TestCoordinatorNonCooperativeExpiryReleasesLease(t *testing.T) {

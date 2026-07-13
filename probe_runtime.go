@@ -153,6 +153,25 @@ func (r *QuotaRefresher) holdProbeForRoster() error {
 	return err
 }
 
+func (r *QuotaRefresher) persistProbeRosterHold() error {
+	r.probeHoldMu.Lock()
+	defer r.probeHoldMu.Unlock()
+	err := r.holdProbeForRoster()
+	r.probeHoldPending = err != nil
+	r.probeHoldErr = err
+	return err
+}
+
+func (r *QuotaRefresher) retryProbeRosterHold() error {
+	r.probeHoldMu.Lock()
+	pending := r.probeHoldPending
+	r.probeHoldMu.Unlock()
+	if !pending {
+		return nil
+	}
+	return r.persistProbeRosterHold()
+}
+
 func (r *QuotaRefresher) recoverProbeFromRoster(bindings map[string]RuntimeBinding) error {
 	if r.runtimeStore == nil || r.probeController == nil {
 		return nil
@@ -186,6 +205,9 @@ func activeProbeBindings(roster HostRosterSnapshot, bindings map[string]RuntimeB
 }
 
 func (r *QuotaRefresher) RunProbeDueOnce(ctx context.Context) error {
+	if err := r.retryProbeRosterHold(); err != nil {
+		return err
+	}
 	refresherMu.Lock()
 	rosterController := globalRosterController
 	refresherMu.Unlock()
@@ -283,6 +305,9 @@ func (r *QuotaRefresher) RunProbeDueOnce(ctx context.Context) error {
 }
 
 func (r *QuotaRefresher) RunProbeRecoveryOnce(ctx context.Context) error {
+	if err := r.retryProbeRosterHold(); err != nil {
+		return err
+	}
 	if !r.probeBackgroundAllowed() {
 		return ErrCapabilityB
 	}
@@ -371,6 +396,9 @@ func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *
 			return probeReadResult{Quota: quota, Credentials: credentials}, err
 		}
 		fail := func(err error, sent bool) OperationResult {
+			if errors.Is(err, ErrCapabilityB) && r.runtimeRoster().Health == RosterFailClosed {
+				return OperationResult{Token: intent.Token, Err: err}
+			}
 			if status, ok := err.(quotaStatusError); ok && status.status == http.StatusUnauthorized {
 				if persistErr := r.bindings.MarkAuthBlocked(intent.AuthID); persistErr != nil {
 					err = persistErr
