@@ -43,6 +43,22 @@ function Invoke-ExactGoTest {
     exit $LASTEXITCODE
 }
 
+function Invoke-ExactGoTestSet {
+    param([string[]]$TestNames)
+    $listed = @(& go test ./... -list '^Test')
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    foreach ($testName in $TestNames) {
+        $exact = @($listed | Where-Object { $_.Trim() -eq $testName })
+        if ($exact.Count -ne 1) {
+            Write-Error "required exact test $testName found $($exact.Count) times"
+            exit 1
+        }
+    }
+    $pattern = '^(' + (($TestNames | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')$'
+    & go test ./... -run $pattern -count=1
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+
 Push-Location $RepoRoot
 try {
     if ($Stage -eq "S0") {
@@ -136,10 +152,13 @@ try {
 
     if ($Stage -eq "S7") {
         if ($baseline.Count -ne 0 -or $actual.Count -ne 0) { Write-Error "S7 requires zero ABI pick-closure violations"; exit 1 }
-        & go test ./... -run 'Test(SuiteRosterManagement|InvariantTraceability|StartupCapabilityBRecoversThroughRosterSynchronization|RosterCandidatesHaveNoRosterSideEffects|S2KPointRegistryMatchesSource|S6KPointRegistryMatchesSource|MockGroup(A|B|C|D|E))' -count=1
+        & go test ./... -run 'Test(SuiteRosterManagement|InvariantTraceability|MockCoverage|StartupCapabilityBRecoversThroughRosterSynchronization|RosterCandidatesHaveNoRosterSideEffects|S2KPointRegistryMatchesSource|S6KPointRegistryMatchesSource|SchedulerPickABIPathSnapshotOnly|RuntimeAndUserArtifactsNeverPersistSensitiveValues|StateStoreContainsNoSensitiveTerms)$' -count=1
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        if (-not (Test-Path "testdata/mock_group_coverage.json")) { Write-Error "S7 mock coverage matrix is missing"; exit 1 }
-        Write-Output "S7 roster lifecycle, traceability, K-point, pick-I/O, sensitive-state, and Mock A-E gates passed"
+        $coverage = Get-Content -Raw "testdata/mock_group_coverage.json" | ConvertFrom-Json
+        $owners = @($coverage.rows | ForEach-Object { $_.owners } | Sort-Object -Unique)
+        if ($owners.Count -eq 0) { Write-Error "S7 mock coverage matrix has no executable owners"; exit 1 }
+        Invoke-ExactGoTestSet -TestNames $owners
+        Write-Output "S7 roster lifecycle, traceability, K-point, pick-I/O, sensitive-state, and $($owners.Count) exact Mock row owners passed"
         exit 0
     }
 }
