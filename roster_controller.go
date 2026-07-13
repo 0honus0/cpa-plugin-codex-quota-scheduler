@@ -14,6 +14,14 @@ const (
 	provisionalMaxAge   = 4 * time.Hour
 )
 
+func provisionalAgeValid(now, confirmedAt time.Time) bool {
+	if confirmedAt.IsZero() {
+		return false
+	}
+	age := now.Sub(confirmedAt)
+	return age >= 0 && age < provisionalMaxAge
+}
+
 type RosterHealth string
 
 const (
@@ -78,7 +86,7 @@ func NewRosterController(opts RosterControllerOptions) *RosterController {
 	c.current = ActiveRoster{Capability: CapabilityB, Health: RosterWaiting}
 	if opts.Provisional != nil {
 		p := cloneActiveRoster(*opts.Provisional)
-		if p.ConfirmedAt.IsZero() || now().Sub(p.ConfirmedAt) >= provisionalMaxAge {
+		if !provisionalAgeValid(now(), p.ConfirmedAt) {
 			p = ActiveRoster{Capability: CapabilityB, Health: RosterWaiting}
 		} else {
 			p.Capability, p.Confirmed, p.Provisional, p.Health = CapabilityB, false, true, RosterWaiting
@@ -114,11 +122,11 @@ func (c *RosterController) WakeForProbe(ctx context.Context) (ActiveRoster, erro
 		}
 		c.mu.Unlock()
 	}
-	if got.Provisional && c.probeOnProvisional && c.verifyProvisional != nil && c.now().Sub(got.ConfirmedAt) < provisionalMaxAge && c.verifyProvisional(ctx, cloneActiveRoster(got)) {
+	if got.Provisional && c.probeOnProvisional && c.verifyProvisional != nil && provisionalAgeValid(c.now(), got.ConfirmedAt) && c.verifyProvisional(ctx, cloneActiveRoster(got)) {
 		committed := false
 		commit := func() {
 			c.mu.Lock()
-			if c.current.Provisional && c.current.Generation == got.Generation {
+			if c.current.Provisional && c.current.Generation == got.Generation && provisionalAgeValid(c.now(), got.ConfirmedAt) {
 				c.current.BackgroundAllowed = true
 				c.current.LifecycleRevision++
 				got = cloneActiveRoster(c.current)

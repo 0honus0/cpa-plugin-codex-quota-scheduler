@@ -685,17 +685,19 @@ func TestProductionProvisionalRecoveryRejectsCorruptFingerprintMetadata(t *testi
 	bad.CompositeHash[0] = 1
 	valid := NewCredentialFingerprint("acct", "refresh", "idx")
 	for _, tc := range []struct {
-		name    string
-		entries []PersistedRosterEntry
+		name        string
+		confirmedAt time.Time
+		entries     []PersistedRosterEntry
 	}{
-		{name: "fingerprint", entries: []PersistedRosterEntry{{ID: "a", AuthIndex: "idx", Priority: 9, Fingerprint: bad}}},
-		{name: "mixed priorities", entries: []PersistedRosterEntry{{ID: "a", AuthIndex: "idx", Priority: 9, Fingerprint: valid}, {ID: "b", AuthIndex: "idx-b", Priority: 1, Fingerprint: NewCredentialFingerprint("acct-b", "refresh-b", "idx-b")}}},
+		{name: "fingerprint", confirmedAt: now, entries: []PersistedRosterEntry{{ID: "a", AuthIndex: "idx", Priority: 9, Fingerprint: bad}}},
+		{name: "mixed priorities", confirmedAt: now, entries: []PersistedRosterEntry{{ID: "a", AuthIndex: "idx", Priority: 9, Fingerprint: valid}, {ID: "b", AuthIndex: "idx-b", Priority: 1, Fingerprint: NewCredentialFingerprint("acct-b", "refresh-b", "idx-b")}}},
+		{name: "future confirmation", confirmedAt: now.Add(time.Nanosecond), entries: []PersistedRosterEntry{{ID: "a", AuthIndex: "idx", Priority: 9, Fingerprint: valid}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			legacyPath := filepath.Join(t.TempDir(), "state.json")
 			store := NewStateStore(semanticStatePaths(legacyPath).Runtime, OSFileHooks(), nil)
 			if _, err := store.Update(func(s *PersistentState) error {
-				s.LastConfirmedRoster = &PersistedConfirmedRoster{Generation: 1, ConfirmedAt: now, Entries: tc.entries}
+				s.LastConfirmedRoster = &PersistedConfirmedRoster{Generation: 1, ConfirmedAt: tc.confirmedAt, Entries: tc.entries}
 				return nil
 			}); err != nil {
 				t.Fatal(err)
@@ -793,6 +795,55 @@ func TestProductionProvisionalVerificationTracksRiskConfig(t *testing.T) { //inv
 	state.ReplaceConfig(cfg)
 	if r.VerifyConfiguredProvisionalRoster(context.Background(), *provisional) || host.get != 1 {
 		t.Fatalf("disabled verification retained access: get=%d", host.get)
+	}
+}
+
+func TestProductionProvisionalVerificationRejectsCorruptBindingIdentity(t *testing.T) { //inv:INV-02,INV-20,INV-30,INV-34
+	now := time.Date(2026, 7, 14, 10, 0, 0, 0, time.UTC)
+	fingerprint := NewCredentialFingerprint("acct", "refresh", "idx")
+	valid := RuntimeBinding{AuthID: "a", AuthIndex: "idx", Instance: legacyAuthInstanceID("a"), Generation: 7, Fingerprint: fingerprint}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*RuntimeBinding)
+	}{
+		{name: "auth id", mutate: func(b *RuntimeBinding) { b.AuthID = "other" }},
+		{name: "zero instance", mutate: func(b *RuntimeBinding) { b.Instance = 0 }},
+		{name: "wrong instance", mutate: func(b *RuntimeBinding) { b.Instance++ }},
+		{name: "generation", mutate: func(b *RuntimeBinding) { b.Generation = 6 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			legacyPath := filepath.Join(t.TempDir(), "state.json")
+			binding := valid
+			tc.mutate(&binding)
+			store := NewStateStore(semanticStatePaths(legacyPath).Runtime, OSFileHooks(), nil)
+			if _, err := store.Update(func(s *PersistentState) error {
+				s.LastConfirmedRoster = &PersistedConfirmedRoster{Generation: 7, ConfirmedAt: now, Entries: []PersistedRosterEntry{{ID: "a", AuthIndex: "idx", Priority: 9, Fingerprint: fingerprint}}}
+				s.Bindings["a"] = binding
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			host := &countingProductionHost{auth: map[string]pluginapi.HostAuthGetResponse{"idx": {AuthIndex: "idx", JSON: json.RawMessage(`{"access_token":"access","refresh_token":"refresh","account_id":"acct"}`)}}}
+			state := NewPluginState(DefaultConfig())
+			cfg := state.Config()
+			cfg.ProbeOnProvisionalRoster = true
+			state.ReplaceConfig(cfg)
+			r, err := NewProductionQuotaRefresher(host, state, &runtimeCredentialHost{current: map[AuthInstanceID]HostAuth{}}, HostRosterSnapshot{Capability: CapabilityB}, legacyPath, func() time.Time { return now })
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.coordinator.Close()
+			provisional := r.ProvisionalRoster()
+			if provisional == nil {
+				t.Fatal("missing provisional metadata")
+			}
+			if r.VerifyConfiguredProvisionalRoster(context.Background(), *provisional) {
+				t.Fatal("corrupt binding identity verified")
+			}
+			if host.get != 0 || host.http != 0 {
+				t.Fatalf("corrupt binding made calls: get=%d http=%d", host.get, host.http)
+			}
+		})
 	}
 }
 
@@ -1070,7 +1121,10 @@ func TestProductionRosterLifecycleGatesBackgroundRequests(t *testing.T) {
 		t.Fatalf("fail-closed started HTTP: %#v", host.requests)
 	}
 
-	provisional := ActiveRoster{Capability: CapabilityB, Provisional: true, Health: RosterWaiting, BackgroundAllowed: true, Instances: []string{"a"}}
+	cfg := state.Config()
+	cfg.ProbeOnProvisionalRoster = true
+	state.ReplaceConfig(cfg)
+	provisional := ActiveRoster{Capability: CapabilityB, Provisional: true, Health: RosterWaiting, BackgroundAllowed: true, ConfirmedAt: r.now(), Instances: []string{"a"}}
 	r.ObserveRosterLifecycle(provisional)
 	if r.normalBackgroundAllowed() || !r.probeBackgroundAllowed() {
 		t.Fatalf("provisional gates normal=%v probe=%v", r.normalBackgroundAllowed(), r.probeBackgroundAllowed())
@@ -1216,7 +1270,7 @@ func TestProductionProbeLifecycleHostCallGates(t *testing.T) {
 		cfg := r.state.Config()
 		cfg.ProbeOnProvisionalRoster = true
 		r.state.ReplaceConfig(cfg)
-		r.ObserveRosterLifecycle(ActiveRoster{Capability: CapabilityB, Provisional: true, Health: RosterWaiting, BackgroundAllowed: true})
+		r.ObserveRosterLifecycle(ActiveRoster{Capability: CapabilityB, Provisional: true, Health: RosterWaiting, BackgroundAllowed: true, ConfirmedAt: r.now()})
 		if _, err := r.doBackgroundHTTPRequest(pluginapi.HTTPRequest{Method: http.MethodGet, URL: "https://example.invalid/probe"}, true); err != nil {
 			t.Fatal(err)
 		}

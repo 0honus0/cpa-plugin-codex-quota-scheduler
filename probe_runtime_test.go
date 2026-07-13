@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,6 +28,8 @@ type sequenceProbeHost struct {
 	gets       int
 	getStarted chan struct{}
 	releaseGet chan struct{}
+	doStarted  chan struct{}
+	releaseDo  chan struct{}
 }
 
 func TestProbeAuthBlockedResumesOnlyAfterExternalLoginEpoch(t *testing.T) { //inv:INV-23,INV-33
@@ -89,9 +92,22 @@ func (h *sequenceProbeHost) SaveAuth(string, json.RawMessage) error { return nil
 func (h *sequenceProbeHost) Log(string, string, map[string]any)     {}
 func (h *sequenceProbeHost) Do(req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	started, release := h.doStarted, h.releaseDo
 	h.urls = append(h.urls, req.URL)
 	h.requests = append(h.requests, req)
+	h.mu.Unlock()
+	if started != nil {
+		select {
+		case <-started:
+		default:
+			close(started)
+		}
+	}
+	if release != nil {
+		<-release
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if req.URL == codexResetProbeEndpoint {
 		return pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(`{"usage":{"total_tokens":1}}`)}, nil
 	}
@@ -517,6 +533,141 @@ func TestProductionProvisionalVerificationRechecksActualPrecheckFingerprint(t *t
 	binding, _ := r.bindings.Lookup("a")
 	if got := persisted.ProbeWindows[binding.Instance][ProbeWindowFiveHour]; got.State != ProbeWaitingRoster {
 		t.Fatalf("mismatch window=%#v", got)
+	}
+}
+
+func TestProductionProvisionalRequestExpiryDuringPrecheckReturnsWaitingRoster(t *testing.T) { //inv:INV-02,INV-34,INV-35
+	confirmedAt := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	initialNow := confirmedAt.Add(provisionalMaxAge - time.Nanosecond)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
+	auth := pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","refresh_token":"r0","id_token":"` + idToken + `"}`)}
+	host := &sequenceProbeHost{auth: auth, quota: [][]byte{[]byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":80,"limit_window_seconds":18000,"reset_at":%q}}}`, confirmedAt.Add(-time.Hour).Format(time.RFC3339)))}}
+	r := newDueProbeRuntime(t, initialNow, host)
+	var clock atomic.Int64
+	clock.Store(initialNow.UnixNano())
+	r.now = func() time.Time { return time.Unix(0, clock.Load()).UTC() }
+	confirmed := r.runtimeRoster()
+	confirmed.ConfirmedAt = confirmedAt
+	if err := r.PublishAuthoritativeRoster(context.Background(), confirmed); err != nil {
+		t.Fatal(err)
+	}
+	cfg := r.state.Config()
+	cfg.ProbeOnProvisionalRoster = true
+	r.state.ReplaceConfig(cfg)
+	provisional := r.ProvisionalRoster()
+	if provisional == nil || !r.VerifyConfiguredProvisionalRoster(context.Background(), *provisional) {
+		t.Fatalf("verified provisional=%#v", provisional)
+	}
+	provisional.BackgroundAllowed = true
+	r.ObserveRosterLifecycle(*provisional)
+	host.mu.Lock()
+	host.getStarted = make(chan struct{})
+	host.releaseGet = make(chan struct{})
+	started, release := host.getStarted, host.releaseGet
+	host.mu.Unlock()
+	done := make(chan error, 1)
+	go func() { done <- r.RunProbeDueOnce(context.Background()) }()
+	<-started
+	clock.Store(confirmedAt.Add(provisionalMaxAge).UnixNano())
+	close(release)
+	if err := <-done; !errors.Is(err, ErrCapabilityB) {
+		t.Fatalf("RunProbeDueOnce err=%v", err)
+	}
+	host.mu.Lock()
+	requests := append([]pluginapi.HTTPRequest(nil), host.requests...)
+	host.mu.Unlock()
+	if len(requests) != 0 {
+		t.Fatalf("expired provisional made requests=%#v", requests)
+	}
+	binding, _ := r.bindings.Lookup("a")
+	persisted, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := persisted.ProbeWindows[binding.Instance][ProbeWindowFiveHour]; got.State != ProbeWaitingRoster || !got.Deadline.IsZero() {
+		t.Fatalf("expired provisional window=%#v", got)
+	}
+}
+
+func TestProductionProvisionalVerificationExpiryDuringGetAuthIssuesNoPermit(t *testing.T) { //inv:INV-02,INV-34,INV-35
+	confirmedAt := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	initialNow := confirmedAt.Add(provisionalMaxAge - time.Nanosecond)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
+	auth := pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","refresh_token":"r0","id_token":"` + idToken + `"}`)}
+	host := &sequenceProbeHost{auth: auth}
+	r := newDueProbeRuntime(t, initialNow, host)
+	var clock atomic.Int64
+	clock.Store(initialNow.UnixNano())
+	r.now = func() time.Time { return time.Unix(0, clock.Load()).UTC() }
+	confirmed := r.runtimeRoster()
+	confirmed.ConfirmedAt = confirmedAt
+	if err := r.PublishAuthoritativeRoster(context.Background(), confirmed); err != nil {
+		t.Fatal(err)
+	}
+	cfg := r.state.Config()
+	cfg.ProbeOnProvisionalRoster = true
+	r.state.ReplaceConfig(cfg)
+	provisional := r.ProvisionalRoster()
+	if provisional == nil {
+		t.Fatal("missing provisional")
+	}
+	host.mu.Lock()
+	host.getStarted = make(chan struct{})
+	host.releaseGet = make(chan struct{})
+	started, release := host.getStarted, host.releaseGet
+	host.mu.Unlock()
+	done := make(chan bool, 1)
+	go func() { done <- r.VerifyConfiguredProvisionalRoster(context.Background(), *provisional) }()
+	<-started
+	clock.Store(confirmedAt.Add(provisionalMaxAge).UnixNano())
+	close(release)
+	if <-done {
+		t.Fatal("expired GetAuth verification succeeded")
+	}
+	r.provisionalMu.Lock()
+	permit := r.provisionalPermit
+	r.provisionalMu.Unlock()
+	if permit {
+		t.Fatal("expired verification issued permit")
+	}
+}
+
+func TestProductionProvisionalConfigDisableLinearizesWithHostStart(t *testing.T) { //inv:INV-02,INV-35
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	host := &sequenceProbeHost{doStarted: make(chan struct{}), releaseDo: make(chan struct{})}
+	cfg := DefaultConfig()
+	cfg.ProbeOnProvisionalRoster = true
+	r := NewQuotaRefresher(host, NewPluginState(cfg), func() time.Time { return now })
+	r.ObserveRosterLifecycle(ActiveRoster{Capability: CapabilityB, Provisional: true, Health: RosterWaiting, BackgroundAllowed: true, ConfirmedAt: now})
+	requestDone := make(chan error, 1)
+	go func() {
+		_, err := r.doBackgroundHTTPRequest(pluginapi.HTTPRequest{Method: http.MethodPost, URL: codexResetProbeEndpoint}, true)
+		requestDone <- err
+	}()
+	<-host.doStarted
+	disabled := make(chan struct{})
+	go func() {
+		next := r.state.Config()
+		next.ProbeOnProvisionalRoster = false
+		r.state.ReplaceConfig(next)
+		close(disabled)
+	}()
+	select {
+	case <-disabled:
+		t.Fatal("config disable crossed in-flight host.Do linearization point")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(host.releaseDo)
+	if err := <-requestDone; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-disabled:
+	case <-time.After(time.Second):
+		t.Fatal("config disable remained blocked after host.Do")
+	}
+	if _, err := r.doBackgroundHTTPRequest(pluginapi.HTTPRequest{Method: http.MethodPost, URL: codexResetProbeEndpoint}, true); !errors.Is(err, ErrCapabilityB) {
+		t.Fatalf("post-disable request err=%v", err)
 	}
 }
 

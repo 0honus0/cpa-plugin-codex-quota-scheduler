@@ -415,7 +415,7 @@ func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *
 			return probeReadResult{Quota: quota, Credentials: credentials}, err
 		}
 		fail := func(err error, sent bool) OperationResult {
-			if errors.Is(err, ErrProvisionalFingerprintMismatch) {
+			if r.runtimeRoster().Provisional && (errors.Is(err, ErrProvisionalFingerprintMismatch) || errors.Is(err, ErrCapabilityB)) {
 				r.clearProvisionalPermit()
 				r.rosterMu.Lock()
 				if r.roster.Provisional {

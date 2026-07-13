@@ -115,3 +115,41 @@ The final independent review raised two Important authorization findings: a fing
 Production changes are in `state_store.go`, `identity.go`, `refresh.go`, `probe_runtime.go`, `roster_controller.go`, `management.go`, and `main.go`. Tests are in `runtime_wiring_test.go`, `probe_runtime_test.go`, and `roster_controller_test.go`.
 
 No frozen-spec deviation was required. The optional `last_confirmed_roster` field remains backward-compatible under state schema 1; absent or semantically invalid data fails closed without rewrite, while JSON corruption continues through the existing primary/backup/quarantine recovery path.
+
+## Follow-up authorization hardening after commit 138884b
+
+The main Task 3 review identified four additional Important boundary gaps. Each was reproduced before production changes.
+
+### Follow-up RED evidence
+
+Command:
+
+`go test ./... -run 'TestProductionProvisionalRecoveryRejectsCorruptFingerprintMetadata/future_confirmation|TestCapabilityBProvisionalProbeRequiresRiskOptionAgeAndFingerprint|TestProductionProvisionalVerificationRejectsCorruptBindingIdentity|TestProductionProvisionalRequestExpiryDuringPrecheckReturnsWaitingRoster|TestProductionProvisionalConfigDisableLinearizesWithHostStart' -count=1`
+
+Observed failures:
+
+- a future `ConfirmedAt` reconstructed in both StateStore recovery and controller construction;
+- exact-expiry during the actual precheck completed with `err=<nil>` and reached OpenAI;
+- config disable completed while `host.Do` was already at its start boundary;
+- corrupt AuthID, zero/wrong Instance, and stale Generation bindings all verified.
+
+### Follow-up fixes
+
+- Added one shared `provisionalAgeValid` predicate implementing exactly `0 <= now-confirmed_at < 4h`; recovery, controller construction/wake, configured startup, lifecycle observation, permit authorization, and final outbound authorization use it.
+- Every provisional outbound OpenAI call rechecks strict age. Expiry between verification and precheck/send/verify returns `ErrCapabilityB`, clears the permit, revokes runtime access, and durably moves Probe windows to `WaitingRoster` with no deadline.
+- The provisional final gate now holds the same PluginState config read lock through `host.Do`. A settings writer therefore linearizes either before the request (denied) or after the request start/completion; it cannot commit disabled state between the final authorization check and host start.
+- Durable verification now requires the binding key and value to agree on AuthID, the nonzero expected legacy Instance, binding Generation equal to provisional Generation, AuthIndex equality, and the exact four-component fingerprint.
+- Existing tests that manually constructed provisional authorization now include the explicit risk option and a valid confirmation time.
+- Review found one final state-only race after the first follow-up: age could cross four hours during GetAuth verification before permit/controller publication. `TestProductionProvisionalVerificationExpiryDuringGetAuthIssuesNoPermit` and `TestProvisionalVerificationCannotCommitAfterAgeExpires` were observed RED. Verification now rechecks age after all GetAuth reads, the configured wrapper rechecks live config and age, and the controller commit rechecks age inside its atomic commit. Both regressions are GREEN.
+
+Lock order is lifecycle roster read lock → config read lock → `host.Do`. Config writers release their write lock before controller/lifecycle callbacks; the provisional commit guard holds only config read lock → controller lock and releases it before observer notification. The race detector found no inversion or data race.
+
+### Follow-up GREEN evidence
+
+- Final expanded provisional/security selection: PASS; main package `2.621s`.
+- Final full `go test ./... -count=1`: PASS; main package `6.603s`, refactor gate `1.116s`, testsupport `1.362s`.
+- Final full `go test -race ./... -count=1`: PASS; main package `11.661s`, refactor gate `1.732s`, testsupport `1.883s`.
+- `go vet ./...`: PASS, no diagnostics.
+- `git diff --check`: PASS.
+
+The final independent re-review reports no remaining Critical or Important findings.

@@ -187,6 +187,12 @@ func TestCapabilityBProvisionalProbeRequiresRiskOptionAgeAndFingerprint(t *testi
 	if got := c.Snapshot(); got.Provisional || len(got.Instances) != 0 {
 		t.Fatalf("expired=%#v", got)
 	}
+	future := base
+	future.ConfirmedAt = now.Add(time.Nanosecond)
+	c = NewRosterController(RosterControllerOptions{Provisional: &future, Now: func() time.Time { return now }, ProbeOnProvisional: true, VerifyProvisional: func(context.Context, ActiveRoster) bool { return true }})
+	if got := c.Snapshot(); got.Provisional || len(got.Instances) != 0 {
+		t.Fatalf("future=%#v", got)
+	}
 }
 
 func TestProvisionalVerificationFailureRevokesPreviouslyPublishedProbeAccess(t *testing.T) { //inv:INV-02,INV-35
@@ -249,6 +255,25 @@ func TestProvisionalRiskDisableFencesInFlightVerificationCommit(t *testing.T) { 
 	close(release)
 	if got := <-done; got.BackgroundAllowed || c.Snapshot().BackgroundAllowed {
 		t.Fatalf("disabled risk committed stale verification: got=%#v snapshot=%#v", got, c.Snapshot())
+	}
+}
+
+func TestProvisionalVerificationCannotCommitAfterAgeExpires(t *testing.T) { //inv:INV-02,INV-35
+	confirmedAt := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	now := confirmedAt.Add(provisionalMaxAge - time.Nanosecond)
+	base := ActiveRoster{Capability: CapabilityB, Provisional: true, Generation: 4, ConfirmedAt: confirmedAt, Health: RosterWaiting}
+	c := NewRosterController(RosterControllerOptions{
+		Now:                func() time.Time { return now },
+		Provisional:        &base,
+		ProbeOnProvisional: true,
+		VerifyProvisional: func(context.Context, ActiveRoster) bool {
+			now = confirmedAt.Add(provisionalMaxAge)
+			return true
+		},
+	})
+	got, _ := c.WakeForProbe(context.Background())
+	if got.BackgroundAllowed || c.Snapshot().BackgroundAllowed {
+		t.Fatalf("expired verification committed access: got=%#v snapshot=%#v", got, c.Snapshot())
 	}
 }
 

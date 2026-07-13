@@ -125,7 +125,7 @@ func (r *QuotaRefresher) ProvisionalRoster() *ActiveRoster {
 		return nil
 	}
 	persisted := state.LastConfirmedRoster
-	if persisted.Generation == 0 || persisted.ConfirmedAt.IsZero() || r.now().Sub(persisted.ConfirmedAt) >= provisionalMaxAge || len(persisted.Entries) == 0 {
+	if persisted.Generation == 0 || !provisionalAgeValid(r.now(), persisted.ConfirmedAt) || len(persisted.Entries) == 0 {
 		return nil
 	}
 	active := &ActiveRoster{Capability: CapabilityB, Provisional: true, Generation: persisted.Generation, ConfirmedAt: persisted.ConfirmedAt, Health: RosterWaiting}
@@ -151,7 +151,7 @@ func (r *QuotaRefresher) ProvisionalRoster() *ActiveRoster {
 }
 
 func (r *QuotaRefresher) VerifyProvisionalRoster(ctx context.Context, roster ActiveRoster) bool {
-	if r == nil || r.runtimeStore == nil || r.bindings == nil || r.host == nil || !roster.Provisional || roster.Confirmed || roster.Capability != CapabilityB || roster.ConfirmedAt.IsZero() || r.now().Sub(roster.ConfirmedAt) >= provisionalMaxAge {
+	if r == nil || r.runtimeStore == nil || r.bindings == nil || r.host == nil || !roster.Provisional || roster.Confirmed || roster.Capability != CapabilityB || !provisionalAgeValid(r.now(), roster.ConfirmedAt) {
 		r.clearProvisionalPermit()
 		return false
 	}
@@ -176,7 +176,7 @@ func (r *QuotaRefresher) VerifyProvisionalRoster(ctx context.Context, roster Act
 			return false
 		}
 		binding, bound := r.bindings.Lookup(entry.ID)
-		if !bound || binding.AuthIndex != entry.AuthIndex || binding.Fingerprint != entry.Fingerprint {
+		if !bound || binding.AuthID != entry.ID || binding.Instance == 0 || binding.Instance != legacyAuthInstanceID(entry.ID) || uint64(binding.Generation) != roster.Generation || binding.AuthIndex != entry.AuthIndex || binding.Fingerprint != entry.Fingerprint {
 			r.clearProvisionalPermit()
 			return false
 		}
@@ -197,6 +197,10 @@ func (r *QuotaRefresher) VerifyProvisionalRoster(ctx context.Context, roster Act
 			return false
 		}
 	}
+	if !provisionalAgeValid(r.now(), roster.ConfirmedAt) {
+		r.clearProvisionalPermit()
+		return false
+	}
 	r.provisionalMu.Lock()
 	r.provisionalPermit = true
 	r.provisionalMu.Unlock()
@@ -208,7 +212,14 @@ func (r *QuotaRefresher) VerifyConfiguredProvisionalRoster(ctx context.Context, 
 		r.clearProvisionalPermit()
 		return false
 	}
-	return r.VerifyProvisionalRoster(ctx, roster)
+	if !r.VerifyProvisionalRoster(ctx, roster) {
+		return false
+	}
+	if !r.state.Config().ProbeOnProvisionalRoster || !provisionalAgeValid(r.now(), roster.ConfirmedAt) {
+		r.clearProvisionalPermit()
+		return false
+	}
+	return true
 }
 
 func (r *QuotaRefresher) clearProvisionalPermit() {
@@ -255,6 +266,9 @@ func (r *QuotaRefresher) ObserveRosterLifecycle(active ActiveRoster) {
 	owner := r.lifecycleRefresher()
 	owner.rosterMu.Lock()
 	next := hostRosterSnapshotFromActive(active)
+	if next.Provisional && (!provisionalAgeValid(owner.now(), next.ConfirmedAt) || owner.state == nil || !owner.state.Config().ProbeOnProvisionalRoster) {
+		next.BackgroundAllowed = false
+	}
 	if next.LifecycleRevision == 0 {
 		next.LifecycleRevision = owner.roster.LifecycleRevision + 1
 	}
@@ -289,7 +303,7 @@ func (r *QuotaRefresher) probeBackgroundAllowed() bool {
 		return true
 	}
 	roster := normalizeHostRosterLifecycle(r.runtimeRoster())
-	return provisionalProbeBackgroundAllowed(roster)
+	return provisionalProbeBackgroundAllowed(roster) && r.state != nil && r.state.Config().ProbeOnProvisionalRoster && provisionalAgeValid(r.now(), roster.ConfirmedAt)
 }
 
 func (r *QuotaRefresher) provisionalProbeRiskConfigured() bool {
@@ -297,7 +311,7 @@ func (r *QuotaRefresher) provisionalProbeRiskConfigured() bool {
 		return false
 	}
 	roster := normalizeHostRosterLifecycle(r.runtimeRoster())
-	return roster.Capability == CapabilityB && roster.Provisional && !roster.Confirmed && !roster.ConfirmedAt.IsZero() && r.now().Sub(roster.ConfirmedAt) < provisionalMaxAge
+	return roster.Capability == CapabilityB && roster.Provisional && !roster.Confirmed && provisionalAgeValid(r.now(), roster.ConfirmedAt)
 }
 
 func normalRosterBackgroundAllowed(roster HostRosterSnapshot) bool {
@@ -1248,8 +1262,15 @@ func (r *QuotaRefresher) doBackgroundHTTPRequest(req pluginapi.HTTPRequest, prob
 	if probe {
 		allowed = allowed || provisionalProbeBackgroundAllowed(roster)
 	}
-	if roster.Provisional && (owner.state == nil || !owner.state.Config().ProbeOnProvisionalRoster) {
-		allowed = false
+	if roster.Provisional {
+		if owner.state == nil {
+			return pluginapi.HTTPResponse{}, ErrCapabilityB
+		}
+		owner.state.mu.RLock()
+		defer owner.state.mu.RUnlock()
+		if !owner.state.cfg.ProbeOnProvisionalRoster || !provisionalAgeValid(owner.now(), roster.ConfirmedAt) {
+			allowed = false
+		}
 	}
 	if !allowed {
 		return pluginapi.HTTPResponse{}, ErrCapabilityB
