@@ -112,6 +112,48 @@ Exit 0. Task source/test scope is limited to `management.go`, `dispatch.go`, `ma
 
 The first commit-gate review found one Important issue and no Critical issues: the initial ambiguity heuristic scanned removed chains and its warning overstated §2.5. The fix scopes classification through active roster IDs and durable bindings, handles unresolved reconciliation plus expired-chain ambiguity, and states that conversion freezes while existing non-AuthBlocked credentials remain usable. Follow-up review found the unresolved-Next fallthrough described above; its RED regression and fix are included. Final re-review: **approved, no remaining findings**.
 
+## Post-commit main-review follow-up
+
+Main review of `7771991` found three blockers. The selected correction is conservative and side-effect free: authenticated Management never treats a durable binding fingerprint as a fresh credential observation and never calls GetAuth or mutates credential WAL state. An active `Planned`/`OutcomeUnknown` tail remains `CredentialAmbiguous` until the existing runtime reconciliation path resolves and persists it.
+
+### Follow-up RED
+
+```powershell
+go test ./... -run 'TestManagement(CredentialAmbiguityReadsDurableChains|CredentialAmbiguitySeparatesEmptyRosterAndStoreFailure|DispatchWithoutControllerIsWaitingRoster)' -count=1
+```
+
+Exit 1 with all expected failures:
+
+- unresolved active tails with stale durable Prev and Next fingerprints were falsely cleared;
+- an empty active roster read a failing store and reported account ambiguity;
+- nil-controller authenticated Management returned a legacy cached card with no lifecycle state.
+
+The same test matrix covers stale durable Prev/Next/third fingerprints. All remain ambiguous while unresolved; none is accepted as a fresh reconciliation observation. A general runtime-store error returns no account ambiguity, and an empty roster short-circuits before persistence access.
+
+### Follow-up GREEN and focused integration
+
+```powershell
+go test ./... -run 'TestManagement(CredentialAmbiguityReadsDurableChains|CredentialAmbiguitySeparatesEmptyRosterAndStoreFailure|DispatchWithoutControllerIsWaitingRoster)' -count=1
+```
+
+Exit 0.
+
+```powershell
+go test ./... -run 'Test(Management|Status|Settings|Resource|Annotations|SuiteBoundary|MockGroupDBoundary|SuiteRuntimeWiring|ProductionProvisional|Binding)' -count=1
+```
+
+Exit 0; main package passed in 3.173s and all selected packages passed.
+
+### Follow-up final verification
+
+- `go test ./... -count=1`: exit 0; main package 7.316s.
+- `go test -race ./...`: exit 0; main package 11.551s.
+- `go vet ./...`: exit 0, no diagnostics.
+- `./scripts/check_refactor_gates.ps1 -Stage S7`: exit 0; S7 roster lifecycle, traceability, K-point, pick-I/O, sensitive-state, and Mock A-E gates passed.
+- `git diff --check`: exit 0.
+
+Independent follow-up review: **approved, no blockers**. It confirmed conservative unresolved-tail behavior, empty-roster short-circuit, non-ambiguous store failure, explicit nil-controller Capability-B/WaitingRoster projection with zero cards, and unchanged Resource shell behavior.
+
 ## Invariant notes
 
 - INV-01: Resource status remains shell-only and does not wake or project the roster.

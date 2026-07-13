@@ -132,13 +132,24 @@ func TestManagementCredentialAmbiguityReadsDurableChains(t *testing.T) { //inv:I
 	if !managementCredentialAmbiguous(refresher, ActiveRoster{Instances: []string{"removed"}}, time.Now()) {
 		t.Fatal("active ambiguous reconciliation was not exposed")
 	}
-	state.Bindings["active"] = RuntimeBinding{AuthID: "active", Instance: 1, Fingerprint: second}
-	state.CredentialChains[1] = TransitionChain{Cursor: first, Transitions: []CredentialTransition{{Prev: first, Next: second, SaveSeq: 1, Phase: TransitionOutcomeUnknown, CreatedAt: time.Now()}}}
-	if err := store.WriteThrough(state); err != nil {
-		t.Fatal(err)
-	}
-	if managementCredentialAmbiguous(refresher, ActiveRoster{Instances: []string{"active"}}, time.Now()) {
-		t.Fatal("unresolved transition observed at next fingerprint is deterministically applied, not ambiguous")
+	for _, staleBinding := range []struct {
+		name        string
+		fingerprint CredentialFingerprint
+	}{
+		{name: "prev", fingerprint: first},
+		{name: "next", fingerprint: second},
+		{name: "third", fingerprint: other},
+	} {
+		t.Run("unresolved-stale-binding-"+staleBinding.name, func(t *testing.T) {
+			state.Bindings["active"] = RuntimeBinding{AuthID: "active", Instance: 1, Fingerprint: staleBinding.fingerprint}
+			state.CredentialChains[1] = TransitionChain{Cursor: first, Transitions: []CredentialTransition{{Prev: first, Next: second, SaveSeq: 1, Phase: TransitionOutcomeUnknown, CreatedAt: time.Now()}}}
+			if err := store.WriteThrough(state); err != nil {
+				t.Fatal(err)
+			}
+			if !managementCredentialAmbiguous(refresher, ActiveRoster{Instances: []string{"active"}}, time.Now()) {
+				t.Fatal("unresolved active transition was cleared from a stale durable binding without reconciliation")
+			}
+		})
 	}
 	state.Bindings["active"] = RuntimeBinding{AuthID: "active", Instance: 1, Fingerprint: second}
 	state.CredentialChains[1] = TransitionChain{Cursor: first, Transitions: []CredentialTransition{{Prev: first, Next: second, SaveSeq: 1, Phase: TransitionApplied, CreatedAt: time.Now().Add(-25 * time.Hour)}}}
@@ -147,6 +158,53 @@ func TestManagementCredentialAmbiguityReadsDurableChains(t *testing.T) { //inv:I
 	}
 	if !managementCredentialAmbiguous(refresher, ActiveRoster{Instances: []string{"active"}}, time.Now()) {
 		t.Fatal("expired reachable credential generation was not exposed as ambiguous")
+	}
+}
+
+func TestManagementCredentialAmbiguitySeparatesEmptyRosterAndStoreFailure(t *testing.T) {
+	hooks := OSFileHooks()
+	hooks.ReadFile = func(string) ([]byte, error) { return nil, errors.New("runtime store unavailable") }
+	refresher := &QuotaRefresher{runtimeStore: NewStateStore(filepath.Join(t.TempDir(), "runtime.json"), hooks, nil)}
+	if managementCredentialAmbiguous(refresher, ActiveRoster{}, time.Now()) {
+		t.Fatal("empty active roster reported credential ambiguity")
+	}
+	if managementCredentialAmbiguous(refresher, ActiveRoster{Instances: []string{"active"}}, time.Now()) {
+		t.Fatal("general runtime-store failure masqueraded as credential ambiguity")
+	}
+}
+
+func TestManagementDispatchWithoutControllerIsWaitingRoster(t *testing.T) { //inv:INV-34,INV-35 negative
+	now := time.Now()
+	store := NewPluginState(DefaultConfig())
+	store.UpsertQuota(weeklyAccount("cached", 9, now.Add(24*time.Hour), false))
+	refresherMu.Lock()
+	previousState, previousController, previousRefresher := globalState, globalRosterController, globalRefresher
+	globalState, globalRosterController, globalRefresher = store, nil, nil
+	refresherMu.Unlock()
+	t.Cleanup(func() {
+		refresherMu.Lock()
+		globalState, globalRosterController, globalRefresher = previousState, previousController, previousRefresher
+		refresherMu.Unlock()
+	})
+	req, _ := json.Marshal(pluginapi.ManagementRequest{Method: http.MethodGet, Path: managementBasePath + "/status", Query: url.Values{"format": []string{"json"}}})
+	raw, err := handleManagementHandle(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var outer envelope
+	if err := json.Unmarshal(raw, &outer); err != nil {
+		t.Fatal(err)
+	}
+	var response pluginapi.ManagementResponse
+	if err := json.Unmarshal(outer.Result, &response); err != nil {
+		t.Fatal(err)
+	}
+	var payload StatusPayload
+	if err := json.Unmarshal(response.Body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Roster.Capability != CapabilityB || payload.Roster.Health != RosterWaiting || !payload.Roster.WaitingRoster || len(payload.Accounts) != 0 {
+		t.Fatalf("nil-controller Management payload = %#v", payload)
 	}
 }
 
