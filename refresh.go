@@ -140,6 +140,9 @@ func (r *QuotaRefresher) ObserveRosterLifecycle(active ActiveRoster) {
 	}
 	owner.roster = next
 	owner.rosterMu.Unlock()
+	if next.Health == RosterFailClosed {
+		_ = owner.holdProbeForRoster()
+	}
 	owner.mu.Lock()
 	requested := owner.startRequested
 	owner.mu.Unlock()
@@ -199,15 +202,29 @@ func (r *QuotaRefresher) PublishAuthoritativeRoster(ctx context.Context, roster 
 	if adapter, ok := r.credentials.host.(*rosterCredentialHost); ok {
 		bootstrapHost = bootstrapCredentialHost{adapter: adapter, roster: filtered}
 	}
-	for _, id := range ids {
-		if _, _, err := r.bindings.ObserveAuthoritative(ctx, filtered, id, bootstrapHost); err != nil {
-			return err
-		}
+	reconciled, err := r.bindings.ReconcileRoster(ctx, filtered, bootstrapHost)
+	if err != nil {
+		return err
 	}
+	activeGenerations := make(map[AuthInstanceID]TierGeneration, len(reconciled.Bindings))
+	for _, binding := range reconciled.Bindings {
+		activeGenerations[binding.Instance] = TierGeneration(binding.Generation)
+	}
+	r.coordinator.activateInstances(activeGenerations)
+	removedIDs := make([]string, 0, len(reconciled.Removed))
+	for _, binding := range reconciled.Removed {
+		removedIDs = append(removedIDs, binding.AuthID)
+	}
+	if err = r.CancelRosterInstances(removedIDs); err != nil {
+		return err
+	}
+	if err = r.recoverProbeFromRoster(reconciled.Bindings); err != nil {
+		return err
+	}
+	publishSchedulerState(r.state, allowed, r.now())
 	r.rosterMu.Lock()
 	r.roster = filtered
 	r.rosterMu.Unlock()
-	publishSchedulerState(r.state, allowed, r.now())
 	if adapter, ok := r.credentials.host.(*rosterCredentialHost); ok {
 		adapter.setRoster(filtered)
 	}
@@ -218,6 +235,35 @@ func (r *QuotaRefresher) PublishAuthoritativeRoster(ctx context.Context, roster 
 		r.Start()
 	}
 	return nil
+}
+
+func (r *QuotaRefresher) CancelRosterInstances(authIDs []string) error {
+	if r == nil || len(authIDs) == 0 {
+		return nil
+	}
+	instances := make([]AuthInstanceID, 0, len(authIDs))
+	for _, authID := range authIDs {
+		instances = append(instances, legacyAuthInstanceID(authID))
+	}
+	if r.coordinator != nil {
+		r.coordinator.CancelInstances(instances)
+	}
+	if r.probeController != nil {
+		for _, instance := range instances {
+			r.probeController.Advance(instance, ProbeEvent{Kind: ProbeEventInstanceRemoved, Now: r.now()})
+		}
+	}
+	if r.runtimeStore == nil {
+		return nil
+	}
+	_, err := r.runtimeStore.Update(func(s *PersistentState) error {
+		for _, instance := range instances {
+			delete(s.ProbeWindows, instance)
+			delete(s.ProbeAttempts, instance)
+		}
+		return nil
+	})
+	return err
 }
 
 func NewQuotaRefresher(host HostClient, state *PluginState, now func() time.Time) *QuotaRefresher {

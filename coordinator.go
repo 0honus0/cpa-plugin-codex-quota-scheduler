@@ -237,6 +237,14 @@ type drainCommand struct {
 	ctx   context.Context
 	reply chan DrainReport
 }
+type cancelInstancesCommand struct {
+	instances []AuthInstanceID
+	reply     chan struct{}
+}
+type activateInstancesCommand struct {
+	generations map[AuthInstanceID]TierGeneration
+	reply       chan struct{}
+}
 type drainWaiter struct {
 	command drainCommand
 	report  DrainReport
@@ -368,6 +376,54 @@ func (c *Coordinator) PublishSnapshot() *CoordinatorSnapshot {
 		return &CoordinatorSnapshot{}
 	}
 }
+func (c *Coordinator) CancelInstances(instances []AuthInstanceID) {
+	if c == nil || len(instances) == 0 {
+		return
+	}
+	c.lifecycleMu.Lock()
+	if c.closing {
+		c.lifecycleMu.Unlock()
+		return
+	}
+	reply := make(chan struct{}, 1)
+	ids := append([]AuthInstanceID(nil), instances...)
+	select {
+	case c.commands <- cancelInstancesCommand{instances: ids, reply: reply}:
+		<-reply
+	case <-c.closed:
+		c.lifecycleMu.Unlock()
+		return
+	}
+	c.lifecycleMu.Unlock()
+	c.typedMu.Lock()
+	for _, instance := range ids {
+		for _, entry := range c.typedReads[instance] {
+			entry.done.Store(true)
+		}
+		delete(c.typedReads, instance)
+	}
+	c.typedMu.Unlock()
+}
+func (c *Coordinator) activateInstances(generations map[AuthInstanceID]TierGeneration) {
+	if c == nil || len(generations) == 0 {
+		return
+	}
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.closing {
+		return
+	}
+	copyGenerations := make(map[AuthInstanceID]TierGeneration, len(generations))
+	for instance, generation := range generations {
+		copyGenerations[instance] = generation
+	}
+	reply := make(chan struct{}, 1)
+	select {
+	case c.commands <- activateInstancesCommand{generations: copyGenerations, reply: reply}:
+		<-reply
+	case <-c.closed:
+	}
+}
 func (c *Coordinator) DoHostCallback(ctx context.Context, call func()) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -416,6 +472,8 @@ func (c *Coordinator) loop() {
 	leases := map[AuthInstanceID]*coordinatorJob{}
 	queue := map[AuthInstanceID][]*coordinatorJob{}
 	completedFence := map[AuthInstanceID]uint64{}
+	instanceGeneration := map[AuthInstanceID]TierGeneration{}
+	cancelledThrough := map[AuthInstanceID]TierGeneration{}
 	var drains []*drainWaiter
 	start := func(key operationKey, job *coordinatorJob) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -508,6 +566,9 @@ func (c *Coordinator) loop() {
 		case raw := <-c.commands:
 			switch cmd := raw.(type) {
 			case submitCommand:
+				if cmd.intent.Generation > instanceGeneration[cmd.intent.Instance] {
+					instanceGeneration[cmd.intent.Instance] = cmd.intent.Generation
+				}
 				nonce := uint64(0)
 				if cmd.intent.Class == OperationProbeSend {
 					nonce = c.typedNonce.Add(1)
@@ -518,7 +579,8 @@ func (c *Coordinator) loop() {
 					continue
 				}
 				f := &futureState{done: make(chan struct{})}
-				if !accepting || !formalSource(cmd.intent.Source) || (cmd.intent.Source == LegacyEnvelopeSource && cmd.intent.Class != OperationLegacyRefresh) {
+				cancelledGeneration, cancelled := cancelledThrough[cmd.intent.Instance]
+				if !accepting || (cancelled && cmd.intent.Generation <= cancelledGeneration) || !formalSource(cmd.intent.Source) || (cmd.intent.Source == LegacyEnvelopeSource && cmd.intent.Class != OperationLegacyRefresh) {
 					completeFuture(f, OperationResult{Err: errors.New("legacy coordinator is draining"), Disposition: ResultCancelled})
 					cmd.reply <- Future[OperationResult]{f}
 					continue
@@ -660,6 +722,39 @@ func (c *Coordinator) loop() {
 					ids = append(ids, id)
 				}
 				cmd.reply <- &CoordinatorSnapshot{Accepting: accepting, InFlight: len(inflight), Queued: queued, LeasedInstances: ids, HTTPSlotsInUse: len(c.httpSlots)}
+			case cancelInstancesCommand:
+				for _, instance := range cmd.instances {
+					cancelledThrough[instance] = instanceGeneration[instance]
+					for _, job := range queue[instance] {
+						if inflight[job.key] == job {
+							delete(inflight, job.key)
+						}
+						job.invalidated = true
+						completeFuture(job.future, OperationResult{Token: job.intent.Token, Err: context.Canceled, Disposition: ResultCancelled})
+					}
+					delete(queue, instance)
+					if job := leases[instance]; job != nil {
+						job.invalidated = true
+						if job.cancel != nil {
+							job.cancel()
+						}
+						delete(inflight, job.key)
+						delete(leases, instance)
+						completeFuture(job.future, OperationResult{Token: job.intent.Token, Err: context.Canceled, Disposition: ResultCancelled})
+					}
+				}
+				cmd.reply <- struct{}{}
+				finishDrains()
+			case activateInstancesCommand:
+				for instance, generation := range cmd.generations {
+					if generation > instanceGeneration[instance] {
+						instanceGeneration[instance] = generation
+					}
+					if generation > cancelledThrough[instance] {
+						delete(cancelledThrough, instance)
+					}
+				}
+				cmd.reply <- struct{}{}
 			case drainCommand:
 				accepting = false
 				waiter := &drainWaiter{command: cmd}

@@ -112,6 +112,66 @@ func (r *QuotaRefresher) reconcileProbeOrphans(persisted PersistentState, active
 	return firstErr
 }
 
+func (r *QuotaRefresher) holdProbeForRoster() error {
+	if r.runtimeStore == nil || r.probeController == nil {
+		return nil
+	}
+	persisted, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		return err
+	}
+	for instance, windows := range r.probeController.Snapshot() {
+		attempt, hasAttempt := persisted.ProbeAttempts[instance]
+		sent := hasAttempt && (attempt.Phase == ProbeAttemptSending || attempt.Phase == ProbeAttemptSent || attempt.Phase == ProbeAttemptSentUnknown)
+		sentWindows := make(map[ProbeWindowKind]struct{}, len(attempt.Windows))
+		if sent {
+			for _, kind := range attempt.Windows {
+				sentWindows[kind] = struct{}{}
+			}
+		}
+		for kind, window := range windows {
+			window.Deadline = time.Time{}
+			if _, belongsToSentAttempt := sentWindows[kind]; belongsToSentAttempt {
+				window.State = ProbeSentUnknown
+			} else {
+				window.State = ProbeWaitingRoster
+				window.AttemptID = ""
+			}
+			r.probeController.SetWindow(instance, kind, window)
+		}
+	}
+	snapshot := r.probeController.Snapshot()
+	_, err = r.runtimeStore.Update(func(s *PersistentState) error {
+		s.ProbeWindows = snapshot
+		for instance, attempt := range s.ProbeAttempts {
+			if attempt.Phase != ProbeAttemptSending && attempt.Phase != ProbeAttemptSent && attempt.Phase != ProbeAttemptSentUnknown {
+				delete(s.ProbeAttempts, instance)
+			}
+		}
+		return nil
+	})
+	return err
+}
+
+func (r *QuotaRefresher) recoverProbeFromRoster(bindings map[string]RuntimeBinding) error {
+	if r.runtimeStore == nil || r.probeController == nil {
+		return nil
+	}
+	now := r.now()
+	for _, binding := range bindings {
+		r.probeController.Advance(binding.Instance, ProbeEvent{Kind: ProbeEventRosterConfirmed, Now: now})
+		for _, kind := range []ProbeWindowKind{ProbeWindowFiveHour, ProbeWindowLong} {
+			window, ok := r.probeController.Window(binding.Instance, kind)
+			if ok && window.State == ProbeWaitingReset && !window.Deadline.After(now) {
+				window.State = ProbePendingCheck
+				window.Deadline = now
+				r.probeController.SetWindow(binding.Instance, kind, window)
+			}
+		}
+	}
+	return r.persistProbeWindows()
+}
+
 func activeProbeBindings(roster HostRosterSnapshot, bindings map[string]RuntimeBinding) (map[string]RuntimeBinding, map[AuthInstanceID]struct{}) {
 	tier := highestTierSet(roster)
 	byID := map[string]RuntimeBinding{}

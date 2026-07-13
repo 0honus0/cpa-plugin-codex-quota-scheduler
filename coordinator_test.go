@@ -104,6 +104,88 @@ func TestSuiteCoordinator(t *testing.T) {
 	})
 }
 
+func TestRosterRemovalCancelsInFlightAndFencesWriteback(t *testing.T) { //inv:INV-03,INV-20
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var applied int
+	c := NewCoordinator(CoordinatorOptions{
+		Execute: func(_ context.Context, intent Intent, _ *HeldLease) OperationResult {
+			if intent.Class == OperationLegacyRefresh {
+				close(started)
+				<-release // deliberately return late after cancellation
+			}
+			return OperationResult{Token: intent.Token}
+		},
+		Apply: func(Intent, OperationResult) error {
+			applied++
+			return nil
+		},
+	})
+	defer c.Close()
+
+	active := c.Submit(Intent{Instance: 41, Generation: 7, Class: OperationLegacyRefresh, Source: LegacyRefreshSource, Token: ExecutionToken{Instance: 41, Tier: 7}})
+	<-started
+	queued := c.Submit(Intent{Instance: 41, Generation: 7, Class: OperationQuotaRead, Source: SourceSchedulerInterval, Token: ExecutionToken{Instance: 41, Tier: 7}})
+
+	c.CancelInstances([]AuthInstanceID{41})
+	if got := queued.Await(context.Background()); got.Disposition != ResultCancelled {
+		t.Fatalf("queued disposition=%q, want cancelled", got.Disposition)
+	}
+	if got := active.Await(context.Background()); got.Disposition != ResultCancelled {
+		t.Fatalf("active disposition=%q, want cancelled", got.Disposition)
+	}
+	close(release)
+	time.Sleep(10 * time.Millisecond)
+	if applied != 0 {
+		t.Fatalf("late cancelled result applied %d writebacks", applied)
+	}
+
+	stale := c.Submit(Intent{Instance: 41, Generation: 7, Class: OperationQuotaRead, Source: SourceSchedulerInterval, Token: ExecutionToken{Instance: 41, Tier: 7}}).Await(context.Background())
+	if stale.Disposition != ResultCancelled {
+		t.Fatalf("post-removal stale submission disposition=%q", stale.Disposition)
+	}
+}
+
+func TestCancelInstancesDoesNotDeadlockTypedSubmission(t *testing.T) {
+	release := make(chan struct{})
+	c := NewCoordinator(CoordinatorOptions{Execute: func(_ context.Context, intent Intent, _ *HeldLease) OperationResult {
+		<-release
+		return OperationResult{Token: intent.Token}
+	}})
+	defer c.Close()
+	active := c.Submit(Intent{Instance: 52, Generation: 3, Class: OperationLegacyRefresh, Source: LegacyRefreshSource, Token: ExecutionToken{Instance: 52, Tier: 3}})
+
+	c.typedMu.Lock()
+	cancelDone := make(chan struct{})
+	go func() {
+		c.CancelInstances([]AuthInstanceID{52})
+		close(cancelDone)
+	}()
+	if got := active.Await(context.Background()); got.Disposition != ResultCancelled {
+		t.Fatalf("active disposition=%q", got.Disposition)
+	}
+	submitDone := make(chan struct{})
+	go func() {
+		_ = c.Submit(Intent{Instance: 52, Generation: 3, Class: OperationQuotaRead, Source: SourceSchedulerInterval, Token: ExecutionToken{Instance: 52, Tier: 3}})
+		close(submitDone)
+	}()
+	select {
+	case <-submitDone:
+	case <-time.After(time.Second):
+		c.typedMu.Unlock()
+		<-cancelDone
+		close(release)
+		t.Fatal("CancelInstances held lifecycle authorization while waiting for typed state")
+	}
+	c.typedMu.Unlock()
+	select {
+	case <-cancelDone:
+	case <-time.After(time.Second):
+		t.Fatal("CancelInstances did not finish")
+	}
+	close(release)
+}
+
 func TestMockGroupECoordinatorInterleavings(t *testing.T) { TestSuiteCoordinator(t) }
 
 func TestCoordinatorNonCooperativeExpiryReleasesLease(t *testing.T) {

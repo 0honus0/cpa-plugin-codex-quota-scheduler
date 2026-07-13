@@ -154,6 +154,144 @@ func TestProductionProbeFinalStartDeniedEndToEnd(t *testing.T) {
 	}
 }
 
+func TestFailClosedHoldsAndRecoveryRecomputesProbe(t *testing.T) { //inv:INV-21,INV-35
+	now := time.Date(2026, 7, 14, 8, 30, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
+	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":80,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(-time.Hour).Format(time.RFC3339)))
+	active := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(4*time.Hour).Format(time.RFC3339)))
+	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)}, quota: [][]byte{lazy, active}}
+	r := newDueProbeRuntime(t, now, host)
+	b, _ := r.bindings.Lookup("a")
+	if _, err := r.runtimeStore.Update(func(s *PersistentState) error {
+		s.ProbeAttempts[b.Instance] = ProbeAttempt{Instance: b.Instance, AttemptID: "prepared", Phase: ProbeAttemptPrepared, Windows: []ProbeWindowKind{ProbeWindowFiveHour}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	failClosed := ActiveRoster{Capability: CapabilityA, Confirmed: true, Health: RosterFailClosed, BackgroundAllowed: false, Generation: 1, LifecycleRevision: 2, Instances: []string{"a"}, Entries: []RosterEntry{{ID: "a", AuthIndex: "idx", Provider: "codex", Priority: intPtr(9)}}}
+	r.ObserveRosterLifecycle(failClosed)
+	if err := r.RunProbeDueOnce(context.Background()); !errors.Is(err, ErrCapabilityB) {
+		t.Fatalf("FailClosed Probe err=%v", err)
+	}
+	if len(host.urls) != 0 {
+		t.Fatalf("FailClosed started requests=%v", host.urls)
+	}
+	w, ok := r.probeController.Window(b.Instance, ProbeWindowFiveHour)
+	if !ok || w.State != ProbeWaitingRoster || w.Deadline != (time.Time{}) {
+		t.Fatalf("held window=%#v ok=%v", w, ok)
+	}
+	persisted, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok = persisted.ProbeAttempts[b.Instance]; ok {
+		t.Fatalf("prepared attempt retained in roster hold: %#v", persisted.ProbeAttempts[b.Instance])
+	}
+
+	recovered := HostRosterSnapshot{Capability: CapabilityA, Confirmed: true, BackgroundAllowed: true, Health: RosterHealthy, Generation: 1, LifecycleRevision: 3, Entries: failClosed.Entries}
+	if err = r.PublishAuthoritativeRoster(context.Background(), recovered); err != nil {
+		t.Fatal(err)
+	}
+	w, ok = r.probeController.Window(b.Instance, ProbeWindowFiveHour)
+	if !ok || w.State != ProbePendingCheck || !w.Deadline.Equal(now) {
+		t.Fatalf("recomputed window=%#v ok=%v", w, ok)
+	}
+	if err = r.RunProbeDueOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := host.urls; len(got) != 3 || got[0] != r.state.Config().QuotaEndpoint || got[1] != codexResetProbeEndpoint || got[2] != r.state.Config().QuotaEndpoint {
+		t.Fatalf("recovery requests=%v", got)
+	}
+}
+
+func TestFailClosedHoldPreservesSentAttemptOnlyForItsWindows(t *testing.T) { //inv:INV-17,INV-35
+	now := time.Date(2026, 7, 14, 8, 40, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
+	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)}}
+	r := newDueProbeRuntime(t, now, host)
+	b, _ := r.bindings.Lookup("a")
+	r.probeController.SetWindow(b.Instance, ProbeWindowLong, ProbeWindow{State: ProbeRetryWait, Deadline: now.Add(time.Minute), Baseline: UsageOnlyProbeBaseline(55, now.Add(time.Minute))})
+	if _, err := r.runtimeStore.Update(func(s *PersistentState) error {
+		s.ProbeWindows = r.probeController.Snapshot()
+		s.ProbeAttempts[b.Instance] = ProbeAttempt{Instance: b.Instance, AttemptID: "sent", Phase: ProbeAttemptSent, Windows: []ProbeWindowKind{ProbeWindowFiveHour}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r.ObserveRosterLifecycle(ActiveRoster{Capability: CapabilityA, Confirmed: true, Health: RosterFailClosed, Generation: 1, LifecycleRevision: 2, Instances: []string{"a"}})
+	five, _ := r.probeController.Window(b.Instance, ProbeWindowFiveHour)
+	long, _ := r.probeController.Window(b.Instance, ProbeWindowLong)
+	if five.State != ProbeSentUnknown || long.State != ProbeWaitingRoster {
+		t.Fatalf("five=%s long=%s", five.State, long.State)
+	}
+	persisted, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.ProbeAttempts[b.Instance].AttemptID != "sent" {
+		t.Fatalf("sent attempt not retained: %#v", persisted.ProbeAttempts[b.Instance])
+	}
+}
+
+func TestRemovedProbeLateGetDoesNotRecreateState(t *testing.T) { //inv:INV-03,INV-20
+	now := time.Date(2026, 7, 14, 8, 45, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
+	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "auth.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)}}
+	entries := []RosterEntry{
+		{ID: "a", AuthIndex: "a", Provider: "codex", Priority: intPtr(9)},
+		{ID: "b", AuthIndex: "b", Provider: "codex", Priority: intPtr(9)},
+	}
+	roster := HostRosterSnapshot{Capability: CapabilityA, Confirmed: true, BackgroundAllowed: true, Health: RosterHealthy, Generation: 1, Entries: entries}
+	adapter := &rosterCredentialHost{host: host, roster: roster}
+	cfg := DefaultConfig()
+	cfg.EnableResetProbe = true
+	r, err := NewProductionQuotaRefresher(host, NewPluginState(cfg), adapter, roster, filepath.Join(t.TempDir(), "state.json"), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.bindings = r.bindings
+	if _, _, err = r.BootstrapBinding(context.Background(), "a"); err != nil {
+		t.Fatal(err)
+	}
+	b, _, err := r.BootstrapBinding(context.Background(), "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.probeController.SetWindow(b.Instance, ProbeWindowFiveHour, ProbeWindow{State: ProbePendingCheck, Deadline: now, Baseline: ResetProbeBaseline(now.Add(-time.Hour), 80, fiveHourSeconds*time.Second)})
+	if err = r.persistProbeWindows(); err != nil {
+		t.Fatal(err)
+	}
+	host.mu.Lock()
+	host.getStarted = make(chan struct{})
+	host.releaseGet = make(chan struct{})
+	started, releaseGet := host.getStarted, host.releaseGet
+	host.mu.Unlock()
+	done := make(chan error, 1)
+	go func() { done <- r.RunProbeDueOnce(context.Background()) }()
+	<-started
+	replacement := HostRosterSnapshot{Capability: CapabilityA, Confirmed: true, BackgroundAllowed: true, Health: RosterHealthy, Generation: 2, Entries: entries[:1]}
+	if err = r.PublishAuthoritativeRoster(context.Background(), replacement); err != nil {
+		t.Fatal(err)
+	}
+	close(releaseGet)
+	<-done
+	time.Sleep(20 * time.Millisecond)
+	persisted, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := persisted.ProbeWindows[b.Instance]; ok {
+		t.Fatalf("late removed Probe recreated windows=%v", persisted.ProbeWindows[b.Instance])
+	}
+	if _, ok := persisted.ProbeAttempts[b.Instance]; ok {
+		t.Fatalf("late removed Probe recreated attempt=%v", persisted.ProbeAttempts[b.Instance])
+	}
+	if len(host.urls) != 0 {
+		t.Fatalf("removed Probe started OpenAI requests=%v", host.urls)
+	}
+}
+
 func TestProductionProvisionalProbeMarkerEndToEnd(t *testing.T) {
 	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})

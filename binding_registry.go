@@ -32,6 +32,11 @@ type BindingRegistry struct {
 	bindings map[string]RuntimeBinding
 }
 
+type RosterReconcileResult struct {
+	Bindings map[string]RuntimeBinding
+	Removed  []RuntimeBinding
+}
+
 func NewBindingRegistry(store *StateStore) (*BindingRegistry, error) {
 	state, _, err := store.Load()
 	if err != nil {
@@ -91,6 +96,86 @@ func (r *BindingRegistry) ObserveExternalLogin(authID string, login LoginEpoch, 
 	}
 	r.bindings = committed.Bindings
 	return nil
+}
+
+func (r *BindingRegistry) ReconcileRoster(ctx context.Context, roster HostRosterSnapshot, host CredentialHost) (RosterReconcileResult, error) {
+	if roster.Capability != CapabilityA {
+		return RosterReconcileResult{}, ErrCapabilityB
+	}
+	_, ids, ok := HighestCodexTier(roster.Entries)
+	if !ok {
+		return RosterReconcileResult{}, ErrBindingNotRosterConfirmed
+	}
+	entries := make(map[string]RosterEntry, len(ids))
+	for _, entry := range roster.Entries {
+		for _, id := range ids {
+			if entry.ID == id {
+				entries[id] = entry
+				break
+			}
+		}
+	}
+	generation := AuthBindingEpoch(roster.Generation)
+	if generation == 0 {
+		generation = 1
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	next := make(map[string]RuntimeBinding, len(ids))
+	chains := map[AuthInstanceID]TransitionChain{}
+	for _, id := range ids {
+		entry := entries[id]
+		if existing, found := r.bindings[id]; found && existing.Instance != 0 {
+			existing.AuthIndex = entry.AuthIndex
+			existing.Generation = generation
+			next[id] = existing
+			continue
+		}
+		instance := legacyAuthInstanceID(id)
+		observed, err := host.GetAuth(ctx, instance)
+		if err != nil {
+			return RosterReconcileResult{}, err
+		}
+		blocked := r.bindings[id].AuthBlocked
+		admission := InstanceAdmissionEpoch(1)
+		if state, err := r.store.PersistentSnapshot(); err == nil {
+			if _, seen := state.CredentialChains[instance]; seen {
+				admission++
+			}
+		}
+		next[id] = RuntimeBinding{AuthID: id, AuthIndex: entry.AuthIndex, AuthName: observed.Name, Instance: instance, Admission: admission, Generation: generation, Login: 1, Token: 1, Fingerprint: observed.Fingerprint, AuthBlocked: blocked}
+		chains[instance] = TransitionChain{Cursor: observed.Fingerprint}
+	}
+	removed := make([]RuntimeBinding, 0)
+	for id, binding := range r.bindings {
+		if _, keep := next[id]; !keep && binding.Instance != 0 {
+			removed = append(removed, binding)
+		}
+	}
+	committed, err := r.store.UpdateMirrored(func(s *PersistentState) error {
+		for id := range s.Bindings {
+			delete(s.Bindings, id)
+		}
+		for id, binding := range next {
+			s.Bindings[id] = binding
+		}
+		for instance, chain := range chains {
+			if _, exists := s.CredentialChains[instance]; !exists {
+				s.CredentialChains[instance] = chain
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return RosterReconcileResult{}, err
+	}
+	r.bindings = committed.Bindings
+	out := make(map[string]RuntimeBinding, len(r.bindings))
+	for id, binding := range r.bindings {
+		out[id] = binding
+	}
+	return RosterReconcileResult{Bindings: out, Removed: removed}, nil
 }
 
 // ObserveAuthoritative performs the INV-33 read-only genesis bootstrap. It

@@ -517,6 +517,64 @@ func TestProductionRosterPublicationBootstrapsHighestTierAndUsesWAL(t *testing.T
 	}
 }
 
+func TestProductionRosterReplacementPersistsFencesBeforePublication(t *testing.T) { //inv:INV-03,INV-20
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	host := &countingProductionHost{auth: map[string]pluginapi.HostAuthGetResponse{
+		"a": {AuthIndex: "a", Name: "a.json", JSON: json.RawMessage(`{"access_token":"a","refresh_token":"ra","account_id":"acct-a"}`)},
+		"b": {AuthIndex: "b", Name: "b.json", JSON: json.RawMessage(`{"access_token":"b","refresh_token":"rb","account_id":"acct-b"}`)},
+	}}
+	adapter := &rosterCredentialHost{host: host, roster: HostRosterSnapshot{Capability: CapabilityB}}
+	r, err := NewProductionQuotaRefresher(host, NewPluginState(DefaultConfig()), adapter, HostRosterSnapshot{Capability: CapabilityB}, filepath.Join(t.TempDir(), "state.json"), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.bindings = r.bindings
+	initial := HostRosterSnapshot{Capability: CapabilityA, Generation: 1, Entries: []RosterEntry{
+		{ID: "a", AuthIndex: "a", Provider: "codex", Priority: intPtr(9)},
+		{ID: "b", AuthIndex: "b", Provider: "codex", Priority: intPtr(9)},
+	}}
+	if err = r.PublishAuthoritativeRoster(context.Background(), initial); err != nil {
+		t.Fatal(err)
+	}
+	b, ok := r.bindings.Lookup("b")
+	if !ok {
+		t.Fatal("initial b binding missing")
+	}
+	if _, err = r.runtimeStore.Update(func(s *PersistentState) error {
+		s.ProbeWindows[b.Instance] = map[ProbeWindowKind]ProbeWindow{ProbeWindowFiveHour: {State: ProbeRetryWait, Deadline: now.Add(time.Minute)}}
+		s.ProbeAttempts[b.Instance] = ProbeAttempt{Instance: b.Instance, AttemptID: "removed", Phase: ProbeAttemptPrepared}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r.probeController.SetWindow(b.Instance, ProbeWindowFiveHour, ProbeWindow{State: ProbeRetryWait, Deadline: now.Add(time.Minute)})
+
+	replacement := HostRosterSnapshot{Capability: CapabilityA, Generation: 2, Entries: []RosterEntry{{ID: "a", AuthIndex: "a", Provider: "codex", Priority: intPtr(9)}}}
+	if err = r.PublishAuthoritativeRoster(context.Background(), replacement); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok = r.bindings.Lookup("b"); ok {
+		t.Fatal("removed binding retained")
+	}
+	a, ok := r.bindings.Lookup("a")
+	if !ok || a.Generation != 2 {
+		t.Fatalf("retained binding generation=%d ok=%v", a.Generation, ok)
+	}
+	persisted, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok = persisted.ProbeWindows[b.Instance]; ok {
+		t.Fatal("removed Probe windows retained")
+	}
+	if _, ok = persisted.ProbeAttempts[b.Instance]; ok {
+		t.Fatal("removed Probe attempt retained")
+	}
+	if got := highestTierSet(r.runtimeRoster()); len(got) != 1 {
+		t.Fatalf("published roster=%v", got)
+	}
+}
+
 type countingProductionHost struct {
 	list, get, http, save, probe int
 	auth                         map[string]pluginapi.HostAuthGetResponse
