@@ -20,6 +20,9 @@ const quotaUserAgent = "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTermi
 const resetCreditsEndpoint = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
 const codexTokenEndpoint = "https://auth.openai.com/oauth/token"
 const codexClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
+const rosterLifecycleRequestHeader = "X-CPA-Roster-Lifecycle"
+const rosterLifecycleDegraded = "degraded"
+const rosterLifecycleProvisional = "provisional"
 
 const maxErrorBodySummaryLen = 220
 
@@ -93,7 +96,7 @@ func NewProductionQuotaRefresher(host HostClient, state *PluginState, credential
 	if err != nil {
 		return nil, err
 	}
-	r.runtimeStore, r.bindings, r.credentials, r.roster = store, bindings, credentials, roster
+	r.runtimeStore, r.bindings, r.credentials, r.roster = store, bindings, credentials, normalizeHostRosterLifecycle(roster)
 	if err := r.initProbeRuntime(); err != nil {
 		return nil, err
 	}
@@ -112,13 +115,48 @@ func (r *QuotaRefresher) runtimeRoster() HostRosterSnapshot {
 	defer r.rosterMu.RUnlock()
 	return r.roster
 }
-func (r *QuotaRefresher) runtimeAuthorized() bool {
-	return r.runtimeStore == nil || r.runtimeRoster().Capability == CapabilityA
+func (r *QuotaRefresher) ObserveRosterLifecycle(active ActiveRoster) {
+	if r == nil {
+		return
+	}
+	r.rosterMu.Lock()
+	r.roster = hostRosterSnapshotFromActive(active)
+	r.rosterMu.Unlock()
+	r.mu.Lock()
+	requested := r.startRequested
+	r.mu.Unlock()
+	if requested && (r.normalBackgroundAllowed() || r.probeBackgroundAllowed()) {
+		r.Start()
+	}
+}
+func (r *QuotaRefresher) normalBackgroundAllowed() bool {
+	if r == nil {
+		return false
+	}
+	if r.runtimeStore == nil {
+		return true
+	}
+	roster := normalizeHostRosterLifecycle(r.runtimeRoster())
+	return roster.Capability == CapabilityA && roster.Confirmed && roster.BackgroundAllowed && (roster.Health == RosterHealthy || roster.Health == RosterDegraded)
+}
+func (r *QuotaRefresher) probeBackgroundAllowed() bool {
+	if r == nil {
+		return false
+	}
+	if r.normalBackgroundAllowed() {
+		return true
+	}
+	if r.runtimeStore == nil {
+		return true
+	}
+	roster := normalizeHostRosterLifecycle(r.runtimeRoster())
+	return roster.Capability == CapabilityB && roster.Provisional && roster.BackgroundAllowed && roster.Health == RosterWaiting
 }
 func (r *QuotaRefresher) PublishAuthoritativeRoster(ctx context.Context, roster HostRosterSnapshot) error {
 	if r == nil || r.bindings == nil || r.credentials == nil {
 		return errors.New("runtime wiring unavailable")
 	}
+	roster = normalizeHostRosterLifecycle(roster)
 	_, ids, ok := HighestCodexTier(roster.Entries)
 	if roster.Capability != CapabilityA || !ok {
 		r.rosterMu.Lock()
@@ -243,7 +281,7 @@ func (r *QuotaRefresher) persistLegacySentUnknown(intent Intent, suppressUntil t
 }
 
 func (r *QuotaRefresher) RefreshOnce() error {
-	if !r.runtimeAuthorized() {
+	if !r.normalBackgroundAllowed() {
 		return ErrCapabilityB
 	}
 	_, version := r.state.CPAAdmissionVersioned()
@@ -276,7 +314,7 @@ func (r *QuotaRefresher) refreshOnce(version uint64) error {
 }
 
 func (r *QuotaRefresher) RefreshDueOnce() error {
-	if !r.runtimeAuthorized() {
+	if !r.normalBackgroundAllowed() {
 		return ErrCapabilityB
 	}
 	_, version := r.state.CPAAdmissionVersioned()
@@ -462,7 +500,7 @@ func (r *QuotaRefresher) refreshAuths(eligible []pluginapi.HostAuthFileEntry, ve
 }
 
 func (r *QuotaRefresher) RefreshOneAuthID(authID string) error {
-	if !r.runtimeAuthorized() {
+	if !r.normalBackgroundAllowed() {
 		return ErrCapabilityB
 	}
 	authID = strings.TrimSpace(authID)
@@ -507,7 +545,7 @@ func (r *QuotaRefresher) refreshOneAuthIDVersioned(authID string, version uint64
 }
 
 func (r *QuotaRefresher) RefreshOneSoon(authID string) {
-	if !r.runtimeAuthorized() {
+	if !r.normalBackgroundAllowed() {
 		return
 	}
 	_, version, _ := r.state.AdmittedCPAPriorityVersioned(strings.TrimSpace(authID))
@@ -539,7 +577,7 @@ func (r *QuotaRefresher) Start() {
 	r.mu.Lock()
 	r.startRequested = true
 	r.mu.Unlock()
-	if !r.runtimeAuthorized() {
+	if !r.normalBackgroundAllowed() && !r.probeBackgroundAllowed() {
 		return
 	}
 	r.mu.Lock()
@@ -701,7 +739,7 @@ func (r *QuotaRefresher) Stop() {
 }
 
 func (r *QuotaRefresher) RefreshSoon() {
-	if !r.runtimeAuthorized() {
+	if !r.normalBackgroundAllowed() {
 		return
 	}
 	r.mu.Lock()
@@ -726,7 +764,7 @@ func (r *QuotaRefresher) RefreshSoon() {
 }
 
 func (r *QuotaRefresher) RefreshDueSoon() {
-	if !r.runtimeAuthorized() {
+	if !r.normalBackgroundAllowed() {
 		return
 	}
 	_, version := r.state.CPAAdmissionVersioned()
@@ -736,7 +774,7 @@ func (r *QuotaRefresher) RefreshDueSoon() {
 }
 
 func (r *QuotaRefresher) RefreshDueCandidatesSoon(req pluginapi.SchedulerPickRequest, version uint64) {
-	if !r.runtimeAuthorized() {
+	if !r.normalBackgroundAllowed() {
 		return
 	}
 	_ = req
@@ -746,7 +784,7 @@ func (r *QuotaRefresher) RefreshDueCandidatesSoon(req pluginapi.SchedulerPickReq
 }
 
 func (r *QuotaRefresher) OnSchedulerPick(req pluginapi.SchedulerPickRequest, version uint64, now time.Time) {
-	if r == nil || r.refreshController == nil || !r.runtimeAuthorized() {
+	if r == nil || r.refreshController == nil || !r.normalBackgroundAllowed() {
 		return
 	}
 	snapshot := r.state.Snapshot(now)
@@ -971,6 +1009,30 @@ func (r *QuotaRefresher) getAuthWithAdmissionPermit(authID string, version uint6
 func (r *QuotaRefresher) doWithAdmissionPermit(authID string, version uint64, req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
 	if !r.state.BeginCPAAdmissionCall(authID, version) {
 		return pluginapi.HTTPResponse{}, errCPAAdmissionChanged
+	}
+	return r.doBackgroundHTTPRequest(req, false)
+}
+
+func (r *QuotaRefresher) doBackgroundHTTPRequest(req pluginapi.HTTPRequest, probe bool) (pluginapi.HTTPResponse, error) {
+	allowed := r.normalBackgroundAllowed()
+	if probe {
+		allowed = r.probeBackgroundAllowed()
+	}
+	if !allowed {
+		return pluginapi.HTTPResponse{}, ErrCapabilityB
+	}
+	roster := normalizeHostRosterLifecycle(r.runtimeRoster())
+	marker := ""
+	if roster.Health == RosterDegraded {
+		marker = rosterLifecycleDegraded
+	} else if probe && roster.Provisional {
+		marker = rosterLifecycleProvisional
+	}
+	if marker != "" {
+		if req.Headers == nil {
+			req.Headers = make(http.Header)
+		}
+		req.Headers.Set(rosterLifecycleRequestHeader, marker)
 	}
 	return r.host.Do(req)
 }

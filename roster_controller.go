@@ -35,6 +35,7 @@ type ActiveRoster struct {
 	Entries           []RosterEntry
 	ConfirmedAt       time.Time
 	LastSyncAt        time.Time
+	DegradedSince     time.Time
 	Health            RosterHealth
 	BackgroundAllowed bool
 }
@@ -43,6 +44,7 @@ type RosterControllerOptions struct {
 	Host               HostAuthLister
 	Now                func() time.Time
 	Publish            func(context.Context, ActiveRoster) error
+	Observe            func(ActiveRoster)
 	Cancel             func([]string)
 	Candidates         func() []string // deliberately never consulted for roster truth
 	Provisional        *ActiveRoster
@@ -55,6 +57,7 @@ type RosterController struct {
 	host               HostAuthLister
 	now                func() time.Time
 	publish            func(context.Context, ActiveRoster) error
+	observe            func(ActiveRoster)
 	cancel             func([]string)
 	current            ActiveRoster
 	inFlight           chan struct{}
@@ -68,7 +71,7 @@ func NewRosterController(opts RosterControllerOptions) *RosterController {
 	if now == nil {
 		now = time.Now
 	}
-	c := &RosterController{host: opts.Host, now: now, publish: opts.Publish, cancel: opts.Cancel, probeOnProvisional: opts.ProbeOnProvisional, verifyProvisional: opts.VerifyProvisional}
+	c := &RosterController{host: opts.Host, now: now, publish: opts.Publish, observe: opts.Observe, cancel: opts.Cancel, probeOnProvisional: opts.ProbeOnProvisional, verifyProvisional: opts.VerifyProvisional}
 	c.current = ActiveRoster{Capability: CapabilityB, Health: RosterWaiting}
 	if opts.Provisional != nil {
 		p := cloneActiveRoster(*opts.Provisional)
@@ -104,6 +107,7 @@ func (c *RosterController) WakeForProbe(ctx context.Context) (ActiveRoster, erro
 			got = cloneActiveRoster(c.current)
 		}
 		c.mu.Unlock()
+		c.notify(got)
 	}
 	return got, err
 }
@@ -168,7 +172,11 @@ func (c *RosterController) finishSync(ctx context.Context, entries []RosterEntry
 			syncErr = errors.New("authoritative host roster has no confirmed codex tier")
 		} else {
 			filtered := filterRosterEntries(entries, ids)
-			next := ActiveRoster{Capability: CapabilityA, Confirmed: true, HighestPriority: priority, Generation: old.Generation + 1, Instances: ids, Entries: filtered, ConfirmedAt: now, LastSyncAt: now, Health: RosterHealthy, BackgroundAllowed: true}
+			generation := old.Generation
+			if !sameRoster(old, priority, filtered, ids) {
+				generation++
+			}
+			next := ActiveRoster{Capability: CapabilityA, Confirmed: true, HighestPriority: priority, Generation: generation, Instances: ids, Entries: filtered, ConfirmedAt: now, LastSyncAt: now, Health: RosterHealthy, BackgroundAllowed: true}
 			c.mu.Unlock()
 			if c.publish != nil {
 				syncErr = c.publish(ctx, cloneActiveRoster(next))
@@ -191,6 +199,7 @@ func (c *RosterController) finishSync(ctx context.Context, entries []RosterEntry
 	close(done)
 	out := cloneActiveRoster(c.current)
 	c.mu.Unlock()
+	c.notify(out)
 	return out, syncErr
 }
 
@@ -205,12 +214,39 @@ func degradedRoster(old ActiveRoster, now time.Time) ActiveRoster {
 		old.Capability, old.Confirmed, old.Health = CapabilityB, false, RosterWaiting
 		return old
 	}
-	if now.Sub(old.ConfirmedAt) < rosterDegradedLimit {
+	if old.DegradedSince.IsZero() {
+		old.DegradedSince = now
+	}
+	if now.Sub(old.DegradedSince) < rosterDegradedLimit {
 		old.Health, old.BackgroundAllowed = RosterDegraded, true
 	} else {
 		old.Health = RosterFailClosed
 	}
 	return old
+}
+
+func (c *RosterController) notify(active ActiveRoster) {
+	if c.observe != nil {
+		c.observe(cloneActiveRoster(active))
+	}
+}
+
+func sameRoster(old ActiveRoster, priority int, entries []RosterEntry, ids []string) bool {
+	if !old.Confirmed || old.HighestPriority != priority || len(old.Instances) != len(ids) || len(old.Entries) != len(entries) {
+		return false
+	}
+	for i := range ids {
+		if old.Instances[i] != ids[i] {
+			return false
+		}
+	}
+	for i := range entries {
+		a, b := old.Entries[i], entries[i]
+		if a.ID != b.ID || a.AuthIndex != b.AuthIndex || a.Provider != b.Provider || a.Priority == nil || b.Priority == nil || *a.Priority != *b.Priority {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *RosterController) lastSyncError() error { c.mu.Lock(); defer c.mu.Unlock(); return c.lastErr }

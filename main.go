@@ -135,12 +135,19 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 	globalRosterController = NewRosterController(RosterControllerOptions{
 		Host: ABIHostAuthLister{},
 		Publish: func(ctx context.Context, active ActiveRoster) error {
-			snapshot := HostRosterSnapshot{Capability: active.Capability, Entries: append([]RosterEntry(nil), active.Entries...), ConfirmedAt: active.ConfirmedAt}
+			snapshot := hostRosterSnapshotFromActive(active)
 			hostRosterLatest.Store(&snapshot)
 			if production == nil {
 				return ErrCapabilityB
 			}
 			return production.PublishAuthoritativeRoster(ctx, snapshot)
+		},
+		Observe: func(active ActiveRoster) {
+			snapshot := hostRosterSnapshotFromActive(active)
+			hostRosterLatest.Store(&snapshot)
+			if production != nil {
+				production.ObserveRosterLifecycle(active)
+			}
 		},
 		ProbeOnProvisional: globalState.Config().ProbeOnProvisionalRoster,
 	})

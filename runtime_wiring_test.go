@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -521,6 +522,7 @@ type countingProductionHost struct {
 	savedName                    string
 	httpResp                     pluginapi.HTTPResponse
 	getErr                       map[string]error
+	requests                     []pluginapi.HTTPRequest
 }
 
 func (h *countingProductionHost) total() int { return h.list + h.get + h.http + h.save + h.probe }
@@ -542,10 +544,60 @@ func (h *countingProductionHost) SaveAuth(n string, _ json.RawMessage) error {
 }
 func (h *countingProductionHost) Do(req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
 	h.http++
+	h.requests = append(h.requests, req)
 	if req.URL == codexResetProbeEndpoint {
 		h.probe++
 	}
 	return h.httpResp, nil
+}
+
+func TestProductionRosterLifecycleGatesBackgroundRequests(t *testing.T) {
+	host := &countingProductionHost{httpResp: pluginapi.HTTPResponse{StatusCode: http.StatusOK}}
+	state := NewPluginState(DefaultConfig())
+	version := state.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 7, AuthIDs: map[string]struct{}{"a": {}}})
+	adapter := &rosterCredentialHost{host: host, roster: HostRosterSnapshot{Capability: CapabilityB}}
+	r, err := NewProductionQuotaRefresher(host, state, adapter, HostRosterSnapshot{Capability: CapabilityB}, filepath.Join(t.TempDir(), "state.json"), time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.bindings = r.bindings
+
+	healthy := ActiveRoster{Capability: CapabilityA, Confirmed: true, Health: RosterHealthy, BackgroundAllowed: true, Instances: []string{"a"}}
+	r.ObserveRosterLifecycle(healthy)
+	if !r.normalBackgroundAllowed() || !r.probeBackgroundAllowed() {
+		t.Fatal("healthy roster did not authorize normal and probe background work")
+	}
+
+	degraded := healthy
+	degraded.Health = RosterDegraded
+	degraded.DegradedSince = time.Now().Add(-time.Minute)
+	r.ObserveRosterLifecycle(degraded)
+	if _, err := r.doWithAdmissionPermit("a", version, pluginapi.HTTPRequest{Method: http.MethodGet, URL: "https://example.invalid/quota"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(host.requests) != 1 || host.requests[0].Headers.Get(rosterLifecycleRequestHeader) != rosterLifecycleDegraded {
+		t.Fatalf("degraded request marker=%q requests=%#v", host.requests[0].Headers.Get(rosterLifecycleRequestHeader), host.requests)
+	}
+
+	failClosed := degraded
+	failClosed.Health = RosterFailClosed
+	failClosed.BackgroundAllowed = false
+	r.ObserveRosterLifecycle(failClosed)
+	if r.normalBackgroundAllowed() || r.probeBackgroundAllowed() {
+		t.Fatal("fail-closed roster authorized background work")
+	}
+	if _, err := r.doWithAdmissionPermit("a", version, pluginapi.HTTPRequest{Method: http.MethodGet, URL: "https://example.invalid/quota"}); !errors.Is(err, ErrCapabilityB) {
+		t.Fatalf("fail-closed HTTP err=%v", err)
+	}
+	if len(host.requests) != 1 {
+		t.Fatalf("fail-closed started HTTP: %#v", host.requests)
+	}
+
+	provisional := ActiveRoster{Capability: CapabilityB, Provisional: true, Health: RosterWaiting, BackgroundAllowed: true, Instances: []string{"a"}}
+	r.ObserveRosterLifecycle(provisional)
+	if r.normalBackgroundAllowed() || !r.probeBackgroundAllowed() {
+		t.Fatalf("provisional gates normal=%v probe=%v", r.normalBackgroundAllowed(), r.probeBackgroundAllowed())
+	}
 }
 func (h *countingProductionHost) Log(string, string, map[string]any) {}
 

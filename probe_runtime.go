@@ -132,11 +132,11 @@ func (r *QuotaRefresher) RunProbeDueOnce(ctx context.Context) error {
 	if rosterController != nil {
 		_, _ = rosterController.WakeForProbe(ctx)
 	}
+	if !r.probeBackgroundAllowed() {
+		return ErrCapabilityB
+	}
 	if r.probeController == nil {
 		return errors.New("probe runtime unavailable")
-	}
-	if r.runtimeRoster().Capability != CapabilityA {
-		return ErrCapabilityB
 	}
 	if err := r.bootstrapProbeWindows(); err != nil {
 		return err
@@ -223,6 +223,9 @@ func (r *QuotaRefresher) RunProbeDueOnce(ctx context.Context) error {
 }
 
 func (r *QuotaRefresher) RunProbeRecoveryOnce(ctx context.Context) error {
+	if !r.probeBackgroundAllowed() {
+		return ErrCapabilityB
+	}
 	if r.probeWAL == nil || r.probeController == nil {
 		return nil
 	}
@@ -411,7 +414,7 @@ func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *
 		held.MarkProbeSent(attempt.SuppressUntil)
 		err = held.DoHTTP(ctx, func(context.Context) error {
 			return r.probeWAL.ExecuteSend(func() error {
-				resp, e := r.host.Do(pluginapi.HTTPRequest{Method: http.MethodPost, URL: codexResetProbeEndpoint, Headers: http.Header{"Authorization": []string{"Bearer " + pre.Credentials.AccessToken}, "Chatgpt-Account-Id": []string{pre.Credentials.ChatGPTAccountID}, "Content-Type": []string{"application/json"}}, Body: resetProbePayloadBytes()})
+				resp, e := r.doBackgroundHTTPRequest(pluginapi.HTTPRequest{Method: http.MethodPost, URL: codexResetProbeEndpoint, Headers: http.Header{"Authorization": []string{"Bearer " + pre.Credentials.AccessToken}, "Chatgpt-Account-Id": []string{pre.Credentials.ChatGPTAccountID}, "Content-Type": []string{"application/json"}}, Body: resetProbePayloadBytes()}, true)
 				if e != nil {
 					return e
 				}
@@ -487,9 +490,9 @@ func (r *QuotaRefresher) typedFetchQuota(ctx context.Context, held *HeldLease, c
 	var resp pluginapi.HTTPResponse
 	err := held.DoHTTP(ctx, func(context.Context) error {
 		var err error
-		resp, err = r.host.Do(pluginapi.HTTPRequest{Method: http.MethodGet, URL: r.state.Config().QuotaEndpoint, Headers: http.Header{
+		resp, err = r.doBackgroundHTTPRequest(pluginapi.HTTPRequest{Method: http.MethodGet, URL: r.state.Config().QuotaEndpoint, Headers: http.Header{
 			"Authorization": []string{"Bearer " + credentials.AccessToken}, "Chatgpt-Account-Id": []string{credentials.ChatGPTAccountID}, "Content-Type": []string{"application/json"}, "User-Agent": []string{quotaUserAgent},
-		}})
+		}}, true)
 		return err
 	})
 	if err != nil {

@@ -24,9 +24,32 @@ type RosterEntry struct {
 }
 
 type HostRosterSnapshot struct {
-	Capability  HostCapability
-	Entries     []RosterEntry
-	ConfirmedAt time.Time
+	Capability        HostCapability
+	Confirmed         bool
+	Provisional       bool
+	BackgroundAllowed bool
+	Health            RosterHealth
+	Generation        uint64
+	Entries           []RosterEntry
+	ConfirmedAt       time.Time
+	DegradedSince     time.Time
+}
+
+func hostRosterSnapshotFromActive(active ActiveRoster) HostRosterSnapshot {
+	return HostRosterSnapshot{
+		Capability: active.Capability, Confirmed: active.Confirmed, Provisional: active.Provisional,
+		BackgroundAllowed: active.BackgroundAllowed, Health: active.Health, Generation: active.Generation,
+		Entries: append([]RosterEntry(nil), active.Entries...), ConfirmedAt: active.ConfirmedAt, DegradedSince: active.DegradedSince,
+	}
+}
+
+func normalizeHostRosterLifecycle(roster HostRosterSnapshot) HostRosterSnapshot {
+	if roster.Capability == CapabilityA && roster.Health == "" {
+		roster.Confirmed = true
+		roster.BackgroundAllowed = true
+		roster.Health = RosterHealthy
+	}
+	return roster
 }
 
 type HostAuthLister interface {

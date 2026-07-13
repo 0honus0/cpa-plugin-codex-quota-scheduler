@@ -114,25 +114,26 @@ func TestSuiteRosterManagement(t *testing.T) {
 
 	t.Run("degraded boundary, fail closed and recovery", func(t *testing.T) {
 		host.setError(errors.New("offline"))
-		lastGood := c.Snapshot().ConfirmedAt
-		clock = lastGood.Add(rosterDegradedLimit - time.Nanosecond)
+		generation := c.Snapshot().Generation
+		firstFailure := clock.Add(time.Minute)
+		clock = firstFailure
 		got, err := c.WakeForManagement(context.Background())
 		if err == nil || got.Health != RosterDegraded || !got.BackgroundAllowed {
-			t.Fatalf("before boundary=%#v err=%v", got, err)
+			t.Fatalf("first failure=%#v err=%v", got, err)
 		}
-		clock = lastGood.Add(rosterDegradedLimit)
+		clock = firstFailure.Add(rosterDegradedLimit)
 		got, _ = c.WakeForManagement(context.Background())
 		if got.Health != RosterFailClosed || got.BackgroundAllowed {
 			t.Fatalf("at boundary=%#v", got)
 		}
-		clock = lastGood.Add(rosterDegradedLimit + time.Nanosecond)
+		clock = firstFailure.Add(rosterDegradedLimit + time.Nanosecond)
 		got, _ = c.WakeForProbe(context.Background())
 		if got.Health != RosterFailClosed || len(got.Instances) != 2 {
 			t.Fatalf("after boundary=%#v", got)
 		}
 		host.setError(nil)
 		got, err = c.WakeForManagement(context.Background())
-		if err != nil || got.Health != RosterHealthy || !got.Confirmed || got.Generation < 2 {
+		if err != nil || got.Health != RosterHealthy || !got.Confirmed || got.Generation != generation {
 			t.Fatalf("recovery=%#v err=%v", got, err)
 		}
 	})
@@ -197,5 +198,94 @@ func TestProductionProbePrewakesRosterController(t *testing.T) {
 	_ = (&QuotaRefresher{}).RunProbeDueOnce(context.Background())
 	if host.callCount() != 1 {
 		t.Fatalf("probe roster calls=%d", host.callCount())
+	}
+}
+
+func TestRosterDegradedStartsAtFirstFailure(t *testing.T) {
+	p := 7
+	now := time.Date(2026, 7, 13, 8, 0, 0, 0, time.UTC)
+	clock := now
+	host := &rosterTestHost{entries: []RosterEntry{{ID: "a", Provider: "codex", Priority: &p}}}
+	c := NewRosterController(RosterControllerOptions{Host: host, Now: func() time.Time { return clock }})
+	if _, err := c.Startup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	host.setError(errors.New("offline"))
+	firstFailure := now.Add(20 * time.Minute)
+	clock = firstFailure
+	got, err := c.WakeForManagement(context.Background())
+	if err == nil || got.Health != RosterDegraded || !got.DegradedSince.Equal(firstFailure) {
+		t.Fatalf("first failure=%#v err=%v", got, err)
+	}
+	clock = firstFailure.Add(rosterDegradedLimit - time.Nanosecond)
+	got, _ = c.WakeForManagement(context.Background())
+	if got.Health != RosterDegraded || !got.DegradedSince.Equal(firstFailure) {
+		t.Fatalf("before boundary=%#v", got)
+	}
+	clock = firstFailure.Add(rosterDegradedLimit)
+	got, _ = c.WakeForManagement(context.Background())
+	if got.Health != RosterFailClosed || !got.DegradedSince.Equal(firstFailure) {
+		t.Fatalf("at boundary=%#v", got)
+	}
+}
+
+func TestRosterGenerationChangesOnlyWithRoster(t *testing.T) {
+	p := 7
+	now := time.Date(2026, 7, 13, 8, 0, 0, 0, time.UTC)
+	clock := now
+	host := &rosterTestHost{entries: []RosterEntry{{ID: "a", AuthIndex: "idx-a", Provider: "codex", Priority: &p}}}
+	c := NewRosterController(RosterControllerOptions{Host: host, Now: func() time.Time { return clock }})
+	first, err := c.Startup(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(time.Minute)
+	identical, err := c.WakeForManagement(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identical.Generation != first.Generation {
+		t.Fatalf("identical generation=%d want %d", identical.Generation, first.Generation)
+	}
+	host.update([]RosterEntry{{ID: "b", AuthIndex: "idx-b", Provider: "codex", Priority: &p}}, nil, nil)
+	clock = clock.Add(time.Minute)
+	changed, err := c.WakeForManagement(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed.Generation != first.Generation+1 {
+		t.Fatalf("changed generation=%d want %d", changed.Generation, first.Generation+1)
+	}
+}
+
+func TestRosterObserverSeesEveryTransition(t *testing.T) {
+	p := 7
+	now := time.Date(2026, 7, 13, 8, 0, 0, 0, time.UTC)
+	clock := now
+	host := &rosterTestHost{entries: []RosterEntry{{ID: "a", Provider: "codex", Priority: &p}}}
+	var observed []ActiveRoster
+	c := NewRosterController(RosterControllerOptions{
+		Host: host,
+		Now:  func() time.Time { return clock },
+		Observe: func(active ActiveRoster) {
+			observed = append(observed, cloneActiveRoster(active))
+		},
+	})
+	if _, err := c.Startup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	host.setError(errors.New("offline"))
+	clock = clock.Add(rosterActiveTTL)
+	_, _ = c.WakeForManagement(context.Background())
+	host.setError(nil)
+	clock = clock.Add(time.Minute)
+	if _, err := c.WakeForManagement(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(observed) != 3 {
+		t.Fatalf("observed=%d want 3: %#v", len(observed), observed)
+	}
+	if observed[0].Health != RosterHealthy || observed[1].Health != RosterDegraded || observed[2].Health != RosterHealthy {
+		t.Fatalf("observer transitions=%#v", observed)
 	}
 }
