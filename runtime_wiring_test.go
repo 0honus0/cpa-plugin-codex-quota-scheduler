@@ -615,6 +615,29 @@ func TestQuotaRefresherLifecycleCannotBeBypassedWithoutRuntimeStore(t *testing.T
 	}
 }
 
+func TestProductionCandidateRefreshDeniedBeforeAdmissionMutation(t *testing.T) {
+	host := &countingProductionHost{}
+	state := NewPluginState(DefaultConfig())
+	initial := CPAAdmissionState{Observed: true, Priority: 1, AuthIDs: map[string]struct{}{"old": {}}}
+	initialVersion := state.ReplaceCPAAdmission(initial)
+	r := NewQuotaRefresher(host, state, time.Now)
+	r.ObserveRosterLifecycle(ActiveRoster{Capability: CapabilityA, Confirmed: true, Health: RosterFailClosed})
+	req := pluginapi.SchedulerPickRequest{Provider: "codex", Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "new", Provider: "codex", Priority: 9}}}
+	if err := r.RefreshDueCandidatesOnce(req); !errors.Is(err, ErrCapabilityB) {
+		t.Fatalf("err=%v", err)
+	}
+	got, version := state.CPAAdmissionVersioned()
+	if version != initialVersion || got.Priority != initial.Priority {
+		t.Fatalf("admission mutated while fail-closed: state=%#v version=%d want=%d", got, version, initialVersion)
+	}
+	if _, ok := got.AuthIDs["old"]; !ok || len(got.AuthIDs) != 1 {
+		t.Fatalf("admission IDs mutated while fail-closed: %#v", got.AuthIDs)
+	}
+	if host.total() != 0 {
+		t.Fatalf("candidate refresh made host calls=%#v", host)
+	}
+}
+
 type lifecycleFenceHost struct {
 	entered  chan struct{}
 	release  chan struct{}

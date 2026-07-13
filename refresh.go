@@ -393,6 +393,9 @@ func (r *QuotaRefresher) refreshDueOnce(version uint64) error {
 }
 
 func (r *QuotaRefresher) RefreshDueCandidatesOnce(req pluginapi.SchedulerPickRequest) error {
+	if !r.normalBackgroundAllowed() {
+		return ErrCapabilityB
+	}
 	_, version := r.state.CPAAdmissionVersioned()
 	if admission, ok := HighestPriorityCodexAdmission(req); ok {
 		version = r.state.ReplaceCPAAdmission(admission)
