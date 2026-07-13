@@ -177,10 +177,35 @@ func TestCredentialRecoveryReconcilesUnknownOutcome(t *testing.T) {
 			m := mustCredentialManager(t, store, host, time.Now, nil)
 			m.setChain(1, TransitionChain{Cursor: prev.Fingerprint, Transitions: []CredentialTransition{tr}})
 			report, err := m.Reconcile(context.Background(), 1)
-			if err != nil || report.Ambiguous != tc.amb || m.chain(1).Transitions[0].Phase != tc.want {
-				t.Fatalf("report=%+v phase=%s err=%v", report, m.chain(1).Transitions[0].Phase, err)
+			chain := m.chain(1)
+			if err != nil || report.Ambiguous != tc.amb || report.Phase != tc.want {
+				t.Fatalf("report=%+v chain=%+v err=%v", report, chain, err)
+			}
+			if tc.amb {
+				if len(chain.Transitions) != 1 || chain.Transitions[0].Phase != TransitionOutcomeUnknown {
+					t.Fatalf("ambiguous chain=%+v", chain)
+				}
+			} else if chain.Cursor != tc.current.Fingerprint || len(chain.Transitions) != 0 {
+				t.Fatalf("resolved chain=%+v current=%+v", chain, tc.current.Fingerprint)
 			}
 		})
+	}
+}
+
+func TestReconcileUnresolvedRejectsDurablyRemovedChain(t *testing.T) {
+	store := NewStateStore(filepath.Join(t.TempDir(), "state.json"), OSFileHooks(), nil)
+	prev, next := fp("s", "r0", "m"), fp("s", "r1", "m")
+	state := NewPersistentState()
+	state.CredentialChains[1] = TransitionChain{Cursor: prev, Transitions: []CredentialTransition{{Prev: prev, Next: next, Phase: TransitionOutcomeUnknown}}}
+	if err := store.WriteThrough(state); err != nil {
+		t.Fatal(err)
+	}
+	manager := mustCredentialManager(t, store, &walHost{current: HostAuth{Fingerprint: next}}, time.Now, nil)
+	if _, err := store.Update(func(s *PersistentState) error { delete(s.CredentialChains, 1); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.ReconcileUnresolved(context.Background(), 1); !errors.Is(err, ErrCredentialResolutionScope) {
+		t.Fatalf("removed unresolved chain err=%v, want scope rejection", err)
 	}
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -696,8 +697,20 @@ func retryDelayForAttempt(cfg Config, attempt int) time.Duration {
 }
 
 func accountStateKey(account AccountState) string {
-	if key := ResolveAnnotationKey(account); key != "" {
-		return key
+	if account.AuthID != "" {
+		return "auth:" + account.AuthID
+	}
+	if account.ChatGPTAccountID != "" {
+		return "chatgpt:" + account.ChatGPTAccountID
+	}
+	if account.Instance != 0 {
+		return "instance:" + strconv.FormatUint(uint64(account.Instance), 10)
+	}
+	if account.Email != "" {
+		return "email:" + account.Email
+	}
+	if account.AuthIndex != "" {
+		return "index:" + account.AuthIndex
 	}
 	return ""
 }

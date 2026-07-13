@@ -45,7 +45,10 @@ func isExecutableTestFunc(fn *ast.FuncDecl, testingAliases map[string]struct{}) 
 		}
 	}
 	params := fn.Type.Params
-	if params == nil || len(params.List) != 1 || len(params.List[0].Names) != 1 || params.List[0].Names[0].Name != "t" {
+	if params == nil || len(params.List) != 1 {
+		return false
+	}
+	if len(params.List[0].Names) > 1 {
 		return false
 	}
 	star, ok := params.List[0].Type.(*ast.StarExpr)
@@ -111,7 +114,7 @@ var frozenSection12Rows = map[string]struct {
 // against the AST-discovered executable Test functions before it is accepted.
 var invariantExplicitOwners = map[string][]string{
 	"INV-01 positive": {"TestSuiteBoundary"},
-	"INV-01 negative": {"TestResourceStatusQueryActionsDoNotMutateState"},
+	"INV-01 negative": {"TestResourceBoundaryRejectsSensitiveBusinessDataLeak"},
 	"INV-02 positive": {"TestProductionProvisionalRequestMarkerEndToEnd"},
 	"INV-02 negative": {"TestProductionProvisionalVerificationRejectsMismatchWithoutOpenAI"},
 	"INV-03 positive": {"TestAuthoritativeDurableGenerationSurvivesFailureObservation"},
@@ -129,9 +132,9 @@ var invariantExplicitOwners = map[string][]string{
 	"INV-09 positive": {"TestTypedPropagationWaitRetainsLeaseWithoutSlot"},
 	"INV-09 negative": {"TestLegacyProbeMarksSendOnlyAfterHTTPSlotAcquired"},
 	"INV-10 positive": {"TestNormalRefreshDeadlineHasSingleControllerOwner"},
-	"INV-10 negative": {"TestExactCutoffDoesNotAssignLegacyRetryResetOrProbeOwnership"},
-	"INV-11 positive": {"TestRefreshSourcePriorityTruthTable"},
-	"INV-11 negative": {"TestStaleAfterRemainsClassificationOnlyConfig"},
+	"INV-10 negative": {"TestStaleAfterAloneNeverTriggersRequest"},
+	"INV-11 positive": {"TestAgingCacheClassificationEmitsNoRequest"},
+	"INV-11 negative": {"TestAgingCannotOwnRefreshDeadline"},
 	"INV-12 positive": {"TestInvariant12FirstRealRequestSingleRefresh"},
 	"INV-12 negative": {"TestInvariant12ConcurrentRequestsRejectDuplicateRefresh"},
 	"INV-13 positive": {"TestPickAllowsWeeklyWhenExhaustedFiveHourResetPassed"},
@@ -161,7 +164,7 @@ var invariantExplicitOwners = map[string][]string{
 	"INV-25 positive": {"TestRosterRemovalCancelsInFlightAndFencesWriteback"},
 	"INV-25 negative": {"TestRefreshAuthDiscardsInFlightSuccessAfterPriorityGenerationChange"},
 	"INV-26 positive": {"TestTypedQuotaReadAllocatesAtActualStartAndBarrierJoin"},
-	"INV-26 negative": {"TestCompletedFenceAndReadStartSeqRemainDistinct"},
+	"INV-26 negative": {"TestProbeVerifyRejectsReadAtOrBeforeSendFence"},
 	"INV-27 positive": {"TestProductionProbeKPointCrashRestartVerifyFirst"},
 	"INV-27 negative": {"TestProbeRecoveryWaitsForGraceAndNeverResendsDuringSuppression"},
 	"INV-28 positive": {"TestBindingAdmissionEpochMonotonicAcrossDeleteReaddAndRestart"},
@@ -476,9 +479,13 @@ func TestFakeTesting(t *fakeT) {}
 import "testing"
 func Testlowercase(t *testing.T) {}
 `,
+		"grouped_test.go": `package fixture
+import "testing"
+func TestGrouped(a, b *testing.T) {}
+`,
 		"valid_test.go": `package fixture
 import t "testing"
-func TestValid(t *t.T) {}
+func TestValid(tb *t.T) {}
 `,
 	}
 	for name, source := range fixtures {

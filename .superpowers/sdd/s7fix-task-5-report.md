@@ -2,12 +2,12 @@
 
 ## Outcome
 
-- Replaced the central self-attesting INV-01..46 tag block with an AST scanner that accepts inline evidence only from executable top-level `Test...` bodies (including tags located in their `t.Run` bodies) or from an explicit owner mapping whose names must resolve to executable `Test...` functions.
+- Replaced the central self-attesting INV-01..46 tag block with an AST scanner and semantic manifest. Inline `//inv:` comments are ignored everywhere; only explicit owners that resolve to executable top-level `Test...` functions are accepted.
 - Missing invariant directions are sorted before failure. Aggregation-only file comments are ignored.
 - Replaced `uncovered: []` with the 28 frozen §12 scenario rows: A01-A10, B01-B04, C01-C06, D01-D02, and E01-E06.
 - Each §12 row carries one or more existing behavioral owner tests. Validation rejects missing rows, unknown rows, duplicates, missing descriptions, empty owners, non-`Test` owners, and nonexistent owners.
 - The S7 PowerShell gate validates traceability/coverage, K-point registries, pick-path I/O, and sensitive-state checks, then derives and runs the exact §12 owner set (54 distinct tests) from JSON.
-- No assertion-free wrapper or no-op behavior test was added. Existing behavioral coverage was sufficient.
+- Dedicated behavioral owners were added where existing coverage did not execute the frozen scenario.
 
 ## Frozen §12 row interpretation
 
@@ -28,7 +28,7 @@ Inline directional tags already inside real behavioral suites remain authoritati
 - Refresh/scheduling: INV-10 through INV-13, INV-22, INV-29, INV-41, INV-43 through INV-45 use the independent timeline/oracle, reset-passed classifications, trial CAS/budget, immutable snapshot, and candidates-without-roster-side-effects tests.
 - Persistence/Management: INV-16, INV-37 through INV-39 use usage-limit circuit isolation, write-through/failure rollback, and durable fence-ceiling tests.
 
-Some positive and negative directions deliberately share one owner when a single behavioral test constructs the protected counterexample and proves both the allowed state and rejected mutation. Examples: Probe sends do not coalesce (INV-06), Probe executes without changing business circuit/trial state (INV-14/15), usage-limit exhaustion updates availability without incrementing circuit failure state (INV-16), and Dormant retains cards while emitting zero normal requests (INV-22).
+Positive and negative directions require distinct executable owners. Shared directional owners are rejected by the manifest validator.
 
 ## TDD evidence
 
@@ -76,7 +76,7 @@ The first Task 5 review rejected the central directional-tag model and several �
 
 - Inline `//inv:` comments are no longer accepted as evidence, even inside a `Test...` body. This prevents suite-level bulk tag dumps.
 - All legacy invariant comments were removed from behavioral test files. INV-01 through INV-46 now use a semantic manifest with distinct positive and negative executable owners.
-- AST discovery resolves the file's actual `testing` import (including aliases), requires Go's exported Test naming rule, exactly one parameter named `t` of imported `*testing.T`, and no result values.
+- AST discovery resolves the file's actual `testing` import (including aliases), requires Go's exported Test naming rule, exactly one imported `*testing.T` parameter with any valid identifier, and no result values.
 - Meta RED fixtures proved rejection of centralized body tags, missing/fake testing imports, lowercase Test names, wrong signatures, and a shared positive/negative owner.
 
 ### Genuine §12 owners added
@@ -95,7 +95,7 @@ The review exposed missing frozen behavior, so the follow-up implements the auth
 
 - `confirm_owned_rotation`: fresh observation, chain cursor reset to the observed fingerprint, TokenEpoch++, Ambiguous clear; LoginEpoch/IAE/G/AuthBlocked unchanged.
 - `confirm_external_login`: fresh observation, LoginEpoch++/IAE++/G++, AuthBlocked clear, chain reset; prior admission is cancelled/fenced before the new generation is reactivated.
-- `reread`: fresh reconciliation through the existing outcome-unknown protocol with no forced epoch change.
+- `reread`: fresh reconciliation through the existing outcome-unknown protocol; a classifiable owned rotation advances the cursor and increments TokenEpoch under the normal observation rules.
 
 All actions are active-roster scoped, validate the current instance/binding and fingerprint, commit durable state before success, run outside the global refresher lock, reject removed/lower-tier IDs, and append an audit log only after success.
 
@@ -123,9 +123,70 @@ Independent re-review iterated until no Critical/Important findings remained. It
 - D01 now verifies WAL ordering, persisted planned phase, point/outcome-specific restart reconciliation, and durable Applied/Aborted/Ambiguous terminal behavior rather than merely validating hashes.
 - E01 now uses the real BindingRegistry/ValidateWriteback gate, real stale admission/generation rejection, and asserts `read_start_seq > started_after` for every read event.
 
-Final independent verdict: **approved; no remaining Critical or Important findings**.
+That verdict was superseded by the third re-review described below.
 
-Fresh post-approval verification:
+## Third re-review follow-up (supersedes earlier final claims)
+
+The third re-review rejected D01's classifier-only matrix, four invariant mappings, unrestricted credential-resolution exits, Probe due/recovery persistence races, and the literal `t` AST parameter requirement. This wave addressed each finding with RED-first behavioral coverage:
+
+- D01 now drives `CredentialManager.Reconcile` against durable production state for every length-1..4 observation permutation. Owned observations consume the reachable prefix, advance the cursor, update the binding fingerprint, and increment TokenEpoch. External observations reset the chain and increment LoginEpoch/IAE/G while clearing AuthBlocked. Ambiguity auto-clear uses a real reconciliation read; no test mutates `TransitionPhase` directly.
+- The four §2.7 branches now prove real published-snapshot pick participation, AuthInstanceID-scoped unresolved annotations with no same-filename inheritance, account-ID-gated quota/Probe eligibility, and access-token-only real-request eligibility.
+- All three `/credentials/resolve` actions reject a cursor-only/non-ambiguous active chain before GetAuth or epoch mutation. The core state remains byte-for-byte unchanged and the Management route returns conflict.
+- Probe runners are serialized by a shared mutex: Due uses `TryLock` so duplicate wakes remain nonblocking/single-flight, while Recovery holds the same lock across snapshot, recovery, verification, and persistence. The deterministic regression reproduced a concurrent prepared claim under the stale recovery snapshot before the fix.
+- INV-01 negative now mutates a real Resource response with sensitive business data and proves the leak guard detects it. INV-10 negative proves `stale_after` alone emits zero requests. INV-11 positive/negative prove Aging emits no request and cannot own a deadline. INV-26 negative executes Probe recovery with `read_start_seq <= send_fence_seq` and proves rejection before publishing a read sequence.
+- Executable-test discovery validates the imported `*testing.T` type without requiring the parameter identifier to be `t`.
+
+RED evidence from this wave:
+
+```text
+Credential resolution: all three non-ambiguous actions returned nil; route returned 200.
+D01: interleaved external observation left persisted chain and epochs unchanged.
+§2.7: access-token-only credentials failed with missing chatgpt_account_id.
+Probe concurrency: Due claimed probe-...-1 while Recovery held a stale snapshot.
+```
+
+The verification below is historical and does not certify the third wave. Fresh final verification and independent review must be appended before commit.
+
+### Fresh third-wave verification
+
+- Focused D01/§2.7/resolution/Probe/invariant/AST owners: pass; root package 5.523s.
+- Root package compatibility run: pass; 13.467s.
+- Traceability/meta owners: pass; root package 2.019s.
+- S7: pass; 48 exact §12 owners; 23.7s wall time.
+- Full `go test ./... -count=1 -timeout 180s`: pass; root package 14.334s.
+- `go test -race ./... -count=1 -timeout 240s`: pass; root package 27.796s.
+- `go vet ./...`: pass.
+- `git diff --check`: pass (line-ending warnings only).
+
+The first third-wave review found no Critical issues and three Important gaps. Follow-up RED tests proved that ambiguity could be cleared while a Management read was blocked, grouped `a, b *testing.T` parameters were accepted, and §2.7 did not execute production background paths. The fixes now:
+
+- Revalidate unresolved scope inside the confirm transaction and use `ReconcileUnresolved`, which rechecks the durable chain inside its conditional mutation. Deterministic races for all three actions prove zero mutation after concurrent auto-clear.
+- Execute real `OperationQuotaRead` and `OperationProbePrecheck` paths: account-ID credentials issue two HTTP requests; access-token-only credentials issue zero, return `ErrAccountIdentityUnresolved`, and retain trial/pick eligibility.
+- Reject a sole AST parameter field containing more than one identifier while accepting any zero/one identifier for imported `*testing.T`.
+
+Fresh post-fix verification:
+
+- Focused reviewer fixes: pass; root package 4.850s.
+- Full `go test ./... -count=1 -timeout 180s`: pass; root package 14.866s.
+- S7: pass; 48 exact §12 owners; 22.5s wall time.
+- `go test -race ./... -count=1 -timeout 240s`: pass; root package 26.855s.
+- `go vet ./...`: pass.
+- `git diff --check`: pass (line-ending warnings only).
+
+The focused re-review then found one remaining Important case: `ReconcileUnresolved` returned success when its durable chain had been removed before the fresh snapshot. A RED regression reproduced `err=nil`; required reconciliation now returns scope for missing or invalid chains before any success exit.
+
+Fresh final verification after that fix:
+
+- Focused removal/all-action scope tests: pass; root package 2.035s.
+- Full `go test ./... -count=1 -timeout 180s`: pass; root package 14.697s.
+- S7: pass; 48 exact §12 owners; 22.9s wall time.
+- `go test -race ./... -count=1 -timeout 240s`: pass; root package 26.493s.
+- `go vet ./...`: pass.
+- `git diff --check`: pass (line-ending warnings only).
+
+A final independent re-review is required before commit.
+
+## Historical post-approval verification
 
 - Targeted new/meta owners — pass; root 4.223s.
 - S7 — pass; 48 exact §12 owners.

@@ -354,19 +354,51 @@ func runSection12D01CredentialIdentityMatrix(t *testing.T) {
 			indices[i] = i
 		}
 		for _, order := range permutations(indices) {
+			store := NewStateStore(filepath.Join(t.TempDir(), "observe.json"), OSFileHooks(), nil)
+			state := NewPersistentState()
+			state.TierGeneration = 9
+			state.Bindings["active"] = RuntimeBinding{AuthID: "active", AuthIndex: "idx", Instance: 1, Admission: 3, Generation: 9, Login: 4, Token: 5, Fingerprint: fingerprints[0], AuthBlocked: true}
+			state.CredentialChains[1] = chain
+			if err := store.WriteThrough(state); err != nil {
+				t.Fatal(err)
+			}
+			host := &walHost{}
+			manager := mustCredentialManager(t, store, host, func() time.Time { return now }, nil)
 			for _, index := range order {
-				got := ClassifyObservedCredentialAt(chain, fingerprints[index], now)
-				want := CredentialOwnedRotation
-				if index == 0 {
-					want = CredentialSame
+				before, _ := store.PersistentSnapshot()
+				beforeChain := before.CredentialChains[1]
+				observation := ClassifyObservedCredentialAt(beforeChain, fingerprints[index], now)
+				host.current = HostAuth{Fingerprint: fingerprints[index]}
+				if _, err := manager.Reconcile(context.Background(), 1); err != nil {
+					t.Fatalf("length=%d order=%v index=%d reconcile=%v", length, order, index, err)
 				}
-				if got.Kind != want {
-					t.Fatalf("length=%d order=%v index=%d kind=%s want=%s", length, order, index, got.Kind, want)
+				after, _ := store.PersistentSnapshot()
+				afterChain := after.CredentialChains[1]
+				beforeBinding, afterBinding := before.Bindings["active"], after.Bindings["active"]
+				switch observation.Kind {
+				case CredentialSame, CredentialMetadataOnly, CredentialAmbiguous:
+					if !reflect.DeepEqual(afterChain, beforeChain) || afterBinding != beforeBinding || after.TierGeneration != before.TierGeneration {
+						t.Fatalf("length=%d order=%v index=%d kind=%s unexpectedly mutated production state", length, order, index, observation.Kind)
+					}
+				case CredentialOwnedRotation:
+					if afterChain.Cursor != fingerprints[index] || len(afterChain.Transitions) != len(beforeChain.Transitions)-observation.Advance || afterBinding.Token != beforeBinding.Token+1 || afterBinding.Fingerprint != fingerprints[index] {
+						t.Fatalf("length=%d order=%v index=%d owned state chain=%#v binding=%#v", length, order, index, afterChain, afterBinding)
+					}
+				case CredentialExternalLogin:
+					if afterChain.Cursor != fingerprints[index] || len(afterChain.Transitions) != 0 || afterBinding.Login != beforeBinding.Login+1 || afterBinding.Admission != beforeBinding.Admission+1 || after.TierGeneration != before.TierGeneration+1 || afterBinding.AuthBlocked {
+						t.Fatalf("length=%d order=%v index=%d external state chain=%#v binding=%#v G=%d", length, order, index, afterChain, afterBinding, after.TierGeneration)
+					}
 				}
 			}
 			external := fp("external", fmt.Sprintf("x-%d", length), "metadata")
-			if got := ClassifyObservedCredentialAt(chain, external, now); got.Kind != CredentialExternalLogin {
-				t.Fatalf("length=%d order=%v external kind=%s", length, order, got.Kind)
+			before, _ := store.PersistentSnapshot()
+			host.current = HostAuth{Fingerprint: external}
+			if _, err := manager.Reconcile(context.Background(), 1); err != nil {
+				t.Fatal(err)
+			}
+			after, _ := store.PersistentSnapshot()
+			if after.CredentialChains[1].Cursor != external || after.Bindings["active"].Login != before.Bindings["active"].Login+1 || after.TierGeneration != before.TierGeneration+1 {
+				t.Fatalf("length=%d order=%v interleaved external did not mutate production state", length, order)
 			}
 		}
 	}
@@ -436,7 +468,7 @@ func runSection12D01CredentialIdentityMatrix(t *testing.T) {
 					if length > 1 {
 						wantReport.Phase = TransitionApplied
 					}
-					if report != wantReport {
+					if report.Ambiguous != wantReport.Ambiguous || report.Phase != wantReport.Phase {
 						t.Fatalf("pre-planned recovery report=%#v", report)
 					}
 					continue
@@ -453,22 +485,31 @@ func runSection12D01CredentialIdentityMatrix(t *testing.T) {
 					t.Fatalf("length=%d outcome=%s point=%s report=%#v want phase=%s ambiguous=%v", length, outcome.name, point, report, wantPhase, wantAmbiguous)
 				}
 				finalState, _ := freshStore.PersistentSnapshot()
-				finalTransition := finalState.CredentialChains[1].Transitions[len(finalState.CredentialChains[1].Transitions)-1]
-				if !wantAmbiguous && finalTransition.Phase != wantPhase {
-					t.Fatalf("length=%d outcome=%s point=%s final phase=%s want=%s", length, outcome.name, point, finalTransition.Phase, wantPhase)
+				finalChain := finalState.CredentialChains[1]
+				if !wantAmbiguous && (credentialChainUnresolved(finalChain) || finalChain.Cursor != host.current.Fingerprint) {
+					t.Fatalf("length=%d outcome=%s point=%s final chain=%#v host=%#v", length, outcome.name, point, finalChain, host.current.Fingerprint)
 				}
 			}
 		}
 	}
 
 	f0, f1 := fp("subject", "amb-0", "metadata"), fp("subject", "amb-1", "metadata")
-	ambiguous := TransitionChain{Cursor: f0, Transitions: []CredentialTransition{{Prev: f0, Next: f1, Phase: TransitionOutcomeUnknown, CreatedAt: now}}}
-	if ClassifyObservedCredentialAt(ambiguous, f1, now).Kind != CredentialAmbiguous {
-		t.Fatal("unresolved observation was not ambiguous")
+	ambiguousStore := NewStateStore(filepath.Join(t.TempDir(), "auto-clear.json"), OSFileHooks(), nil)
+	ambiguousState := NewPersistentState()
+	ambiguousState.TierGeneration = 2
+	ambiguousState.Bindings["active"] = RuntimeBinding{AuthID: "active", Instance: 1, Admission: 1, Generation: 2, Login: 1, Token: 1, Fingerprint: f0, AuthBlocked: true}
+	ambiguousState.CredentialChains[1] = TransitionChain{Cursor: f0, Transitions: []CredentialTransition{{Prev: f0, Next: f1, Phase: TransitionOutcomeUnknown, CreatedAt: now}}}
+	if err := ambiguousStore.WriteThrough(ambiguousState); err != nil {
+		t.Fatal(err)
 	}
-	ambiguous.Transitions[0].Phase = TransitionApplied
-	if ClassifyObservedCredentialAt(ambiguous, f1, now).Kind != CredentialOwnedRotation {
-		t.Fatal("later classifiable observation did not auto-clear ambiguity")
+	ambiguousHost := &walHost{current: HostAuth{Fingerprint: f1}}
+	ambiguousManager := mustCredentialManager(t, ambiguousStore, ambiguousHost, func() time.Time { return now }, nil)
+	if report, err := ambiguousManager.Reconcile(context.Background(), 1); err != nil || report.Ambiguous {
+		t.Fatalf("automatic reconcile report=%#v err=%v", report, err)
+	}
+	autoCleared, _ := ambiguousStore.PersistentSnapshot()
+	if autoCleared.CredentialChains[1].Cursor != f1 || len(autoCleared.CredentialChains[1].Transitions) != 0 || autoCleared.Bindings["active"].Token != 2 {
+		t.Fatalf("real reconciliation did not auto-clear ambiguity: %#v", autoCleared)
 	}
 
 	for _, action := range []CredentialResolutionAction{CredentialConfirmOwned, CredentialConfirmExternal, CredentialReread} {
@@ -500,21 +541,68 @@ func runSection12D01CredentialIdentityMatrix(t *testing.T) {
 
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "jwt-account"})
 	identityBranches := []struct {
-		name    string
-		raw     json.RawMessage
-		wantID  string
-		wantErr bool
+		name           string
+		raw            json.RawMessage
+		wantID         string
+		wantReal       bool
+		wantBackground bool
+		wantErr        bool
 	}{
-		{name: "stored-account-id", raw: json.RawMessage(`{"access_token":"a","account_id":"stored"}`), wantID: "stored"},
-		{name: "jwt-account-id", raw: json.RawMessage(`{"access_token":"a","id_token":"` + idToken + `"}`), wantID: "jwt-account"},
-		{name: "unresolved-with-access", raw: json.RawMessage(`{"access_token":"a"}`), wantErr: true},
+		{name: "stored-account-id", raw: json.RawMessage(`{"access_token":"a","account_id":"stored"}`), wantID: "stored", wantReal: true, wantBackground: true},
+		{name: "jwt-account-id", raw: json.RawMessage(`{"access_token":"a","id_token":"` + idToken + `"}`), wantID: "jwt-account", wantReal: true, wantBackground: true},
+		{name: "unresolved-with-access", raw: json.RawMessage(`{"access_token":"a"}`), wantReal: true},
 		{name: "unresolved-without-access", raw: json.RawMessage(`{"refresh_token":"r"}`), wantErr: true},
 	}
 	for _, branch := range identityBranches {
 		credentials, err := ExtractCodexCredentials(branch.raw)
-		if (err != nil) != branch.wantErr || (!branch.wantErr && credentials.ChatGPTAccountID != branch.wantID) {
+		allowsReal := credentials.AccessToken != ""
+		allowsBackground := credentials.AccessToken != "" && credentials.ChatGPTAccountID != ""
+		if (err != nil) != branch.wantErr || (!branch.wantErr && (credentials.ChatGPTAccountID != branch.wantID || allowsReal != branch.wantReal || allowsBackground != branch.wantBackground)) {
 			t.Fatalf("branch=%s credentials=%#v err=%v", branch.name, credentials, err)
 		}
+	}
+	unresolved := AccountState{AuthID: "same-file-name", AuthIndex: "same-file.json", Instance: 91, Provider: "codex", Priority: 9, Family: AccountFamilyWeekly, Quota: ParsedQuota{Family: AccountFamilyWeekly}}
+	PublishSchedulerSnapshot(&SchedulerSnapshot{HandleEnabled: true, Trials: NewTrialRegistry(), EvidenceIntents: make(chan EvidenceIntent, 1), ActiveHighestTier: map[string]struct{}{unresolved.AuthID: {}}, Accounts: []AccountView{{ID: unresolved.AuthID, Instance: unresolved.Instance, Family: AccountFamilyWeekly, Cache: CacheUnknown}}})
+	decision := schedulerPickPublished(requestWithCandidates(unresolved.AuthID), now)
+	if decision.AuthID != unresolved.AuthID {
+		t.Fatalf("unresolved identity did not participate in real pick: %#v", decision)
+	}
+	if trial := publishedSchedulerSnapshot.Load().Trials.State(unresolved.Instance, now); trial != TrialActive {
+		t.Fatalf("unresolved real pick did not retain trial eligibility: %v", trial)
+	}
+	annotations := AnnotationState{Accounts: map[string]AccountAnnotation{"instance:91": {Alias: "old-unresolved"}}}
+	relogged := unresolved
+	relogged.Instance = 92
+	if got := ApplyAnnotations([]AccountState{relogged}, annotations)[0].Annotation.Alias; got != "" {
+		t.Fatalf("relogin inherited unresolved file-name configuration %q", got)
+	}
+	quotaBody := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(time.Hour).Format(time.RFC3339)))
+	backgroundHost := &fakeHostClient{authJSON: map[string]json.RawMessage{
+		"with-id":    json.RawMessage(`{"access_token":"a","account_id":"stored"}`),
+		"without-id": json.RawMessage(`{"access_token":"a"}`),
+	}, httpBody: quotaBody}
+	background := &QuotaRefresher{host: backgroundHost, state: NewPluginState(DefaultConfig()), now: func() time.Time { return now }, roster: HostRosterSnapshot{Capability: CapabilityA, Confirmed: true, BackgroundAllowed: true, Health: RosterHealthy}}
+	coordinator := NewCoordinator(CoordinatorOptions{})
+	t.Cleanup(coordinator.Close)
+	held := &HeldLease{coordinator: coordinator}
+	for _, class := range []OperationClass{OperationQuotaRead, OperationProbePrecheck} {
+		present := background.runTypedHeld(context.Background(), Intent{Instance: 1, Class: class, Payload: probeReadPayload{Binding: RuntimeBinding{AuthIndex: "with-id"}}}, held)
+		if present.Err != nil {
+			t.Fatalf("class=%s account ID blocked background path: %v", class, present.Err)
+		}
+	}
+	presentCalls := backgroundHost.httpCallCount()
+	if presentCalls != 2 {
+		t.Fatalf("account ID background calls=%d, want quota+Probe", presentCalls)
+	}
+	for _, class := range []OperationClass{OperationQuotaRead, OperationProbePrecheck} {
+		absent := background.runTypedHeld(context.Background(), Intent{Instance: 2, Class: class, Payload: probeReadPayload{Binding: RuntimeBinding{AuthIndex: "without-id"}}}, held)
+		if !errors.Is(absent.Err, ErrAccountIdentityUnresolved) {
+			t.Fatalf("class=%s unresolved background err=%v", class, absent.Err)
+		}
+	}
+	if calls := backgroundHost.httpCallCount(); calls != presentCalls {
+		t.Fatalf("unresolved identity issued quota/Probe HTTP: before=%d after=%d", presentCalls, calls)
 	}
 }
 

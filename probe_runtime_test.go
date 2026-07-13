@@ -19,17 +19,18 @@ import (
 )
 
 type sequenceProbeHost struct {
-	mu         sync.Mutex
-	auth       pluginapi.HostAuthGetResponse
-	authReads  []pluginapi.HostAuthGetResponse
-	quota      [][]byte
-	urls       []string
-	requests   []pluginapi.HTTPRequest
-	gets       int
-	getStarted chan struct{}
-	releaseGet chan struct{}
-	doStarted  chan struct{}
-	releaseDo  chan struct{}
+	mu            sync.Mutex
+	auth          pluginapi.HostAuthGetResponse
+	authReads     []pluginapi.HostAuthGetResponse
+	quota         [][]byte
+	urls          []string
+	requests      []pluginapi.HTTPRequest
+	gets          int
+	gateAuthIndex string
+	getStarted    chan struct{}
+	releaseGet    chan struct{}
+	doStarted     chan struct{}
+	releaseDo     chan struct{}
 }
 
 func TestProbeAuthBlockedResumesOnlyAfterExternalLoginEpoch(t *testing.T) {
@@ -67,10 +68,13 @@ func TestProbeAuthBlockedResumesOnlyAfterExternalLoginEpoch(t *testing.T) {
 func (h *sequenceProbeHost) ListAuths() ([]pluginapi.HostAuthFileEntry, error) {
 	return []pluginapi.HostAuthFileEntry{{ID: "a", AuthIndex: "idx", Provider: "codex", Priority: 9}}, nil
 }
-func (h *sequenceProbeHost) GetAuth(string) (pluginapi.HostAuthGetResponse, error) {
+func (h *sequenceProbeHost) GetAuth(authIndex string) (pluginapi.HostAuthGetResponse, error) {
 	h.mu.Lock()
 	h.gets++
 	auth, started, release := h.auth, h.getStarted, h.releaseGet
+	if h.gateAuthIndex != "" && h.gateAuthIndex != authIndex {
+		started, release = nil, nil
+	}
 	if len(h.authReads) > 0 {
 		auth = h.authReads[0]
 		h.authReads = h.authReads[1:]
@@ -387,6 +391,7 @@ func TestRemovedProbeLateGetDoesNotRecreateState(t *testing.T) {
 		t.Fatal(err)
 	}
 	host.mu.Lock()
+	host.gateAuthIndex = "b"
 	host.getStarted = make(chan struct{})
 	host.releaseGet = make(chan struct{})
 	started, releaseGet := host.getStarted, host.releaseGet
@@ -922,7 +927,7 @@ func TestProbeAttemptIDsMonotonicWithFrozenClock(t *testing.T) {
 	}
 }
 
-func TestProductionDueConsumesSchedulerDeadlineDuringPropagation(t *testing.T) {
+func TestProbeDueSingleFlightDuringPropagation(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
 	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":80,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(-time.Hour).Format(time.RFC3339)))
@@ -974,6 +979,124 @@ func TestProductionDueConsumesSchedulerDeadlineDuringPropagation(t *testing.T) {
 	close(release)
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestProbeRecoveryExcludesConcurrentDueClaim(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
+	activeQuota := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(4*time.Hour).Format(time.RFC3339)))
+	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "x.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)}, quota: [][]byte{activeQuota, activeQuota, activeQuota, activeQuota}}
+	cfg := DefaultConfig()
+	cfg.EnableResetProbe = true
+	state := NewPluginState(cfg)
+	state.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 9, AuthIDs: map[string]struct{}{"a": {}, "b": {}}})
+	roster := HostRosterSnapshot{Capability: CapabilityA, Entries: []RosterEntry{{ID: "a", AuthIndex: "idx-a", Provider: "codex", Priority: intPtr(9)}, {ID: "b", AuthIndex: "idx-b", Provider: "codex", Priority: intPtr(9)}}}
+	adapter := &rosterCredentialHost{host: host, roster: roster}
+	r, err := NewProductionQuotaRefresher(host, state, adapter, roster, filepath.Join(t.TempDir(), "state.json"), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.bindings = r.bindings
+	a, _, err := r.BootstrapBinding(context.Background(), "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _, err := r.BootstrapBinding(context.Background(), "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.probeController.SetWindow(a.Instance, ProbeWindowFiveHour, ProbeWindow{State: ProbeRetryWait, Deadline: now})
+	r.probeController.SetWindow(b.Instance, ProbeWindowFiveHour, ProbeWindow{State: ProbePendingCheck, Deadline: now})
+	committed, err := r.runtimeStore.Update(func(s *PersistentState) error {
+		blocked := s.Bindings["a"]
+		blocked.AuthBlocked = true
+		s.Bindings["a"] = blocked
+		s.ProbeWindows = r.probeController.Snapshot()
+		s.ProbeAttempts[a.Instance] = ProbeAttempt{Instance: a.Instance, AttemptID: "old-prepared", Windows: []ProbeWindowKind{ProbeWindowFiveHour}, Phase: ProbeAttemptPrepared, CreatedAt: now}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.bindings.mu.Lock()
+	r.bindings.bindings = committed.Bindings
+	r.bindings.mu.Unlock()
+
+	originalExecute := r.coordinator.opts.Execute
+	blockerStarted := make(chan struct{})
+	releaseBlocker := make(chan struct{})
+	r.coordinator.opts.Execute = func(ctx context.Context, intent Intent, held *HeldLease) OperationResult {
+		if intent.Class == OperationLegacyRefresh && intent.AttemptID == "block-b" {
+			close(blockerStarted)
+			<-releaseBlocker
+			return OperationResult{Token: intent.Token}
+		}
+		return originalExecute(ctx, intent, held)
+	}
+	r.coordinator.activateInstances(map[AuthInstanceID]TierGeneration{a.Instance: TierGeneration(a.Generation), b.Instance: TierGeneration(b.Generation)})
+	blocker := r.coordinator.Submit(Intent{Instance: b.Instance, Generation: TierGeneration(b.Generation), Class: OperationLegacyRefresh, Source: LegacyEnvelopeSource, AttemptID: "block-b", Token: b.ExecutionToken(0)})
+	<-blockerStarted
+
+	recoverySnapshot := make(chan struct{})
+	releaseRecovery := make(chan struct{})
+	var firstNow atomic.Bool
+	r.now = func() time.Time {
+		if firstNow.CompareAndSwap(false, true) {
+			close(recoverySnapshot)
+			<-releaseRecovery
+		}
+		return now
+	}
+	recoveryDone := make(chan error, 1)
+	go func() { recoveryDone <- r.RunProbeRecoveryOnce(context.Background()) }()
+	<-recoverySnapshot
+	dueDone := make(chan error, 1)
+	go func() { dueDone <- r.RunProbeDueOnce(context.Background()) }()
+	select {
+	case err := <-dueDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		snapshot, snapErr := r.runtimeStore.PersistentSnapshot()
+		if snapErr != nil {
+			t.Fatal(snapErr)
+		}
+		if attempt, ok := snapshot.ProbeAttempts[b.Instance]; ok && attempt.Phase == ProbeAttemptPrepared {
+			close(releaseRecovery)
+			close(releaseBlocker)
+			_ = <-recoveryDone
+			_ = blocker.Await(context.Background())
+			_ = <-dueDone
+			t.Fatalf("due claimed %s while recovery owned a stale snapshot", attempt.AttemptID)
+		}
+		t.Fatal("concurrent due neither returned nor exposed its claim")
+	}
+	close(releaseRecovery)
+	if err = <-recoveryDone; err != nil {
+		t.Fatal(err)
+	}
+	close(releaseBlocker)
+	_ = blocker.Await(context.Background())
+}
+
+func TestProbeVerifyRejectsReadAtOrBeforeSendFence(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	store := NewStateStore(filepath.Join(t.TempDir(), "state.json"), OSFileHooks(), nil)
+	state := NewPersistentState()
+	attempt := ProbeAttempt{Instance: 1, AttemptID: "verify-fence", Phase: ProbeAttemptSentUnknown, SendFenceSeq: 10, VerifyNotBefore: now}
+	state.ProbeAttempts[1] = attempt
+	if err := store.WriteThrough(state); err != nil {
+		t.Fatal(err)
+	}
+	r := &QuotaRefresher{runtimeStore: store, probeWAL: NewProbeWAL(store), probeFence: NewFenceAllocator(store, state, nil), probeController: NewProbeController(now), now: func() time.Time { return now }, roster: HostRosterSnapshot{Capability: CapabilityA}}
+	result := r.runTypedHeld(context.Background(), Intent{Instance: 1, Class: OperationProbeSequence, Source: SourceProbeVerify, StartedAfter: attempt.SendFenceSeq, AttemptID: attempt.AttemptID, Payload: probeSequencePayload{Attempt: attempt, Recovery: true}}, &HeldLease{})
+	if result.Err == nil || !strings.Contains(result.Err.Error(), "verify read did not start after send fence") {
+		t.Fatalf("verify accepted read_start_seq <= send_fence_seq: result=%#v", result)
+	}
+	if result.ReadStartSeq != 0 {
+		t.Fatalf("forbidden verify published read_start_seq=%d", result.ReadStartSeq)
 	}
 }
 

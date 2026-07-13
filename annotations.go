@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -25,6 +26,9 @@ func NormalizeAnnotationState(state AnnotationState) AnnotationState {
 }
 
 func ResolveAnnotationKey(account AccountState) string {
+	if account.ChatGPTAccountID == "" && account.Instance != 0 {
+		return "instance:" + strconv.FormatUint(uint64(account.Instance), 10)
+	}
 	if account.AuthID != "" {
 		return "auth:" + account.AuthID
 	}

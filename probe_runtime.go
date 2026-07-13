@@ -205,6 +205,10 @@ func activeProbeBindings(roster HostRosterSnapshot, bindings map[string]RuntimeB
 }
 
 func (r *QuotaRefresher) RunProbeDueOnce(ctx context.Context) error {
+	if !r.probeRunMu.TryLock() {
+		return nil
+	}
+	defer r.probeRunMu.Unlock()
 	if err := r.retryProbeRosterHold(); err != nil {
 		return err
 	}
@@ -310,6 +314,8 @@ func (r *QuotaRefresher) RunProbeDueOnce(ctx context.Context) error {
 }
 
 func (r *QuotaRefresher) RunProbeRecoveryOnce(ctx context.Context) error {
+	r.probeRunMu.Lock()
+	defer r.probeRunMu.Unlock()
 	if err := r.retryProbeRosterHold(); err != nil {
 		return err
 	}
@@ -454,6 +460,9 @@ func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *
 			credentials, err := ExtractCodexCredentials(auth.JSON)
 			if err != nil {
 				return probeReadResult{}, err
+			}
+			if credentials.ChatGPTAccountID == "" {
+				return probeReadResult{}, ErrAccountIdentityUnresolved
 			}
 			if r.runtimeRoster().Provisional && NewCredentialFingerprint(credentials.ChatGPTAccountID, credentials.RefreshToken, p.Binding.AuthIndex) != p.Binding.Fingerprint {
 				return probeReadResult{}, ErrProvisionalFingerprintMismatch
@@ -638,6 +647,10 @@ func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *
 			res.Err = err
 			return res
 		}
+		if credentials.ChatGPTAccountID == "" {
+			res.Err = ErrAccountIdentityUnresolved
+			return res
+		}
 		quota, err := r.typedFetchQuota(ctx, held, credentials)
 		if err != nil {
 			if status, ok := err.(quotaStatusError); ok && status.status == http.StatusUnauthorized && r.bindings != nil {
@@ -652,6 +665,9 @@ func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *
 }
 
 func (r *QuotaRefresher) typedFetchQuota(ctx context.Context, held *HeldLease, credentials CodexCredentials) (ParsedQuota, error) {
+	if credentials.ChatGPTAccountID == "" {
+		return ParsedQuota{}, ErrAccountIdentityUnresolved
+	}
 	var resp pluginapi.HTTPResponse
 	err := held.DoHTTP(ctx, func(context.Context) error {
 		var err error

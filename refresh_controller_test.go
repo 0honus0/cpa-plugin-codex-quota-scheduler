@@ -22,6 +22,38 @@ func requireRefreshIntent(t *testing.T, intents []Intent, source IntentSource) {
 	}
 }
 
+func TestStaleAfterAloneNeverTriggersRequest(t *testing.T) {
+	start := refreshTestTime(t, "2026-07-12 10:00:00.000000000")
+	controller := NewRefreshController(30*time.Minute, time.Hour)
+	if got := controller.OnPick(start, CacheSnapshot{StaleAfter: 5 * time.Minute}); len(got) != 0 {
+		t.Fatalf("stale_after created pick request: %#v", got)
+	}
+	if got := controller.OnDeadline(start.Add(5 * time.Minute)); len(got) != 0 {
+		t.Fatalf("stale_after independently created deadline request: %#v", got)
+	}
+}
+
+func TestAgingCacheClassificationEmitsNoRequest(t *testing.T) {
+	start := refreshTestTime(t, "2026-07-12 10:00:00.000000000")
+	controller := NewRefreshController(30*time.Minute, time.Hour)
+	aging := AccountState{AuthID: "aging", LastSuccessAt: start.Add(-31 * time.Minute)}
+	if got := controller.OnPick(start, CacheSnapshot{Accounts: []AccountState{aging}, StaleAfter: 5 * time.Hour}); len(got) != 0 {
+		t.Fatalf("Aging classification emitted request: %#v", got)
+	}
+}
+
+func TestAgingCannotOwnRefreshDeadline(t *testing.T) {
+	start := refreshTestTime(t, "2026-07-12 10:00:00.000000000")
+	controller := NewRefreshController(30*time.Minute, time.Hour)
+	controller.OnPick(start, CacheSnapshot{Accounts: []AccountState{{AuthID: "aging", LastSuccessAt: start.Add(-31 * time.Minute)}}, StaleAfter: 5 * time.Hour})
+	if deadline := controller.NextDeadline(start); !deadline.Equal(start.Add(30 * time.Minute)) {
+		t.Fatalf("Aging owned deadline %v; want interval deadline", deadline)
+	}
+	if got := controller.OnDeadline(start.Add(time.Nanosecond)); len(got) != 0 {
+		t.Fatalf("Aging forced forbidden request: %#v", got)
+	}
+}
+
 func TestSuiteRefresh(t *testing.T) {
 	t.Run("exact virtual timeline", func(t *testing.T) {
 		start := refreshTestTime(t, "2026-07-12 10:00:00.000000000")

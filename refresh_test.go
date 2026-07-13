@@ -1516,13 +1516,8 @@ func TestRefreshOnceMissingChatGPTAccountIDRecordsErrorWithoutQuotaSuccess(t *te
 	}
 
 	account := accountByAuthID(t, store.Snapshot(now), "auth-1")
-	if account.LastError == "" {
-		t.Fatalf("LastError empty, want missing chatgpt_account_id error")
-	}
-	for _, leaked := range []string{"secret-access-missing-account", idToken, "token-ish-claim"} {
-		if strings.Contains(account.LastError, leaked) {
-			t.Fatalf("LastError leaked token-ish content %q: %q", leaked, account.LastError)
-		}
+	if account.LastError != "" {
+		t.Fatalf("unresolved identity was treated as refresh failure: %q", account.LastError)
 	}
 	if !account.LastSuccessAt.IsZero() {
 		t.Fatalf("LastSuccessAt = %v, want zero", account.LastSuccessAt)

@@ -76,6 +76,21 @@ func TestMockGroupDBoundary(t *testing.T) {
 	TestSuiteBoundary(t)
 }
 
+func TestResourceBoundaryRejectsSensitiveBusinessDataLeak(t *testing.T) {
+	sentinels := BoundarySentinels{AuthID: "LEAK_AUTH", AccountID: "LEAK_ACCOUNT", Alias: "LEAK_ALIAS", QuotaValue: "998877", ResetRFC3339: "2098-01-02T03:04:05Z", LogMessage: "LEAK_LOG"}
+	store := seedBoundarySentinelsForTest(t, sentinels)
+	for _, route := range registeredResourceRoutesForTest(t) {
+		body := requestResourceForTest(t, store, route)
+		if leaked := boundaryLeaks(body, sentinels.Values()); len(leaked) != 0 {
+			t.Fatalf("Resource route %s leaked sensitive business data %q", route, leaked)
+		}
+		mutated := body + sentinels.AccountID
+		if leaked := boundaryLeaks(mutated, sentinels.Values()); len(leaked) != 1 || leaked[0] != sentinels.AccountID {
+			t.Fatalf("sensitive Resource leak guard accepted mutated response: %q", leaked)
+		}
+	}
+}
+
 func seedBoundarySentinelsForTest(t *testing.T, sentinels BoundarySentinels) *PluginState {
 	t.Helper()
 	resetAt, err := time.Parse(time.RFC3339, sentinels.ResetRFC3339)

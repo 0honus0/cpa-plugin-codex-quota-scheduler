@@ -36,11 +36,13 @@ func ExtractCodexCredentials(raw json.RawMessage) (CodexCredentials, error) {
 		accountID, _ = lookupStringDeep(doc, "chatgpt_account_id")
 	}
 	if accountID == "" {
-		extracted, err := extractChatGPTAccountID(idToken)
-		if err != nil {
-			return CodexCredentials{}, err
+		if extracted, err := extractChatGPTAccountID(idToken); err == nil {
+			accountID = extracted
+		} else if idToken != "" {
+			if _, decodeErr := decodeJWTClaims(idToken); decodeErr != nil {
+				return CodexCredentials{}, fmt.Errorf("missing chatgpt_account_id: %w", decodeErr)
+			}
 		}
-		accountID = extracted
 	}
 
 	return CodexCredentials{

@@ -28,8 +28,9 @@ type CredentialSaveResult struct {
 	SaveSeq uint64
 }
 type CredentialRecoveryReport struct {
-	Ambiguous bool
-	Phase     TransitionPhase
+	Ambiguous   bool
+	Phase       TransitionPhase
+	Observation CredentialObservation
 }
 type CredentialManager struct {
 	mu    sync.Mutex
@@ -197,6 +198,14 @@ func (m *CredentialManager) saveVersionedWithHost(ctx context.Context, instance 
 	return CredentialSaveResult{phase, tr.SaveSeq}, err
 }
 func (m *CredentialManager) Reconcile(ctx context.Context, instance AuthInstanceID) (CredentialRecoveryReport, error) {
+	return m.reconcile(ctx, instance, false)
+}
+
+func (m *CredentialManager) ReconcileUnresolved(ctx context.Context, instance AuthInstanceID) (CredentialRecoveryReport, error) {
+	return m.reconcile(ctx, instance, true)
+}
+
+func (m *CredentialManager) reconcile(ctx context.Context, instance AuthInstanceID, requireUnresolved bool) (CredentialRecoveryReport, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if ss, ok := m.store.(interface {
@@ -208,47 +217,100 @@ func (m *CredentialManager) Reconcile(ctx context.Context, instance AuthInstance
 		}
 		m.state = fresh
 	}
-	chain := m.state.CredentialChains[instance]
-	if len(chain.Transitions) == 0 {
+	chain, ok := m.state.CredentialChains[instance]
+	if !ok || !chain.Cursor.ValidHashes() {
+		if requireUnresolved {
+			return CredentialRecoveryReport{}, ErrCredentialResolutionScope
+		}
 		return CredentialRecoveryReport{}, nil
 	}
-	i := len(chain.Transitions) - 1
-	tr := chain.Transitions[i]
-	if tr.Phase != TransitionOutcomeUnknown && tr.Phase != TransitionPlanned {
-		return CredentialRecoveryReport{Phase: tr.Phase}, nil
+	if requireUnresolved && !credentialChainUnresolved(chain) {
+		return CredentialRecoveryReport{}, ErrCredentialResolutionScope
 	}
 	current, err := m.host.GetAuth(ctx, instance)
 	if err != nil {
 		return CredentialRecoveryReport{}, err
 	}
-	switch current.Fingerprint.CompositeHash {
-	case tr.Next.CompositeHash:
-		tr.Phase = TransitionApplied
-	case tr.Prev.CompositeHash:
-		tr.Phase = TransitionAborted
-	default:
-		return CredentialRecoveryReport{Ambiguous: true, Phase: tr.Phase}, nil
+	nextChain, report := reconcileCredentialObservation(chain, current.Fingerprint, m.now())
+	if report.Ambiguous {
+		return report, nil
 	}
-	updated := false
 	err = m.mutate(func(s *PersistentState) error {
-		ch := s.CredentialChains[instance]
-		for j := range ch.Transitions {
-			candidate := ch.Transitions[j]
-			if candidate.SaveSeq != tr.SaveSeq || candidate.Prev != tr.Prev || candidate.Next != tr.Next || (candidate.Phase != TransitionPlanned && candidate.Phase != TransitionOutcomeUnknown) {
+		if requireUnresolved && !credentialChainUnresolved(s.CredentialChains[instance]) {
+			return ErrCredentialResolutionScope
+		}
+		s.CredentialChains[instance] = nextChain
+		for authID, binding := range s.Bindings {
+			if binding.Instance != instance {
 				continue
 			}
-			ch.Transitions[j] = tr
-			updated = true
-			break
+			switch report.Observation.Kind {
+			case CredentialOwnedRotation:
+				binding.Token++
+				binding.Fingerprint = current.Fingerprint
+				s.Bindings[authID] = binding
+			case CredentialExternalLogin:
+				binding.Login++
+				binding.Admission++
+				binding.Fingerprint = current.Fingerprint
+				binding.AuthBlocked = false
+				s.TierGeneration++
+				if s.TierGeneration == 0 {
+					s.TierGeneration = 1
+				}
+				if s.AdmissionEpochs == nil {
+					s.AdmissionEpochs = map[AuthInstanceID]InstanceAdmissionEpoch{}
+				}
+				s.AdmissionEpochs[instance] = binding.Admission
+				binding.Generation = AuthBindingEpoch(s.TierGeneration)
+				for id, active := range s.Bindings {
+					active.Generation = AuthBindingEpoch(s.TierGeneration)
+					s.Bindings[id] = active
+				}
+				s.Bindings[authID] = binding
+			}
 		}
-		s.CredentialChains[instance] = ch
 		return nil
 	})
 	if err != nil {
-		return CredentialRecoveryReport{Phase: tr.Phase}, err
+		return report, err
 	}
-	if !updated {
-		return CredentialRecoveryReport{}, nil
+	return report, nil
+}
+
+func reconcileCredentialObservation(chain TransitionChain, observed CredentialFingerprint, now time.Time) (TransitionChain, CredentialRecoveryReport) {
+	report := CredentialRecoveryReport{}
+	if len(chain.Transitions) > 0 {
+		i := len(chain.Transitions) - 1
+		transition := chain.Transitions[i]
+		if transition.Phase == TransitionPlanned || transition.Phase == TransitionOutcomeUnknown {
+			report.Phase = transition.Phase
+			switch observed.CompositeHash {
+			case transition.Next.CompositeHash:
+				transition.Phase = TransitionApplied
+				report.Phase = TransitionApplied
+			case transition.Prev.CompositeHash:
+				transition.Phase = TransitionAborted
+				report.Phase = TransitionAborted
+			default:
+				report.Ambiguous = true
+				return chain, report
+			}
+			chain.Transitions[i] = transition
+		} else {
+			report.Phase = transition.Phase
+		}
 	}
-	return CredentialRecoveryReport{Phase: tr.Phase}, nil
+	report.Observation = ClassifyObservedCredentialAt(chain, observed, now)
+	switch report.Observation.Kind {
+	case CredentialOwnedRotation:
+		chain.Cursor = observed
+		chain.Transitions = append([]CredentialTransition(nil), chain.Transitions[report.Observation.Advance:]...)
+	case CredentialExternalLogin:
+		chain = TransitionChain{Cursor: observed}
+	}
+	for len(chain.Transitions) > 0 && chain.Transitions[0].Prev == chain.Cursor && chain.Transitions[0].Phase == TransitionAborted {
+		chain.Transitions = chain.Transitions[1:]
+	}
+	return chain, report
 }

@@ -346,7 +346,13 @@ func TestProductionRosterSyncReconcilesCredentialTailsAfterRestart(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
-			got := persisted.CredentialChains[instance].Transitions[0].Phase
+			chain := persisted.CredentialChains[instance]
+			got := tc.wantPhase
+			if tc.ambiguous {
+				got = chain.Transitions[0].Phase
+			} else if chain.Cursor != tc.observed || len(chain.Transitions) != 0 {
+				t.Fatalf("resolved chain=%#v observed=%#v", chain, tc.observed)
+			}
 			if got != tc.wantPhase || (host.gets == 1) != tc.wantGetOne {
 				t.Fatalf("phase=%s gets=%d, want phase=%s getOne=%v", got, host.gets, tc.wantPhase, tc.wantGetOne)
 			}
@@ -401,8 +407,9 @@ func TestProductionRosterSyncCredentialReconcileFailureIsPerInstance(t *testing.
 	if got := persisted.CredentialChains[legacyAuthInstanceID("broken")].Transitions[0].Phase; got != TransitionPlanned {
 		t.Fatalf("broken phase=%s", got)
 	}
-	if got := persisted.CredentialChains[legacyAuthInstanceID("healthy")].Transitions[0].Phase; got != TransitionApplied {
-		t.Fatalf("healthy phase=%s, unrelated failure blocked reconciliation", got)
+	healthy := persisted.CredentialChains[legacyAuthInstanceID("healthy")]
+	if healthy.Cursor != next || len(healthy.Transitions) != 0 {
+		t.Fatalf("healthy chain=%#v, unrelated failure blocked reconciliation", healthy)
 	}
 	if host.gets != 2 {
 		t.Fatalf("GetAuth calls=%d, want one per active unresolved instance", host.gets)

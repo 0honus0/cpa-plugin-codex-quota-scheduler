@@ -22,6 +22,7 @@ func (h failingCredentialReadHost) SaveAuth(context.Context, AuthInstanceID, Hos
 type gatedCredentialReadHost struct {
 	started chan struct{}
 	release chan struct{}
+	result  HostAuth
 	err     error
 }
 
@@ -31,7 +32,7 @@ func (h *gatedCredentialReadHost) SaveAuth(context.Context, AuthInstanceID, Host
 func (h *gatedCredentialReadHost) GetAuth(context.Context, AuthInstanceID) (HostAuth, error) {
 	close(h.started)
 	<-h.release
-	return HostAuth{}, h.err
+	return h.result, h.err
 }
 func (h failingCredentialReadHost) GetAuth(context.Context, AuthInstanceID) (HostAuth, error) {
 	return HostAuth{}, h.err
@@ -61,7 +62,6 @@ func newCredentialManagementFixture(t *testing.T, observed CredentialFingerprint
 }
 
 func TestCredentialAmbiguityManagementExitsEpochSemantics(t *testing.T) {
-	f0 := fp("subject", "refresh-0", "metadata")
 	f1 := fp("subject", "refresh-1", "metadata")
 	external := fp("external", "refresh-x", "metadata")
 	for _, tc := range []struct {
@@ -73,7 +73,7 @@ func TestCredentialAmbiguityManagementExitsEpochSemantics(t *testing.T) {
 	}{
 		{name: "confirm-owned", action: CredentialConfirmOwned, observed: f1, want: RuntimeBinding{Admission: 3, Generation: 5, Login: 7, Token: 12, Fingerprint: f1, AuthBlocked: true}, wantG: 5},
 		{name: "confirm-external", action: CredentialConfirmExternal, observed: external, want: RuntimeBinding{Admission: 4, Generation: 6, Login: 8, Token: 11, Fingerprint: external, AuthBlocked: false}, wantG: 6},
-		{name: "reread", action: CredentialReread, observed: f1, want: RuntimeBinding{Admission: 3, Generation: 5, Login: 7, Token: 11, Fingerprint: f0, AuthBlocked: true}, wantG: 5},
+		{name: "reread", action: CredentialReread, observed: f1, want: RuntimeBinding{Admission: 3, Generation: 5, Login: 7, Token: 12, Fingerprint: f1, AuthBlocked: true}, wantG: 5},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			refresher, store, _, roster := newCredentialManagementFixture(t, tc.observed)
@@ -90,7 +90,7 @@ func TestCredentialAmbiguityManagementExitsEpochSemantics(t *testing.T) {
 			}
 			chain := state.CredentialChains[1]
 			if tc.action == CredentialReread {
-				if len(chain.Transitions) != 1 || chain.Transitions[0].Phase != TransitionApplied {
+				if chain.Cursor != tc.observed || len(chain.Transitions) != 0 {
 					t.Fatalf("reread chain=%#v", chain)
 				}
 			} else if chain.Cursor != tc.observed || len(chain.Transitions) != 0 {
@@ -129,6 +129,92 @@ func TestCredentialAmbiguityManagementRouteScopesAndAudits(t *testing.T) {
 	resp = HandleManagementRequestWithLifecycle(store, pluginapi.ManagementRequest{Method: http.MethodPost, Path: managementBasePath + "/credentials/resolve", Body: body}, time.Now(), ManagementLifecycleSnapshot{Roster: roster, ResolveCredential: failing})
 	if resp.StatusCode == http.StatusOK {
 		t.Fatal("durability failure returned success")
+	}
+}
+
+func TestCredentialResolutionRejectsNonAmbiguousChainWithoutMutation(t *testing.T) {
+	for _, action := range []CredentialResolutionAction{CredentialConfirmOwned, CredentialConfirmExternal, CredentialReread} {
+		t.Run(string(action), func(t *testing.T) {
+			observed := fp("external", "new", "metadata")
+			refresher, store, _, roster := newCredentialManagementFixture(t, observed)
+			before, err := store.UpdateMirrored(func(s *PersistentState) error {
+				b := s.Bindings["active"]
+				s.CredentialChains[b.Instance] = TransitionChain{Cursor: b.Fingerprint}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			refresher.credentials.state = before
+			if err = refresher.ResolveCredentialAmbiguity(context.Background(), roster, "active", action); !errors.Is(err, ErrCredentialResolutionScope) {
+				t.Fatalf("action=%s err=%v, want ErrCredentialResolutionScope", action, err)
+			}
+			after, err := store.PersistentSnapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeRaw, _ := json.Marshal(before)
+			afterRaw, _ := json.Marshal(after)
+			if string(beforeRaw) != string(afterRaw) {
+				t.Fatalf("action=%s mutated non-ambiguous state\nbefore=%s\nafter=%s", action, beforeRaw, afterRaw)
+			}
+		})
+	}
+}
+
+func TestCredentialResolutionRouteRejectsNonAmbiguousChain(t *testing.T) {
+	refresher, store, _, roster := newCredentialManagementFixture(t, fp("external", "new", "metadata"))
+	committed, err := store.UpdateMirrored(func(s *PersistentState) error {
+		b := s.Bindings["active"]
+		s.CredentialChains[b.Instance] = TransitionChain{Cursor: b.Fingerprint}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	refresher.credentials.state = committed
+	pluginState := NewPluginState(DefaultConfig())
+	body, _ := json.Marshal(map[string]string{"auth_id": "active", "action": string(CredentialConfirmOwned)})
+	resp := HandleManagementRequestWithLifecycle(pluginState, pluginapi.ManagementRequest{Method: http.MethodPost, Path: managementBasePath + "/credentials/resolve", Body: body}, time.Now(), ManagementLifecycleSnapshot{Roster: roster, ResolveCredential: func(ctx context.Context, authID string, action CredentialResolutionAction) error {
+		return refresher.ResolveCredentialAmbiguity(ctx, roster, authID, action)
+	}})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status=%d body=%s", resp.StatusCode, resp.Body)
+	}
+}
+
+func TestCredentialResolutionRechecksAmbiguityAtCommit(t *testing.T) {
+	for _, action := range []CredentialResolutionAction{CredentialConfirmOwned, CredentialConfirmExternal, CredentialReread} {
+		t.Run(string(action), func(t *testing.T) {
+			observed := fp("subject", "refresh-1", "metadata")
+			if action == CredentialConfirmExternal {
+				observed = fp("external", "refresh-x", "metadata")
+			}
+			refresher, store, _, roster := newCredentialManagementFixture(t, observed)
+			host := &gatedCredentialReadHost{started: make(chan struct{}), release: make(chan struct{}), result: HostAuth{Fingerprint: observed}}
+			refresher.credentials.host = host
+			done := make(chan error, 1)
+			go func() { done <- refresher.ResolveCredentialAmbiguity(context.Background(), roster, "active", action) }()
+			<-host.started
+			resolved, err := store.UpdateMirrored(func(s *PersistentState) error {
+				b := s.Bindings["active"]
+				s.CredentialChains[b.Instance] = TransitionChain{Cursor: b.Fingerprint}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			close(host.release)
+			if err = <-done; !errors.Is(err, ErrCredentialResolutionScope) {
+				t.Fatalf("action=%s err=%v, want scope rejection", action, err)
+			}
+			after, _ := store.PersistentSnapshot()
+			beforeRaw, _ := json.Marshal(resolved)
+			afterRaw, _ := json.Marshal(after)
+			if string(beforeRaw) != string(afterRaw) {
+				t.Fatalf("action=%s mutated after ambiguity cleared\nbefore=%s\nafter=%s", action, beforeRaw, afterRaw)
+			}
+		})
 	}
 }
 

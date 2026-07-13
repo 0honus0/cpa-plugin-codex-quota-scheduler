@@ -35,6 +35,7 @@ var (
 	errCPAAdmissionChanged            = errors.New("CPA admission changed during refresh")
 	ErrProvisionalFingerprintMismatch = errors.New("provisional credential fingerprint changed")
 	ErrCredentialResolutionScope      = errors.New("credential resolution requires an active roster instance")
+	ErrAccountIdentityUnresolved      = errors.New("account identity unresolved")
 )
 
 type CredentialResolutionAction string
@@ -69,15 +70,23 @@ func (r *QuotaRefresher) ResolveCredentialAmbiguity(ctx context.Context, roster 
 	if !ok || binding.Instance == 0 || binding.AuthID != authID {
 		return ErrBindingNotRosterConfirmed
 	}
+	persisted, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		return err
+	}
+	chain, ok := persisted.CredentialChains[binding.Instance]
+	if !ok || !credentialChainUnresolved(chain) {
+		return ErrCredentialResolutionScope
+	}
 	if action == CredentialReread {
-		report, err := r.credentials.Reconcile(ctx, binding.Instance)
+		report, err := r.credentials.ReconcileUnresolved(ctx, binding.Instance)
 		if err != nil {
 			return err
 		}
 		if report.Ambiguous {
 			return ErrCredentialUnresolved
 		}
-		return nil
+		return r.reloadCredentialMirrors()
 	}
 	var oldGenerations map[AuthInstanceID]TierGeneration
 	var cancellationTokens map[AuthInstanceID]uint64
@@ -113,6 +122,9 @@ func (r *QuotaRefresher) ResolveCredentialAmbiguity(ctx context.Context, roster 
 	committed, err := r.runtimeStore.UpdateMirrored(func(state *PersistentState) error {
 		latest, ok := state.Bindings[authID]
 		if !ok || latest.Instance != current.Instance || latest.Admission != current.Admission || latest.Generation != current.Generation || latest.Fingerprint != current.Fingerprint {
+			return ErrCredentialResolutionScope
+		}
+		if !credentialChainUnresolved(state.CredentialChains[current.Instance]) {
 			return ErrCredentialResolutionScope
 		}
 		state.CredentialChains[current.Instance] = TransitionChain{Cursor: observed.Fingerprint}
@@ -163,6 +175,24 @@ func (r *QuotaRefresher) ResolveCredentialAmbiguity(ctx context.Context, roster 
 	return nil
 }
 
+func credentialChainUnresolved(chain TransitionChain) bool {
+	current := chain.Cursor
+	for _, transition := range chain.Transitions {
+		if transition.Prev.CompositeHash != current.CompositeHash {
+			break
+		}
+		switch transition.Phase {
+		case TransitionApplied:
+			current = transition.Next
+		case TransitionPlanned, TransitionOutcomeUnknown:
+			return true
+		default:
+			return false
+		}
+	}
+	return false
+}
+
 var callHostCallback = func(method string, payload any) (json.RawMessage, error) {
 	return nil, fmt.Errorf("host callback %s unavailable", method)
 }
@@ -205,6 +235,7 @@ type QuotaRefresher struct {
 	probeController   *ProbeController
 	probeWAL          *ProbeWAL
 	probeFence        *FenceAllocator
+	probeRunMu        sync.Mutex
 	probeHoldMu       sync.Mutex
 	probeHoldPending  bool
 	probeHoldErr      error
@@ -478,11 +509,24 @@ func (r *QuotaRefresher) PublishAuthoritativeRoster(ctx context.Context, roster 
 	if adapter, ok := r.credentials.host.(*rosterCredentialHost); ok {
 		bootstrapHost = bootstrapCredentialHost{adapter: adapter, roster: filtered}
 	}
+	previousBindings := make(map[string]RuntimeBinding)
+	r.bindings.mu.RLock()
+	for authID, binding := range r.bindings.bindings {
+		previousBindings[authID] = binding
+	}
+	r.bindings.mu.RUnlock()
 	reconciled, err := r.bindings.ReconcileRoster(ctx, filtered, bootstrapHost)
 	if err != nil {
 		return err
 	}
-	r.reconcileActiveCredentialTails(ctx, reconciled.Bindings)
+	freshlyObserved := make(map[string]struct{})
+	for authID, binding := range reconciled.Bindings {
+		previous, existed := previousBindings[authID]
+		if !existed || previous.AuthIndex != binding.AuthIndex {
+			freshlyObserved[authID] = struct{}{}
+		}
+	}
+	r.reconcileActiveCredentialTails(ctx, reconciled.Bindings, freshlyObserved)
 	filtered.Generation = uint64(reconciled.Generation)
 	if filtered.ConfirmedAt.IsZero() {
 		filtered.ConfirmedAt = r.now()
@@ -532,7 +576,7 @@ func (r *QuotaRefresher) PublishAuthoritativeRoster(ctx context.Context, roster 
 	return nil
 }
 
-func (r *QuotaRefresher) reconcileActiveCredentialTails(ctx context.Context, bindings map[string]RuntimeBinding) {
+func (r *QuotaRefresher) reconcileActiveCredentialTails(ctx context.Context, bindings map[string]RuntimeBinding, freshlyObserved map[string]struct{}) {
 	if r == nil || r.credentials == nil || len(bindings) == 0 {
 		return
 	}
@@ -541,15 +585,59 @@ func (r *QuotaRefresher) reconcileActiveCredentialTails(ctx context.Context, bin
 		authIDs = append(authIDs, authID)
 	}
 	sort.Strings(authIDs)
+	changed := false
+	var external []AuthInstanceID
 	for _, authID := range authIDs {
+		if _, skip := freshlyObserved[authID]; skip {
+			continue
+		}
 		binding := bindings[authID]
 		if binding.Instance == 0 {
 			continue
 		}
-		if _, err := r.credentials.Reconcile(ctx, binding.Instance); err != nil && r.state != nil {
+		report, err := r.credentials.Reconcile(ctx, binding.Instance)
+		if err != nil && r.state != nil {
 			r.state.RecordLog("warn", "credential.reconcile_failed", "credential reconciliation will retry on a later authoritative roster sync", map[string]any{"auth_id": authID}, r.now())
+			continue
+		}
+		if report.Observation.Kind == CredentialOwnedRotation || report.Observation.Kind == CredentialExternalLogin {
+			changed = true
+		}
+		if report.Observation.Kind == CredentialExternalLogin {
+			external = append(external, binding.Instance)
 		}
 	}
+	if !changed || r.reloadCredentialMirrors() != nil {
+		return
+	}
+	if r.coordinator != nil && len(external) > 0 {
+		r.coordinator.CancelInstances(external)
+		state, err := r.runtimeStore.PersistentSnapshot()
+		if err == nil {
+			generations := make(map[AuthInstanceID]TierGeneration, len(state.Bindings))
+			for _, binding := range state.Bindings {
+				generations[binding.Instance] = TierGeneration(binding.Generation)
+			}
+			r.coordinator.activateInstances(generations)
+		}
+	}
+}
+
+func (r *QuotaRefresher) reloadCredentialMirrors() error {
+	if r == nil || r.runtimeStore == nil || r.credentials == nil || r.bindings == nil {
+		return ErrCredentialResolutionScope
+	}
+	state, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		return err
+	}
+	r.credentials.mu.Lock()
+	r.credentials.state = state
+	r.credentials.mu.Unlock()
+	r.bindings.mu.Lock()
+	r.bindings.bindings = state.Bindings
+	r.bindings.mu.Unlock()
+	return nil
 }
 
 func (r *QuotaRefresher) CancelRosterInstances(authIDs []string) error {
@@ -1325,6 +1413,14 @@ func (r *QuotaRefresher) refreshAuthVersionedHeld(auth pluginapi.HostAuthFileEnt
 	}
 	account = r.mergeExistingAccount(account)
 	account.ChatGPTAccountID = credentials.ChatGPTAccountID
+	if credentials.ChatGPTAccountID == "" {
+		account.LastError = ""
+		account.Refresh = AccountRefreshState{}
+		if r.state.ApplyQuotaRefreshSuccessIfAdmissionCurrent(account, version, r.now()) {
+			publishSchedulerState(r.state, highestTierSet(r.runtimeRoster()), r.now())
+		}
+		return
+	}
 	quota, err := r.fetchQuota(credentials, account.AuthID, version)
 	if err != nil {
 		if errors.Is(err, errCPAAdmissionChanged) {
