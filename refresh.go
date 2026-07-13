@@ -527,6 +527,20 @@ func (r *QuotaRefresher) PublishAuthoritativeRoster(ctx context.Context, roster 
 		}
 	}
 	r.reconcileActiveCredentialTails(ctx, reconciled.Bindings, freshlyObserved)
+	publishedState, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		return err
+	}
+	publishedBindings := make(map[string]RuntimeBinding, len(reconciled.Bindings))
+	for authID := range reconciled.Bindings {
+		binding, ok := publishedState.Bindings[authID]
+		if !ok || binding.Instance == 0 {
+			return ErrBindingNotRosterConfirmed
+		}
+		publishedBindings[authID] = binding
+	}
+	reconciled.Bindings = publishedBindings
+	reconciled.Generation = publishedState.TierGeneration
 	filtered.Generation = uint64(reconciled.Generation)
 	if filtered.ConfirmedAt.IsZero() {
 		filtered.ConfirmedAt = r.now()
@@ -585,8 +599,6 @@ func (r *QuotaRefresher) reconcileActiveCredentialTails(ctx context.Context, bin
 		authIDs = append(authIDs, authID)
 	}
 	sort.Strings(authIDs)
-	changed := false
-	var external []AuthInstanceID
 	for _, authID := range authIDs {
 		if _, skip := freshlyObserved[authID]; skip {
 			continue
@@ -595,32 +607,57 @@ func (r *QuotaRefresher) reconcileActiveCredentialTails(ctx context.Context, bin
 		if binding.Instance == 0 {
 			continue
 		}
-		report, err := r.credentials.Reconcile(ctx, binding.Instance)
+		oldGenerations := map[AuthInstanceID]TierGeneration{binding.Instance: TierGeneration(binding.Generation)}
+		var cancellationTokens map[AuthInstanceID]uint64
+		suspended := false
+		report, err := r.credentials.ReconcileWithHooks(ctx, binding.Instance, CredentialReconcileHooks{
+			BeforeCommit: func(report CredentialRecoveryReport) error {
+				if report.Observation.Kind == CredentialExternalLogin && r.coordinator != nil {
+					cancellationTokens = r.coordinator.suspendInstancesForRollback([]AuthInstanceID{binding.Instance})
+					if _, ok := cancellationTokens[binding.Instance]; !ok {
+						return ErrCredentialResolutionScope
+					}
+					suspended = true
+				}
+				return nil
+			},
+			AfterCommit: func(report CredentialRecoveryReport, committed PersistentState) error {
+				if report.Observation.Kind != CredentialOwnedRotation && report.Observation.Kind != CredentialExternalLogin {
+					return nil
+				}
+				return r.publishCredentialBindingMirror(committed)
+			},
+		})
 		if err != nil && r.state != nil {
+			if suspended && !errors.Is(err, ErrCredentialRollbackFailed) {
+				r.coordinator.restoreCancelledInstances(oldGenerations, cancellationTokens)
+			}
 			r.state.RecordLog("warn", "credential.reconcile_failed", "credential reconciliation will retry on a later authoritative roster sync", map[string]any{"auth_id": authID}, r.now())
 			continue
 		}
-		if report.Observation.Kind == CredentialOwnedRotation || report.Observation.Kind == CredentialExternalLogin {
-			changed = true
+		if err != nil {
+			if suspended && !errors.Is(err, ErrCredentialRollbackFailed) {
+				r.coordinator.restoreCancelledInstances(oldGenerations, cancellationTokens)
+			}
+			continue
 		}
 		if report.Observation.Kind == CredentialExternalLogin {
-			external = append(external, binding.Instance)
-		}
-	}
-	if !changed || r.reloadCredentialMirrors() != nil {
-		return
-	}
-	if r.coordinator != nil && len(external) > 0 {
-		r.coordinator.CancelInstances(external)
-		state, err := r.runtimeStore.PersistentSnapshot()
-		if err == nil {
-			generations := make(map[AuthInstanceID]TierGeneration, len(state.Bindings))
-			for _, binding := range state.Bindings {
-				generations[binding.Instance] = TierGeneration(binding.Generation)
+			current, ok := r.bindings.Lookup(authID)
+			if ok && r.coordinator != nil {
+				r.coordinator.activateInstances(map[AuthInstanceID]TierGeneration{current.Instance: TierGeneration(current.Generation)})
 			}
-			r.coordinator.activateInstances(generations)
 		}
 	}
+}
+
+func (r *QuotaRefresher) publishCredentialBindingMirror(state PersistentState) error {
+	if r == nil || r.bindings == nil {
+		return ErrCredentialResolutionScope
+	}
+	r.bindings.mu.Lock()
+	r.bindings.bindings = state.Bindings
+	r.bindings.mu.Unlock()
+	return nil
 }
 
 func (r *QuotaRefresher) reloadCredentialMirrors() error {

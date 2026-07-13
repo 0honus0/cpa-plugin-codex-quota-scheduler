@@ -305,6 +305,35 @@ func TestSuiteRosterManagement(t *testing.T) {
 	})
 }
 
+func TestConcurrentSameMomentRosterWakesSingleflight(t *testing.T) {
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	priority := 9
+	gate := make(chan struct{})
+	host := &rosterTestHost{entries: []RosterEntry{{ID: "active", Provider: "codex", Priority: &priority}}, gate: gate}
+	controller := NewRosterController(RosterControllerOptions{Host: host, Now: func() time.Time { return now }})
+	const wakes = 8
+	var wg sync.WaitGroup
+	for i := 0; i < wakes; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = controller.WakeForManagement(context.Background())
+		}()
+	}
+	deadline := time.Now().Add(time.Second)
+	for host.callCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if calls := host.callCount(); calls != 1 {
+		t.Fatalf("same-moment wakes started %d host syncs before release", calls)
+	}
+	close(gate)
+	wg.Wait()
+	if calls := host.callCount(); calls != 1 {
+		t.Fatalf("same-moment wakes issued duplicate host syncs: %d", calls)
+	}
+}
+
 func TestStartupCapabilityBRecoversThroughRosterSynchronization(t *testing.T) {
 	p := 4
 	host := &rosterTestHost{err: errors.New("not ready")}

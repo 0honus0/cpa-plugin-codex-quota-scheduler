@@ -174,7 +174,7 @@ var invariantExplicitOwners = map[string][]string{
 	"INV-30 positive": {"TestStateStoreBackupAndDualCorruptionRecovery"},
 	"INV-30 negative": {"TestRuntimeAndUserArtifactsNeverPersistSensitiveValues"},
 	"INV-31 positive": {"TestSuiteRosterManagement"},
-	"INV-31 negative": {"TestRosterObserverRejectsOutOfOrderTransition"},
+	"INV-31 negative": {"TestConcurrentSameMomentRosterWakesSingleflight"},
 	"INV-32 positive": {"TestProductionProbeRunsWhileNormalRefreshDormant"},
 	"INV-32 negative": {"TestRefreshDueOnceDoesNothingOutsideActiveWindow"},
 	"INV-33 positive": {"TestProbeAuthBlockedResumesOnlyAfterExternalLoginEpoch"},

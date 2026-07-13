@@ -416,6 +416,45 @@ func TestProductionRosterSyncCredentialReconcileFailureIsPerInstance(t *testing.
 	}
 }
 
+func TestAutomaticExternalLoginPublishesConfirmedRosterFromCommittedBinding(t *testing.T) {
+	now := time.Date(2026, 7, 14, 12, 30, 0, 0, time.UTC)
+	legacyPath := filepath.Join(t.TempDir(), "state.json")
+	instance := legacyAuthInstanceID("active")
+	oldFingerprint := NewCredentialFingerprint("subject", "old", "idx-active")
+	external := NewCredentialFingerprint("external", "new", "idx-active")
+	persistent := NewPersistentState()
+	persistent.TierGeneration = 5
+	persistent.AdmissionEpochs[instance] = 3
+	persistent.Bindings["active"] = RuntimeBinding{AuthID: "active", AuthIndex: "idx-active", Instance: instance, Admission: 3, Generation: 5, Login: 7, Token: 11, Fingerprint: oldFingerprint}
+	persistent.CredentialChains[instance] = TransitionChain{Cursor: oldFingerprint}
+	if err := NewStateStore(semanticStatePaths(legacyPath).Runtime, OSFileHooks(), nil).WriteThrough(persistent); err != nil {
+		t.Fatal(err)
+	}
+	host := &runtimeCredentialHost{current: map[AuthInstanceID]HostAuth{instance: {Fingerprint: external}}, getErr: map[AuthInstanceID]error{}}
+	roster := HostRosterSnapshot{Capability: CapabilityA, Confirmed: true, Generation: 5, Entries: []RosterEntry{{ID: "active", AuthIndex: "idx-active", Provider: "codex", Priority: intPtr(9)}}}
+	r, err := NewProductionQuotaRefresher(&fakeHostClient{}, NewPluginState(DefaultConfig()), host, roster, legacyPath, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = r.PublishAuthoritativeRoster(context.Background(), roster); err != nil {
+		t.Fatal(err)
+	}
+	after, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := after.Bindings["active"]
+	if binding.Fingerprint != external || binding.Generation != 6 || after.TierGeneration != 6 {
+		t.Fatalf("external binding not committed: binding=%#v G=%d", binding, after.TierGeneration)
+	}
+	if after.LastConfirmedRoster == nil || after.LastConfirmedRoster.Generation != 6 || len(after.LastConfirmedRoster.Entries) != 1 || after.LastConfirmedRoster.Entries[0].Fingerprint != external {
+		t.Fatalf("confirmed roster persisted stale pre-reconcile binding: %#v", after.LastConfirmedRoster)
+	}
+	if published := r.runtimeRoster(); published.Generation != 6 {
+		t.Fatalf("runtime roster generation=%d, want committed 6", published.Generation)
+	}
+}
+
 func TestProductionRosterSyncAuthIndexChangeDoesNotReconcileResetChain(t *testing.T) {
 	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
 	legacyPath := filepath.Join(t.TempDir(), "state.json")

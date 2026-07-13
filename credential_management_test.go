@@ -218,6 +218,159 @@ func TestCredentialResolutionRechecksAmbiguityAtCommit(t *testing.T) {
 	}
 }
 
+func TestAutomaticExternalLoginFencesBeforeDurableCommit(t *testing.T) {
+	now := time.Date(2026, 7, 14, 10, 0, 0, 0, time.UTC)
+	oldFingerprint := fp("subject", "old", "metadata")
+	external := fp("external", "new", "metadata")
+	commitReached := make(chan struct{})
+	releaseCommit := make(chan struct{})
+	var armed atomic.Bool
+	hooks := OSFileHooks()
+	hooks.Observe = func(op string) {
+		if op == "primary-dir-fsync" && armed.CompareAndSwap(true, false) {
+			close(commitReached)
+			<-releaseCommit
+		}
+	}
+	store := NewStateStore(filepath.Join(t.TempDir(), "runtime.json"), hooks, nil)
+	state := NewPersistentState()
+	state.TierGeneration = 5
+	state.Bindings["active"] = RuntimeBinding{AuthID: "active", AuthIndex: "idx", Instance: 1, Admission: 3, Generation: 5, Login: 7, Token: 11, Fingerprint: oldFingerprint}
+	state.CredentialChains[1] = TransitionChain{Cursor: oldFingerprint}
+	if err := store.WriteThrough(state); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := NewBindingRegistry(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := mustCredentialManager(t, store, &walHost{current: HostAuth{Fingerprint: external}}, func() time.Time { return now }, nil)
+	pluginState := NewPluginState(DefaultConfig())
+	started := make(chan struct{})
+	var applied atomic.Bool
+	coordinator := NewCoordinator(CoordinatorOptions{Execute: func(_ context.Context, intent Intent, _ *HeldLease) OperationResult {
+		close(started)
+		<-commitReached
+		return OperationResult{Token: intent.Token, Login: intent.Login, Fingerprint: intent.Fingerprint}
+	}, Validate: func(intent Intent, result OperationResult) bool {
+		return registry.ApplyIfCurrent(intent.AuthID, WritebackVersion{Token: result.Token, Login: result.Login, Fingerprint: result.Fingerprint}, func() {
+			applied.Store(true)
+			pluginState.RecordLog("info", "stale.apply", "stale automatic writeback applied", nil, now)
+		})
+	}})
+	t.Cleanup(coordinator.Close)
+	coordinator.activateInstances(map[AuthInstanceID]TierGeneration{1: 5})
+	r := &QuotaRefresher{runtimeStore: store, bindings: registry, credentials: manager, coordinator: coordinator, state: pluginState, now: func() time.Time { return now }}
+	binding, _ := registry.Lookup("active")
+	old := coordinator.Submit(Intent{AuthID: "active", Instance: 1, Generation: 5, Class: OperationQuotaRead, Source: SourceManualRefresh, Token: binding.ExecutionToken(0), Login: binding.Login, Fingerprint: binding.Fingerprint})
+	<-started
+	armed.Store(true)
+	syncDone := make(chan struct{})
+	go func() {
+		r.reconcileActiveCredentialTails(context.Background(), map[string]RuntimeBinding{"active": binding}, nil)
+		close(syncDone)
+	}()
+	<-commitReached
+	result := old.Await(context.Background())
+	if result.Disposition != ResultCancelled || applied.Load() || len(pluginState.Snapshot(now).Logs) != 0 {
+		close(releaseCommit)
+		<-syncDone
+		t.Fatalf("old result crossed automatic external commit: disposition=%s applied=%v logs=%v", result.Disposition, applied.Load(), pluginState.Snapshot(now).Logs)
+	}
+	close(releaseCommit)
+	<-syncDone
+}
+
+func TestAutomaticExternalLoginReloadFailureRollsBack(t *testing.T) {
+	external := fp("external", "new", "metadata")
+	r, store, _, _ := newCredentialManagementFixture(t, external)
+	committed, err := store.UpdateMirrored(func(s *PersistentState) error {
+		b := s.Bindings["active"]
+		s.CredentialChains[b.Instance] = TransitionChain{Cursor: b.Fingerprint}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.credentials.state = committed
+	binding := committed.Bindings["active"]
+	coordinator := NewCoordinator(CoordinatorOptions{Execute: func(_ context.Context, intent Intent, _ *HeldLease) OperationResult {
+		return OperationResult{Token: intent.Token}
+	}})
+	t.Cleanup(coordinator.Close)
+	coordinator.activateInstances(map[AuthInstanceID]TierGeneration{binding.Instance: TierGeneration(binding.Generation)})
+	r.coordinator = coordinator
+	r.bindings = nil // force mirror reload failure after durable reconciliation
+	r.reconcileActiveCredentialTails(context.Background(), map[string]RuntimeBinding{"active": binding}, nil)
+	after, _ := store.PersistentSnapshot()
+	beforeRaw, _ := json.Marshal(committed)
+	afterRaw, _ := json.Marshal(after)
+	if string(beforeRaw) != string(afterRaw) {
+		t.Fatalf("reload failure left durable external epochs advanced\nbefore=%s\nafter=%s", beforeRaw, afterRaw)
+	}
+	result := coordinator.Submit(Intent{Instance: binding.Instance, Generation: TierGeneration(binding.Generation), Class: OperationQuotaRead, Source: SourceManualRefresh, Token: binding.ExecutionToken(0)}).Await(context.Background())
+	if result.Disposition != ResultApplied {
+		t.Fatalf("reload failure did not restore exact old generation: %s", result.Disposition)
+	}
+}
+
+func TestAutomaticExternalLoginRollbackDoesNotUndoConcurrentCancel(t *testing.T) {
+	now := time.Date(2026, 7, 14, 11, 0, 0, 0, time.UTC)
+	oldFingerprint := fp("subject", "old", "metadata")
+	external := fp("external", "new", "metadata")
+	store := NewStateStore(filepath.Join(t.TempDir(), "runtime.json"), OSFileHooks(), nil)
+	state := NewPersistentState()
+	state.TierGeneration = 5
+	state.Bindings["active"] = RuntimeBinding{AuthID: "active", AuthIndex: "idx", Instance: 1, Admission: 3, Generation: 5, Login: 7, Token: 11, Fingerprint: oldFingerprint}
+	state.CredentialChains[1] = TransitionChain{Cursor: oldFingerprint}
+	if err := store.WriteThrough(state); err != nil {
+		t.Fatal(err)
+	}
+	manager := mustCredentialManager(t, store, &walHost{current: HostAuth{Fingerprint: external}}, func() time.Time { return now }, nil)
+	coordinator := NewCoordinator(CoordinatorOptions{Execute: func(_ context.Context, intent Intent, _ *HeldLease) OperationResult {
+		return OperationResult{Token: intent.Token}
+	}})
+	t.Cleanup(coordinator.Close)
+	coordinator.activateInstances(map[AuthInstanceID]TierGeneration{1: 5})
+	oldGenerations := map[AuthInstanceID]TierGeneration{1: 5}
+	var tokens map[AuthInstanceID]uint64
+	committed := make(chan struct{})
+	releaseReload := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		_, err := manager.ReconcileWithHooks(context.Background(), 1, CredentialReconcileHooks{
+			BeforeCommit: func(report CredentialRecoveryReport) error {
+				if report.Observation.Kind != CredentialExternalLogin {
+					return errors.New("expected external observation")
+				}
+				tokens = coordinator.suspendInstancesForRollback([]AuthInstanceID{1})
+				return nil
+			},
+			AfterCommit: func(CredentialRecoveryReport, PersistentState) error {
+				close(committed)
+				<-releaseReload
+				return errors.New("reload failed")
+			},
+		})
+		done <- err
+	}()
+	<-committed
+	coordinator.CancelInstances([]AuthInstanceID{1})
+	close(releaseReload)
+	if err := <-done; err == nil {
+		t.Fatal("reload failure missing")
+	}
+	coordinator.restoreCancelledInstances(oldGenerations, tokens)
+	result := coordinator.Submit(Intent{Instance: 1, Generation: 5, Class: OperationQuotaRead, Source: SourceManualRefresh, Token: ExecutionToken{Instance: 1, Tier: 5}}).Await(context.Background())
+	if result.Disposition != ResultCancelled {
+		t.Fatalf("automatic rollback undid later authoritative cancellation: %s", result.Disposition)
+	}
+	after, _ := store.PersistentSnapshot()
+	if after.TierGeneration != 5 || after.Bindings["active"].Login != 7 || after.CredentialChains[1].Cursor != oldFingerprint {
+		t.Fatalf("reload rollback did not restore durable credential state: %#v", after)
+	}
+}
+
 func TestCredentialConfirmExternalFencesPriorAdmissionBeforeReuse(t *testing.T) {
 	external := fp("external", "refresh-x", "metadata")
 	refresher, _, _, roster := newCredentialManagementFixture(t, external)

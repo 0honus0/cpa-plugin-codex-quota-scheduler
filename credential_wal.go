@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 	"time"
 )
@@ -11,6 +12,7 @@ var ErrCredentialOutcomeUnknown = errors.New("credential save outcome unknown")
 var ErrCredentialRejected = errors.New("credential save rejected")
 var ErrCredentialUnresolved = errors.New("credential transition unresolved")
 var ErrStaleExecutionToken = errors.New("stale execution token")
+var ErrCredentialRollbackFailed = errors.New("credential rollback failed")
 
 type HostAuth struct {
 	Name        string
@@ -31,6 +33,10 @@ type CredentialRecoveryReport struct {
 	Ambiguous   bool
 	Phase       TransitionPhase
 	Observation CredentialObservation
+}
+type CredentialReconcileHooks struct {
+	BeforeCommit func(CredentialRecoveryReport) error
+	AfterCommit  func(CredentialRecoveryReport, PersistentState) error
 }
 type CredentialManager struct {
 	mu    sync.Mutex
@@ -198,14 +204,18 @@ func (m *CredentialManager) saveVersionedWithHost(ctx context.Context, instance 
 	return CredentialSaveResult{phase, tr.SaveSeq}, err
 }
 func (m *CredentialManager) Reconcile(ctx context.Context, instance AuthInstanceID) (CredentialRecoveryReport, error) {
-	return m.reconcile(ctx, instance, false)
+	return m.reconcile(ctx, instance, false, CredentialReconcileHooks{})
+}
+
+func (m *CredentialManager) ReconcileWithHooks(ctx context.Context, instance AuthInstanceID, hooks CredentialReconcileHooks) (CredentialRecoveryReport, error) {
+	return m.reconcile(ctx, instance, false, hooks)
 }
 
 func (m *CredentialManager) ReconcileUnresolved(ctx context.Context, instance AuthInstanceID) (CredentialRecoveryReport, error) {
-	return m.reconcile(ctx, instance, true)
+	return m.reconcile(ctx, instance, true, CredentialReconcileHooks{})
 }
 
-func (m *CredentialManager) reconcile(ctx context.Context, instance AuthInstanceID, requireUnresolved bool) (CredentialRecoveryReport, error) {
+func (m *CredentialManager) reconcile(ctx context.Context, instance AuthInstanceID, requireUnresolved bool, hooks CredentialReconcileHooks) (CredentialRecoveryReport, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if ss, ok := m.store.(interface {
@@ -235,6 +245,12 @@ func (m *CredentialManager) reconcile(ctx context.Context, instance AuthInstance
 	if report.Ambiguous {
 		return report, nil
 	}
+	if hooks.BeforeCommit != nil {
+		if err := hooks.BeforeCommit(report); err != nil {
+			return report, err
+		}
+	}
+	before := clonePersistentState(m.state)
 	err = m.mutate(func(s *PersistentState) error {
 		if requireUnresolved && !credentialChainUnresolved(s.CredentialChains[instance]) {
 			return ErrCredentialResolutionScope
@@ -274,6 +290,25 @@ func (m *CredentialManager) reconcile(ctx context.Context, instance AuthInstance
 	})
 	if err != nil {
 		return report, err
+	}
+	committed := clonePersistentState(m.state)
+	if hooks.AfterCommit != nil {
+		if afterErr := hooks.AfterCommit(report, committed); afterErr != nil {
+			rollbackErr := m.mutate(func(s *PersistentState) error {
+				if s.TierGeneration != committed.TierGeneration || !reflect.DeepEqual(s.AdmissionEpochs, committed.AdmissionEpochs) || !reflect.DeepEqual(s.CredentialChains, committed.CredentialChains) || !reflect.DeepEqual(s.Bindings, committed.Bindings) {
+					return ErrCredentialResolutionScope
+				}
+				s.TierGeneration = before.TierGeneration
+				s.AdmissionEpochs = clonePersistentState(before).AdmissionEpochs
+				s.CredentialChains = clonePersistentState(before).CredentialChains
+				s.Bindings = clonePersistentState(before).Bindings
+				return nil
+			})
+			if rollbackErr != nil {
+				return report, errors.Join(afterErr, ErrCredentialRollbackFailed, rollbackErr)
+			}
+			return report, afterErr
+		}
 	}
 	return report, nil
 }

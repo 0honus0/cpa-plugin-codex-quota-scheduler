@@ -21,7 +21,7 @@ The frozen design is structurally explicit: Group A has ten numbered scenarios; 
 
 ## Explicit invariant mapping rationale
 
-Inline directional tags already inside real behavioral suites remain authoritative. The explicit mapping is used where historical tests carried no directional tag or used the old nondirectional `//inv:INV-xx[,INV-yy]` form. Owners were selected by the behavior they execute, not by filename aggregation:
+Inline directional tags are historical comments only and are never authoritative evidence. The explicit semantic manifest is the sole invariant owner source, and owners are selected by the behavior they execute rather than filename aggregation:
 
 - Roster/provisional/fencing: INV-02, INV-03, INV-20, INV-21, INV-28, INV-30, INV-33 use provisional request/denial, authoritative-generation, removal fencing, binding re-add, state recovery, and external-login recovery tests.
 - Coordinator/Probe: INV-06 through INV-08, INV-14, INV-15, INV-17 through INV-19, INV-27, INV-32, INV-36 use non-coalescing, lease, failure isolation, business-state isolation, dual-window, time-jump, K-point, and suppression tests.
@@ -184,7 +184,47 @@ Fresh final verification after that fix:
 - `go vet ./...`: pass.
 - `git diff --check`: pass (line-ending warnings only).
 
-A final independent re-review is required before commit.
+The next main review found one Critical automatic external-login fencing window, one Important INV-31 negative-owner gap, and the stale inline-tag authority sentence corrected above.
+
+RED evidence:
+
+```text
+Automatic external sync: an old in-flight result returned Applied, passed
+ValidateWriteback against stale mirrors, and recorded stale.apply while the
+external Login/IAE/G commit was durable but not yet published/cancelled.
+
+Forced mirror reload failure: durable Login/IAE/G and the external cursor
+remained advanced instead of rolling back.
+```
+
+Fixes:
+
+- `ReconcileWithHooks` suspends an external instance with a target-specific cancellation nonce before the durable mutation. Owned rotations do not suspend or advance G/IAE.
+- The after-commit hook publishes the committed binding mirror while the credential transaction is serialized. On reload/publish failure, CredentialManager conditionally restores only the exact prior credential chains, bindings, admission epochs, and tier generation; the caller restores only its matching generation+nonce.
+- A deterministic later `CancelInstances` race proves rollback cannot undo a newer authoritative cancellation.
+- INV-31 negative now maps to `TestConcurrentSameMomentRosterWakesSingleflight`, a distinct top-level eight-wake counterexample that permits exactly one host roster call.
+
+Focused automatic fencing/rollback/cancel and INV-31 tests pass in 2.064s; root package compatibility passes in 14.050s.
+
+Fresh final verification:
+
+- Full `go test ./... -count=1 -timeout 180s`: pass; root package 14.613s.
+- S7: pass; 48 exact §12 owners; 23.5s wall time.
+- `go test -race ./... -count=1 -timeout 240s`: pass; root package 27.483s.
+- `go vet ./...`: pass.
+- `git diff --check`: pass (line-ending warnings only).
+
+The independent follow-up found one remaining Important persistence mismatch: after external reconciliation, `PublishAuthoritativeRoster` still built LastConfirmedRoster and activation from the pre-reconcile binding snapshot. RED proved the durable binding at G=6/external fingerprint was paired with a confirmed roster at G=5/old fingerprint. Publication now reloads the durable bindings and tier generation immediately after credential reconciliation, then uses that state for LastConfirmedRoster, activation, Probe recovery, and the runtime roster. The focused restart-facing regression passes in 2.204s.
+
+Fresh final verification after the publish-snapshot fix:
+
+- Full `go test ./... -count=1 -timeout 180s`: pass; root package 15.235s.
+- S7: pass; 48 exact §12 owners; 23.6s wall time.
+- `go test -race ./... -count=1 -timeout 240s`: pass; root package 27.057s.
+- `go vet ./...`: pass.
+- `git diff --check`: pass (line-ending warnings only).
+
+Final independent re-review found no Critical, Important, or Minor issues and returned **Ready to merge: Yes**.
 
 ## Historical post-approval verification
 
