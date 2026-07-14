@@ -1387,6 +1387,86 @@ func TestProductionRosterPublicationDoesNotExposeNewAdmissionWithOldRoster(t *te
 	}
 }
 
+func TestProductionCandidateRefreshCannotMutateAuthoritativeAdmission(t *testing.T) {
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	host := &rosterPublicationHost{auth: map[string]pluginapi.HostAuthGetResponse{
+		"a": {AuthIndex: "a", Name: "a.json", JSON: json.RawMessage(`{"access_token":"a","refresh_token":"ra","account_id":"acct-a"}`)},
+	}}
+	state := NewPluginState(DefaultConfig())
+	adapter := &rosterCredentialHost{host: host, roster: HostRosterSnapshot{Capability: CapabilityB}}
+	r, err := NewProductionQuotaRefresher(host, state, adapter, HostRosterSnapshot{Capability: CapabilityB}, filepath.Join(t.TempDir(), "state.json"), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.bindings = r.bindings
+	roster := HostRosterSnapshot{Capability: CapabilityA, Confirmed: true, Health: RosterHealthy, BackgroundAllowed: true, Entries: []RosterEntry{{ID: "a", AuthIndex: "a", Provider: "codex", Priority: intPtr(9)}}}
+	if err := r.PublishAuthoritativeRoster(context.Background(), roster); err != nil {
+		t.Fatal(err)
+	}
+	want, wantVersion := state.CPAAdmissionVersioned()
+	req := pluginapi.SchedulerPickRequest{Provider: "codex", Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "candidate", Provider: "codex", Priority: 99}}}
+	if err := r.RefreshDueCandidatesOnce(req); err != nil {
+		t.Fatal(err)
+	}
+	got, gotVersion := state.CPAAdmissionVersioned()
+	if gotVersion != wantVersion || !equalCPAAdmission(got, want) {
+		t.Fatalf("candidate refresh mutated authoritative admission: got=%#v version=%d want=%#v version=%d", got, gotVersion, want, wantVersion)
+	}
+}
+
+func TestProductionCandidateRefreshCannotOverwriteAdmissionDuringPublication(t *testing.T) {
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	host := &rosterPublicationHost{auth: map[string]pluginapi.HostAuthGetResponse{
+		"old": {AuthIndex: "old", Name: "a.json", JSON: json.RawMessage(`{"access_token":"old","refresh_token":"ro","account_id":"acct"}`)},
+		"new": {AuthIndex: "new", Name: "a.json", JSON: json.RawMessage(`{"access_token":"new","refresh_token":"rn","account_id":"acct"}`)},
+	}}
+	state := NewPluginState(DefaultConfig())
+	adapter := &rosterCredentialHost{host: host, roster: HostRosterSnapshot{Capability: CapabilityB}}
+	r, err := NewProductionQuotaRefresher(host, state, adapter, HostRosterSnapshot{Capability: CapabilityB}, filepath.Join(t.TempDir(), "state.json"), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.bindings = r.bindings
+	initial := HostRosterSnapshot{Capability: CapabilityA, Confirmed: true, Health: RosterHealthy, BackgroundAllowed: true, Entries: []RosterEntry{{ID: "a", AuthIndex: "old", Provider: "codex", Priority: intPtr(1)}}}
+	if err := r.PublishAuthoritativeRoster(context.Background(), initial); err != nil {
+		t.Fatal(err)
+	}
+
+	publishPaused := make(chan struct{})
+	releasePublish := make(chan struct{})
+	r.finalPublicationHook = func() {
+		close(publishPaused)
+		<-releasePublish
+	}
+	replacement := HostRosterSnapshot{Capability: CapabilityA, Confirmed: true, Health: RosterHealthy, BackgroundAllowed: true, Entries: []RosterEntry{{ID: "a", AuthIndex: "new", Provider: "codex", Priority: intPtr(9)}}}
+	publishDone := make(chan error, 1)
+	go func() { publishDone <- r.PublishAuthoritativeRoster(context.Background(), replacement) }()
+	select {
+	case <-publishPaused:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for final roster publication")
+	}
+
+	req := pluginapi.SchedulerPickRequest{Provider: "codex", Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "candidate", Provider: "codex", Priority: 99}}}
+	candidateDone := make(chan error, 1)
+	go func() { candidateDone <- r.RefreshDueCandidatesOnce(req) }()
+	time.Sleep(200 * time.Millisecond)
+	close(releasePublish)
+	if err := <-publishDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-candidateDone; err != nil {
+		t.Fatal(err)
+	}
+	got, _ := state.CPAAdmissionVersioned()
+	if !got.Observed || got.Priority != 9 || len(got.AuthIDs) != 1 {
+		t.Fatalf("candidate refresh overwrote publication admission: %#v", got)
+	}
+	if _, ok := got.AuthIDs["a"]; !ok {
+		t.Fatalf("published admission missing a: %#v", got)
+	}
+}
+
 func TestProductionRosterReplacementPersistsFencesBeforePublication(t *testing.T) {
 	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
 	host := &countingProductionHost{auth: map[string]pluginapi.HostAuthGetResponse{

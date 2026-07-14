@@ -966,8 +966,10 @@ func (r *QuotaRefresher) RefreshDueCandidatesOnce(req pluginapi.SchedulerPickReq
 		return ErrCapabilityB
 	}
 	_, version := r.state.CPAAdmissionVersioned()
-	if admission, ok := HighestPriorityCodexAdmission(req); ok {
-		version = r.state.ReplaceCPAAdmission(admission)
+	if r.runtimeStore == nil {
+		if admission, ok := HighestPriorityCodexAdmission(req); ok {
+			version = r.state.ReplaceCPAAdmission(admission)
+		}
 	}
 	return r.refreshDueCandidatesOnce(version)
 }
