@@ -69,7 +69,7 @@ func TestSuiteCapabilityFallsBackForEmptyRoster(t *testing.T) {
 	}
 }
 
-func TestSuiteCapabilityABINormalizationPreservesMissingPriority(t *testing.T) {
+func TestSuiteCapabilityABINormalizationPreservesExplicitAndDefaultZero(t *testing.T) {
 	lister := ABIHostAuthLister{call: func(string, any) (json.RawMessage, error) {
 		return json.RawMessage(`{"files":[{"id":"explicit-zero","provider":"codex","priority":0},{"id":"missing","provider":"codex"}]}`), nil
 	}}
@@ -78,8 +78,51 @@ func TestSuiteCapabilityABINormalizationPreservesMissingPriority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 2 || entries[0].Priority == nil || *entries[0].Priority != 0 || entries[1].Priority != nil {
-		t.Fatalf("entries = %#v, want explicit zero followed by missing priority", entries)
+	if len(entries) != 2 || entries[0].Priority == nil || *entries[0].Priority != 0 || entries[1].Priority == nil || *entries[1].Priority != 0 {
+		t.Fatalf("entries = %#v, want explicit zero followed by default zero", entries)
+	}
+}
+
+func TestSuiteCapabilityABIMissingCodexPriorityDefaultsToZero(t *testing.T) {
+	lister := ABIHostAuthLister{call: func(string, any) (json.RawMessage, error) {
+		return json.RawMessage(`{"files":[{"id":"codex-default","auth_index":"idx","provider":"codex"}]}`), nil
+	}}
+
+	entries, err := lister.ListHostAuths(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Priority == nil || *entries[0].Priority != 0 {
+		t.Fatalf("entries = %#v, want one Codex entry with explicit priority 0", entries)
+	}
+	snapshot := DetectHostRoster(context.Background(), lister, time.Now())
+	if snapshot.Capability != CapabilityA {
+		t.Fatalf("capability = %v, want CapabilityA", snapshot.Capability)
+	}
+}
+
+func TestSuiteCapabilityABIIgnoresNonCodexEntries(t *testing.T) {
+	lister := ABIHostAuthLister{call: func(string, any) (json.RawMessage, error) {
+		return json.RawMessage(`{"files":[{"id":"claude","provider":"claude"},{"id":"codex","provider":" CodEx ","priority":3}]}`), nil
+	}}
+
+	entries, err := lister.ListHostAuths(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].ID != "codex" || entries[0].Provider != "codex" || entries[0].Priority == nil || *entries[0].Priority != 3 {
+		t.Fatalf("entries = %#v, want only explicit-priority Codex entry", entries)
+	}
+}
+
+func TestSuiteCapabilityABIOnlyNonCodexRemainsFallback(t *testing.T) {
+	lister := ABIHostAuthLister{call: func(string, any) (json.RawMessage, error) {
+		return json.RawMessage(`{"files":[{"id":"claude","provider":"claude"}]}`), nil
+	}}
+
+	snapshot := DetectHostRoster(context.Background(), lister, time.Now())
+	if snapshot.Capability != CapabilityB || len(snapshot.Entries) != 0 {
+		t.Fatalf("snapshot = %#v, want empty CapabilityB", snapshot)
 	}
 }
 

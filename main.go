@@ -53,6 +53,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -98,14 +99,22 @@ func (l ABIHostAuthLister) ListHostAuths(ctx context.Context) ([]RosterEntry, er
 	if err := json.Unmarshal(result, &response); err != nil {
 		return nil, fmt.Errorf("decode host.auth.list result: %w", err)
 	}
-	entries := make([]RosterEntry, len(response.Files))
-	for i, file := range response.Files {
-		entries[i] = RosterEntry{
+	entries := make([]RosterEntry, 0, len(response.Files))
+	for _, file := range response.Files {
+		if !strings.EqualFold(strings.TrimSpace(file.Provider), "codex") {
+			continue
+		}
+		priority := file.Priority
+		if priority == nil {
+			defaultPriority := 0
+			priority = &defaultPriority
+		}
+		entries = append(entries, RosterEntry{
 			ID:        file.ID,
 			AuthIndex: file.AuthIndex,
-			Provider:  file.Provider,
-			Priority:  file.Priority,
-		}
+			Provider:  "codex",
+			Priority:  priority,
+		})
 	}
 	return entries, nil
 }
