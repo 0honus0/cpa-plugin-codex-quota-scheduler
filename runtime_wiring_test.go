@@ -1180,6 +1180,124 @@ func TestProductionRosterPublicationBootstrapsHighestTierAndUsesWAL(t *testing.T
 	}
 }
 
+func TestProductionRosterPublicationEnablesManualRefresh(t *testing.T) {
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	host := &countingProductionHost{
+		httpResp: pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(`{"rate_limit":{"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`)},
+		auth: map[string]pluginapi.HostAuthGetResponse{
+			"a":   {AuthIndex: "a", Name: "a.json", JSON: json.RawMessage(`{"access_token":"a","refresh_token":"ra","account_id":"acct-a"}`)},
+			"b":   {AuthIndex: "b", Name: "b.json", JSON: json.RawMessage(`{"access_token":"b","refresh_token":"rb","account_id":"acct-b"}`)},
+			"low": {AuthIndex: "low", Name: "low.json", JSON: json.RawMessage(`{"access_token":"low","refresh_token":"rl","account_id":"acct-low"}`)},
+		},
+	}
+	state := NewPluginState(DefaultConfig())
+	adapter := &rosterCredentialHost{host: host, roster: HostRosterSnapshot{Capability: CapabilityB}}
+	r, err := NewProductionQuotaRefresher(host, state, adapter, HostRosterSnapshot{Capability: CapabilityB}, filepath.Join(t.TempDir(), "state.json"), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.bindings = r.bindings
+	roster := HostRosterSnapshot{Capability: CapabilityA, Confirmed: true, Health: RosterHealthy, BackgroundAllowed: true, Entries: []RosterEntry{
+		{ID: "a", AuthIndex: "a", Provider: "codex", Priority: intPtr(9)},
+		{ID: "b", AuthIndex: "b", Provider: "codex", Priority: intPtr(9)},
+		{ID: "low", AuthIndex: "low", Provider: "codex", Priority: intPtr(1)},
+	}}
+	if err := r.PublishAuthoritativeRoster(context.Background(), roster); err != nil {
+		t.Fatal(err)
+	}
+
+	admission, _ := state.CPAAdmissionVersioned()
+	if !admission.Observed || admission.Priority != 9 || len(admission.AuthIDs) != 2 {
+		t.Fatalf("admission = %#v, want observed priority 9 with a and b", admission)
+	}
+	for _, id := range []string{"a", "b"} {
+		if _, ok := admission.AuthIDs[id]; !ok {
+			t.Fatalf("admission missing %q: %#v", id, admission)
+		}
+	}
+	if _, ok := admission.AuthIDs["low"]; ok {
+		t.Fatalf("lower tier admitted: %#v", admission)
+	}
+
+	getBefore, httpBefore := host.get, host.http
+	if err := r.RefreshOnce(); err != nil {
+		t.Fatal(err)
+	}
+	if got := host.get - getBefore; got != 2 {
+		t.Fatalf("refresh GetAuth delta = %d, want 2", got)
+	}
+	if got := host.http - httpBefore; got < 2 {
+		t.Fatalf("refresh HTTP delta = %d, want at least 2", got)
+	}
+	if host.list != 0 {
+		t.Fatalf("host ListAuths calls = %d, want confirmed-roster scan", host.list)
+	}
+	snapshot := state.Snapshot(now)
+	if snapshot.LastAuthScanAt.IsZero() || snapshot.CodexAuthCount != 2 || len(snapshot.Accounts) != 2 {
+		t.Fatalf("snapshot = %#v, want scanned and populated highest tier", snapshot)
+	}
+	for _, account := range snapshot.Accounts {
+		if account.Quota.FiveHour != nil || account.Quota.LongWindow == nil || account.Family != AccountFamilyWeekly {
+			t.Fatalf("account quota = %#v, want secondary-only weekly", account)
+		}
+		status, available, reason, _ := accountQueueState(account, now)
+		if status != QueueStatusAvailable || !available || reason != "" {
+			t.Fatalf("account %s queue = %s %v %q", account.AuthID, status, available, reason)
+		}
+	}
+}
+
+func TestProductionRosterReplacementReplacesAdmissionAndFencesStaleRefresh(t *testing.T) {
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	host := &countingProductionHost{auth: map[string]pluginapi.HostAuthGetResponse{
+		"a": {AuthIndex: "a", Name: "a.json", JSON: json.RawMessage(`{"access_token":"a","refresh_token":"ra","account_id":"acct-a"}`)},
+		"b": {AuthIndex: "b", Name: "b.json", JSON: json.RawMessage(`{"access_token":"b","refresh_token":"rb","account_id":"acct-b"}`)},
+		"c": {AuthIndex: "c", Name: "c.json", JSON: json.RawMessage(`{"access_token":"c","refresh_token":"rc","account_id":"acct-c"}`)},
+	}}
+	state := NewPluginState(DefaultConfig())
+	adapter := &rosterCredentialHost{host: host, roster: HostRosterSnapshot{Capability: CapabilityB}}
+	r, err := NewProductionQuotaRefresher(host, state, adapter, HostRosterSnapshot{Capability: CapabilityB}, filepath.Join(t.TempDir(), "state.json"), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.bindings = r.bindings
+	initial := HostRosterSnapshot{Capability: CapabilityA, Confirmed: true, Health: RosterHealthy, BackgroundAllowed: true, Entries: []RosterEntry{
+		{ID: "a", AuthIndex: "a", Provider: "codex", Priority: intPtr(1)},
+		{ID: "b", AuthIndex: "b", Provider: "codex", Priority: intPtr(1)},
+	}}
+	if err := r.PublishAuthoritativeRoster(context.Background(), initial); err != nil {
+		t.Fatal(err)
+	}
+	oldAdmission, oldVersion := state.CPAAdmissionVersioned()
+	if !oldAdmission.Observed {
+		t.Fatalf("initial admission = %#v", oldAdmission)
+	}
+	state.UpsertQuota(AccountState{AuthID: "a", Provider: "codex", Family: AccountFamilyWeekly})
+	state.UpsertQuota(AccountState{AuthID: "b", Provider: "codex", Family: AccountFamilyWeekly})
+
+	replacement := HostRosterSnapshot{Capability: CapabilityA, Confirmed: true, Health: RosterHealthy, BackgroundAllowed: true, Entries: []RosterEntry{
+		{ID: "a", AuthIndex: "a", Provider: "codex", Priority: intPtr(1)},
+		{ID: "b", AuthIndex: "b", Provider: "codex", Priority: intPtr(1)},
+		{ID: "c", AuthIndex: "c", Provider: "codex", Priority: intPtr(9)},
+	}}
+	if err := r.PublishAuthoritativeRoster(context.Background(), replacement); err != nil {
+		t.Fatal(err)
+	}
+	next, nextVersion := state.CPAAdmissionVersioned()
+	if nextVersion <= oldVersion || !next.Observed || next.Priority != 9 || len(next.AuthIDs) != 1 {
+		t.Fatalf("replacement admission=%#v version=%d old=%d", next, nextVersion, oldVersion)
+	}
+	if _, ok := next.AuthIDs["c"]; !ok {
+		t.Fatalf("replacement admission missing c: %#v", next)
+	}
+	if state.BeginCPAAdmissionVersionCall(oldVersion) {
+		t.Fatal("stale admission version remained current")
+	}
+	if accounts := state.Snapshot(now).Accounts; len(accounts) != 0 {
+		t.Fatalf("demoted account state retained: %#v", accounts)
+	}
+}
+
 func TestProductionRosterReplacementPersistsFencesBeforePublication(t *testing.T) {
 	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
 	host := &countingProductionHost{auth: map[string]pluginapi.HostAuthGetResponse{

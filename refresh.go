@@ -545,7 +545,7 @@ func (r *QuotaRefresher) PublishAuthoritativeRoster(ctx context.Context, roster 
 	if err := r.retryProbeRosterHold(); err != nil {
 		return err
 	}
-	_, ids, ok := HighestCodexTier(roster.Entries)
+	priority, ids, ok := HighestCodexTier(roster.Entries)
 	if roster.Capability != CapabilityA || !ok {
 		r.rosterMu.Lock()
 		r.roster = HostRosterSnapshot{Capability: CapabilityB}
@@ -632,6 +632,7 @@ func (r *QuotaRefresher) PublishAuthoritativeRoster(ctx context.Context, roster 
 	if err = r.recoverProbeFromRoster(reconciled.Bindings); err != nil {
 		return err
 	}
+	r.state.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: priority, AuthIDs: allowed})
 	publishSchedulerState(r.state, allowed, r.now())
 	r.rosterMu.Lock()
 	r.roster = filtered
