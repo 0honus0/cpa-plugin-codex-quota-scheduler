@@ -1298,6 +1298,95 @@ func TestProductionRosterReplacementReplacesAdmissionAndFencesStaleRefresh(t *te
 	}
 }
 
+type rosterPublicationHost struct {
+	mu      sync.Mutex
+	auth    map[string]pluginapi.HostAuthGetResponse
+	gets    []string
+	watch   string
+	watched chan struct{}
+}
+
+func (h *rosterPublicationHost) ListAuths() ([]pluginapi.HostAuthFileEntry, error) { return nil, nil }
+func (h *rosterPublicationHost) GetAuth(authIndex string) (pluginapi.HostAuthGetResponse, error) {
+	h.mu.Lock()
+	h.gets = append(h.gets, authIndex)
+	response := h.auth[authIndex]
+	watch, watched := h.watch, h.watched
+	h.mu.Unlock()
+	if authIndex == watch && watched != nil {
+		select {
+		case watched <- struct{}{}:
+		default:
+		}
+	}
+	return response, nil
+}
+func (h *rosterPublicationHost) SaveAuth(string, json.RawMessage) error { return nil }
+func (h *rosterPublicationHost) Do(pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
+	return pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(`{"rate_limit":{"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`)}, nil
+}
+func (h *rosterPublicationHost) Log(string, string, map[string]any) {}
+
+func TestProductionRosterPublicationDoesNotExposeNewAdmissionWithOldRoster(t *testing.T) {
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	host := &rosterPublicationHost{auth: map[string]pluginapi.HostAuthGetResponse{
+		"old": {AuthIndex: "old", Name: "a.json", JSON: json.RawMessage(`{"access_token":"old","refresh_token":"ro","account_id":"acct"}`)},
+		"new": {AuthIndex: "new", Name: "a.json", JSON: json.RawMessage(`{"access_token":"new","refresh_token":"rn","account_id":"acct"}`)},
+	}}
+	state := NewPluginState(DefaultConfig())
+	adapter := &rosterCredentialHost{host: host, roster: HostRosterSnapshot{Capability: CapabilityB}}
+	r, err := NewProductionQuotaRefresher(host, state, adapter, HostRosterSnapshot{Capability: CapabilityB}, filepath.Join(t.TempDir(), "state.json"), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.bindings = r.bindings
+	initial := HostRosterSnapshot{Capability: CapabilityA, Confirmed: true, Health: RosterHealthy, BackgroundAllowed: true, Entries: []RosterEntry{{ID: "a", AuthIndex: "old", Provider: "codex", Priority: intPtr(1)}}}
+	if err := r.PublishAuthoritativeRoster(context.Background(), initial); err != nil {
+		t.Fatal(err)
+	}
+
+	publishPaused := make(chan struct{})
+	releasePublish := make(chan struct{})
+	r.finalPublicationHook = func() {
+		close(publishPaused)
+		<-releasePublish
+	}
+	replacement := HostRosterSnapshot{Capability: CapabilityA, Confirmed: true, Health: RosterHealthy, BackgroundAllowed: true, Entries: []RosterEntry{{ID: "a", AuthIndex: "new", Provider: "codex", Priority: intPtr(9)}}}
+	publishDone := make(chan error, 1)
+	go func() { publishDone <- r.PublishAuthoritativeRoster(context.Background(), replacement) }()
+	select {
+	case <-publishPaused:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for final roster publication")
+	}
+
+	host.mu.Lock()
+	host.watch = "old"
+	host.watched = make(chan struct{}, 1)
+	oldGet := host.watched
+	host.mu.Unlock()
+	refreshDone := make(chan error, 1)
+	go func() { refreshDone <- r.RefreshOnce() }()
+	select {
+	case <-oldGet:
+		t.Fatal("new admission authorized refresh against old roster auth index")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(releasePublish)
+	if err := <-publishDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-refreshDone; err != nil {
+		t.Fatal(err)
+	}
+	host.mu.Lock()
+	gets := append([]string(nil), host.gets...)
+	host.mu.Unlock()
+	if len(gets) == 0 || gets[len(gets)-1] != "new" {
+		t.Fatalf("GetAuth sequence = %#v, want refreshed new auth index", gets)
+	}
+}
+
 func TestProductionRosterReplacementPersistsFencesBeforePublication(t *testing.T) {
 	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
 	host := &countingProductionHost{auth: map[string]pluginapi.HostAuthGetResponse{

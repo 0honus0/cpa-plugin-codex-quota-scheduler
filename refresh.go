@@ -208,46 +208,48 @@ type HostClient interface {
 type ABIHostClient struct{}
 
 type QuotaRefresher struct {
-	host           HostClient
-	state          *PluginState
-	now            func() time.Time
-	runtimeStore   *StateStore
-	bindings       *BindingRegistry
-	credentials    *CredentialManager
-	roster         HostRosterSnapshot
-	rosterMu       sync.RWMutex
-	lifecycleOwner *QuotaRefresher
-	lifecycleGate  func(time.Time) ActiveRoster
+	host              HostClient
+	state             *PluginState
+	now               func() time.Time
+	runtimeStore      *StateStore
+	bindings          *BindingRegistry
+	credentials       *CredentialManager
+	roster            HostRosterSnapshot
+	rosterMu          sync.RWMutex
+	rosterAdmissionMu sync.RWMutex
+	lifecycleOwner    *QuotaRefresher
+	lifecycleGate     func(time.Time) ActiveRoster
 
-	mu                sync.Mutex
-	running           bool
-	startRequested    bool
-	refreshing        bool
-	stopping          bool
-	stop              chan struct{}
-	done              chan struct{}
-	wake              chan struct{}
-	pendingDue        func() error
-	pendingDueVersion uint64
-	wg                sync.WaitGroup
-	coordinator       *Coordinator
-	legacyTxn         *LegacyRefreshTxn
-	refreshController *RefreshController
-	probeController   *ProbeController
-	probeWAL          *ProbeWAL
-	probeFence        *FenceAllocator
-	probeRunMu        sync.Mutex
-	probeHoldMu       sync.Mutex
-	probeHoldPending  bool
-	probeHoldErr      error
-	provisionalMu     sync.Mutex
-	provisionalPermit bool
-	fenceMu           sync.Mutex
-	nextFence         uint64
-	txnIntent         *Intent
-	txnContext        context.Context
-	txnLease          *HeldLease
-	txnPermit         func() bool
+	mu                   sync.Mutex
+	running              bool
+	startRequested       bool
+	refreshing           bool
+	stopping             bool
+	stop                 chan struct{}
+	done                 chan struct{}
+	wake                 chan struct{}
+	pendingDue           func() error
+	pendingDueVersion    uint64
+	wg                   sync.WaitGroup
+	coordinator          *Coordinator
+	legacyTxn            *LegacyRefreshTxn
+	refreshController    *RefreshController
+	probeController      *ProbeController
+	probeWAL             *ProbeWAL
+	probeFence           *FenceAllocator
+	probeRunMu           sync.Mutex
+	probeHoldMu          sync.Mutex
+	probeHoldPending     bool
+	probeHoldErr         error
+	provisionalMu        sync.Mutex
+	provisionalPermit    bool
+	fenceMu              sync.Mutex
+	nextFence            uint64
+	txnIntent            *Intent
+	txnContext           context.Context
+	txnLease             *HeldLease
+	txnPermit            func() bool
+	finalPublicationHook func()
 }
 
 // NewProductionQuotaRefresher wires S2 persistence/identity primitives into
@@ -632,7 +634,12 @@ func (r *QuotaRefresher) PublishAuthoritativeRoster(ctx context.Context, roster 
 	if err = r.recoverProbeFromRoster(reconciled.Bindings); err != nil {
 		return err
 	}
+	owner := r.lifecycleRefresher()
+	owner.rosterAdmissionMu.Lock()
 	r.state.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: priority, AuthIDs: allowed})
+	if r.finalPublicationHook != nil {
+		r.finalPublicationHook()
+	}
 	publishSchedulerState(r.state, allowed, r.now())
 	r.rosterMu.Lock()
 	r.roster = filtered
@@ -640,6 +647,7 @@ func (r *QuotaRefresher) PublishAuthoritativeRoster(ctx context.Context, roster 
 	if adapter, ok := r.credentials.host.(*rosterCredentialHost); ok {
 		adapter.setRoster(filtered)
 	}
+	owner.rosterAdmissionMu.Unlock()
 	r.mu.Lock()
 	requested := r.startRequested
 	r.mu.Unlock()
@@ -1573,10 +1581,13 @@ func (r *QuotaRefresher) recordAdmissionLog(authID string, version uint64, level
 }
 
 func (r *QuotaRefresher) listAuthsWithAdmissionPermit(version uint64) ([]pluginapi.HostAuthFileEntry, error) {
-	if !r.state.BeginCPAAdmissionVersionCall(version) {
-		return nil, errCPAAdmissionChanged
-	}
 	if r.runtimeStore != nil {
+		owner := r.lifecycleRefresher()
+		owner.rosterAdmissionMu.RLock()
+		defer owner.rosterAdmissionMu.RUnlock()
+		if !r.state.BeginCPAAdmissionVersionCall(version) {
+			return nil, errCPAAdmissionChanged
+		}
 		roster := r.runtimeRoster()
 		if roster.Capability != CapabilityA {
 			return nil, ErrCapabilityB
@@ -1588,6 +1599,9 @@ func (r *QuotaRefresher) listAuthsWithAdmissionPermit(version uint64) ([]plugina
 			}
 		}
 		return out, nil
+	}
+	if !r.state.BeginCPAAdmissionVersionCall(version) {
+		return nil, errCPAAdmissionChanged
 	}
 	return r.host.ListAuths()
 }

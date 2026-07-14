@@ -56,6 +56,12 @@ the previous admission remains in force and the new roster is not exposed. On
 initial Capability-B startup, that means no admission and zero background
 calls.
 
+Steps 8 and the roster-view updates in step 9 execute under one publication
+boundary. An admitted auth scan holds the matching read boundary while it
+validates the admission version and copies roster entries. A concurrent refresh
+therefore observes either the complete old admission/roster pair or the complete
+new pair; it can never use a new admission with an old AuthIndex.
+
 ## Replacement and Fencing
 
 `PluginState.ReplaceCPAAdmission` is the single version boundary. Any change to
@@ -118,6 +124,8 @@ Production-wiring coverage must prove:
 6. A stale in-flight refresh cannot publish after admission replacement.
 7. Failed roster publication remains fail-closed and makes zero new runtime
    calls.
+8. A refresh paused across final publication cannot consume the new admission
+   with the old roster or old AuthIndex.
 
 Verification includes focused production-wiring tests, the S7 refactor gate,
 full tests, race, vet, diff checking, a Windows DLL build, and browser acceptance

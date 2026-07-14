@@ -1177,6 +1177,13 @@ func TestStatusPayloadAllowsMissingFiveHourWithLongWindow(t *testing.T) {
 	if got.LongWindow.Missing {
 		t.Fatalf("long_window = %#v, want visible", got.LongWindow)
 	}
+	html := string(RenderStatusHTML(payload))
+	if rows := strings.Count(html, `<div class="quota-row">`); rows != 1 {
+		t.Fatalf("server-rendered quota rows = %d, want only LongWindow", rows)
+	}
+	if !strings.Contains(html, "if(account.five_hour&&!account.five_hour.missing)") {
+		t.Fatal("dynamic account renderer lost missing FiveHour guard")
+	}
 }
 
 func TestStatusWindowPrefersRealUsagePercentOverExhaustedFlag(t *testing.T) {
