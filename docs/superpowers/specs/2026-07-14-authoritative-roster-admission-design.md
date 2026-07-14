@@ -79,7 +79,7 @@ refresh use the same versioned admission:
 ```text
 authoritative roster
   -> runtime admission
-  -> ListAuths
+  -> admitted auth scan from the confirmed roster
   -> highest-tier filtering
   -> GetAuth
   -> OpenAI quota request
@@ -87,7 +87,9 @@ authoritative roster
 ```
 
 The admitted auth scan records `last_auth_scan`, `codex_auth_count`, and the
-highest-tier accounts. Lower tiers and non-Codex entries remain excluded.
+highest-tier accounts. The production runtime uses the already confirmed
+roster instead of issuing another mutable host `ListAuths` call. Lower tiers
+and non-Codex entries remain excluded.
 
 ## Error Handling and Safety
 
