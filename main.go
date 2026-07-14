@@ -174,6 +174,10 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 			return true
 		},
 	})
+	if production != nil {
+		production.SetRosterLifecycleAuthority(globalRosterController.EnforceLifecycle)
+	}
+	replaceGlobalPickActivityPump(globalRosterController, production)
 	managementProvisionalRiskChanged = func(enabled bool) {
 		refresherMu.Lock()
 		controller := globalRosterController
@@ -261,8 +265,10 @@ func cliproxyPluginFree(ptr unsafe.Pointer, len C.size_t) {
 
 //export cliproxyPluginShutdown
 func cliproxyPluginShutdown() {
+	stopGlobalPickActivityPump()
 	refresherMu.Lock()
 	refresher := globalRefresher
+	globalRefresher = nil
 	globalRosterController = nil
 	refresherMu.Unlock()
 	if refresher != nil {

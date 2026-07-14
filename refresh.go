@@ -217,6 +217,7 @@ type QuotaRefresher struct {
 	roster         HostRosterSnapshot
 	rosterMu       sync.RWMutex
 	lifecycleOwner *QuotaRefresher
+	lifecycleGate  func(time.Time) ActiveRoster
 
 	mu                sync.Mutex
 	running           bool
@@ -417,6 +418,63 @@ func (r *QuotaRefresher) lifecycleRefresher() *QuotaRefresher {
 	}
 	return r
 }
+
+func (r *QuotaRefresher) SetRosterLifecycleAuthority(gate func(time.Time) ActiveRoster) {
+	if r == nil {
+		return
+	}
+	r.lifecycleRefresher().lifecycleGate = gate
+}
+
+func (r *QuotaRefresher) lifecycleNow() time.Time {
+	owner := r.lifecycleRefresher()
+	if owner != nil && owner.now != nil {
+		return owner.now()
+	}
+	return time.Now()
+}
+
+func failClosedRosterAt(roster HostRosterSnapshot, now time.Time) (HostRosterSnapshot, bool) {
+	roster = normalizeHostRosterLifecycle(roster)
+	if roster.Capability != CapabilityA || !roster.Confirmed || roster.Health != RosterDegraded ||
+		roster.DegradedSince.IsZero() || now.Before(roster.DegradedSince.Add(rosterDegradedLimit)) {
+		return roster, false
+	}
+	roster.Health = RosterFailClosed
+	roster.BackgroundAllowed = false
+	roster.LifecycleRevision++
+	return roster, true
+}
+
+func (r *QuotaRefresher) enforceRosterLifecycle() HostRosterSnapshot {
+	if r == nil {
+		return HostRosterSnapshot{Capability: CapabilityB}
+	}
+	owner := r.lifecycleRefresher()
+	now := owner.lifecycleNow()
+	if owner.lifecycleGate != nil {
+		owner.lifecycleGate(now)
+	}
+	owner.rosterMu.RLock()
+	out := owner.roster
+	_, expired := failClosedRosterAt(out, now)
+	owner.rosterMu.RUnlock()
+	if !expired {
+		return out
+	}
+	owner.rosterMu.Lock()
+	next, transitioned := failClosedRosterAt(owner.roster, now)
+	if transitioned {
+		owner.roster = next
+	}
+	out = owner.roster
+	owner.rosterMu.Unlock()
+	if transitioned {
+		_ = owner.persistProbeRosterHold()
+	}
+	return out
+}
+
 func (r *QuotaRefresher) ObserveRosterLifecycle(active ActiveRoster) {
 	if r == nil {
 		return
@@ -450,7 +508,7 @@ func (r *QuotaRefresher) normalBackgroundAllowed() bool {
 	if r == nil {
 		return false
 	}
-	roster := normalizeHostRosterLifecycle(r.runtimeRoster())
+	roster := normalizeHostRosterLifecycle(r.enforceRosterLifecycle())
 	return normalRosterBackgroundAllowed(roster)
 }
 func (r *QuotaRefresher) probeBackgroundAllowed() bool {
@@ -460,7 +518,7 @@ func (r *QuotaRefresher) probeBackgroundAllowed() bool {
 	if r.normalBackgroundAllowed() {
 		return true
 	}
-	roster := normalizeHostRosterLifecycle(r.runtimeRoster())
+	roster := normalizeHostRosterLifecycle(r.enforceRosterLifecycle())
 	return provisionalProbeBackgroundAllowed(roster) && r.state != nil && r.state.Config().ProbeOnProvisionalRoster && provisionalAgeValid(r.now(), roster.ConfirmedAt)
 }
 
@@ -1536,9 +1594,25 @@ func (r *QuotaRefresher) doBackgroundHTTPRequest(req pluginapi.HTTPRequest, prob
 		return pluginapi.HTTPResponse{}, ErrCapabilityB
 	}
 	owner := r.lifecycleRefresher()
+	if owner.lifecycleGate != nil {
+		owner.lifecycleGate(owner.lifecycleNow())
+	}
 	owner.rosterMu.RLock()
-	defer owner.rosterMu.RUnlock()
 	roster := normalizeHostRosterLifecycle(owner.roster)
+	if _, expired := failClosedRosterAt(roster, owner.lifecycleNow()); expired {
+		owner.rosterMu.RUnlock()
+		owner.rosterMu.Lock()
+		if latest, changed := failClosedRosterAt(owner.roster, owner.lifecycleNow()); changed {
+			owner.roster = latest
+			roster = latest
+		} else {
+			roster = normalizeHostRosterLifecycle(owner.roster)
+		}
+		owner.rosterMu.Unlock()
+		_ = owner.persistProbeRosterHold()
+		return pluginapi.HTTPResponse{}, ErrCapabilityB
+	}
+	defer owner.rosterMu.RUnlock()
 	allowed := normalRosterBackgroundAllowed(roster)
 	if probe {
 		allowed = allowed || provisionalProbeBackgroundAllowed(roster)

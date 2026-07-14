@@ -103,6 +103,29 @@ func (c *RosterController) Snapshot() ActiveRoster {
 	return cloneActiveRoster(c.current)
 }
 
+// EnforceLifecycle derives the effective lifecycle at a background request
+// boundary. The transition is monotonic and published exactly once; it never
+// changes the confirmed roster generation or the pick-visible roster.
+func (c *RosterController) EnforceLifecycle(now time.Time) ActiveRoster {
+	c.mu.Lock()
+	active := cloneActiveRoster(c.current)
+	transitioned := active.Confirmed &&
+		active.Health == RosterDegraded &&
+		!active.DegradedSince.IsZero() &&
+		!now.Before(active.DegradedSince.Add(rosterDegradedLimit))
+	if transitioned {
+		active.Health = RosterFailClosed
+		active.BackgroundAllowed = false
+		active.LifecycleRevision++
+		c.current = cloneActiveRoster(active)
+	}
+	c.mu.Unlock()
+	if transitioned {
+		c.notify(active)
+	}
+	return cloneActiveRoster(active)
+}
+
 func (c *RosterController) Startup(ctx context.Context) (ActiveRoster, error) {
 	return c.sync(ctx, true)
 }
@@ -223,6 +246,9 @@ func (c *RosterController) finishSync(ctx context.Context, entries []RosterEntry
 			}
 			c.mu.Lock()
 			if syncErr == nil {
+				if next.LifecycleRevision <= c.current.LifecycleRevision {
+					next.LifecycleRevision = c.current.LifecycleRevision + 1
+				}
 				c.current = next
 				removed := removedRosterIDs(old.Instances, next.Instances)
 				if len(removed) > 0 && c.cancel != nil {

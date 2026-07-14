@@ -15,6 +15,8 @@ type SchedulerSnapshot struct {
 	ActiveHighestTier map[string]struct{}
 	Trials            *TrialRegistry
 	EvidenceIntents   chan<- EvidenceIntent
+	AdmissionVersion  uint64
+	Activity          func(pluginapi.SchedulerPickRequest, uint64, time.Time)
 }
 
 type EvidenceIntent struct {
@@ -52,6 +54,9 @@ func schedulerPickPublished(req pluginapi.SchedulerPickRequest, now time.Time) P
 	}
 	if !requestIncludesCodex(req) {
 		return PickDecision{Reason: "provider_not_codex"}
+	}
+	if snapshot.Activity != nil {
+		snapshot.Activity(req, snapshot.AdmissionVersion, now)
 	}
 	candidates := make([]Candidate, 0, len(req.Candidates))
 	for _, c := range req.Candidates {
@@ -108,7 +113,11 @@ func schedulerSnapshotFromState(state StateSnapshot, trials *TrialRegistry) *Sch
 		}
 		accounts = append(accounts, AccountView{ID: a.AuthID, AuthIndex: a.AuthIndex, Instance: a.Instance, PluginPriority: a.Annotation.SchedulerPriority, Family: a.Family, Cache: cache, LastKnownAvailable: a.LastError == "", Exhausted: exhausted, ResetAt: reset, AuthBlocked: a.Refresh.AuthFailure, Circuit: circuitClass, TemporaryUnavailable: a.TemporaryExhausted && a.TemporaryResetAt.After(state.Now), Trial: trial, Expiry: accountSortTime(a), RemainingQuota: remainingQuota(a)})
 	}
-	return &SchedulerSnapshot{HandleEnabled: state.Config.HandleEnabled, Fallback: state.Config.Fallback, MonthlyMode: state.Config.MonthlyMode, Accounts: accounts, ActiveHighestTier: active, Trials: trials, EvidenceIntents: globalEvidenceIntents}
+	var activity func(pluginapi.SchedulerPickRequest, uint64, time.Time)
+	if pump := globalPickActivityPump.Load(); pump != nil {
+		activity = pump.enqueue
+	}
+	return &SchedulerSnapshot{HandleEnabled: state.Config.HandleEnabled, Fallback: state.Config.Fallback, MonthlyMode: state.Config.MonthlyMode, Accounts: accounts, ActiveHighestTier: active, Trials: trials, EvidenceIntents: globalEvidenceIntents, Activity: activity}
 }
 
 func publishSchedulerState(state *PluginState, active map[string]struct{}, now time.Time) {
@@ -119,7 +128,9 @@ func publishSchedulerState(state *PluginState, active map[string]struct{}, now t
 	if active != nil {
 		s.CPAAdmission = CPAAdmissionState{Observed: true, AuthIDs: cloneStringSet(active)}
 	}
-	PublishSchedulerSnapshot(schedulerSnapshotFromState(s, globalTrials))
+	snapshot := schedulerSnapshotFromState(s, globalTrials)
+	_, snapshot.AdmissionVersion = state.CPAAdmissionVersioned()
+	PublishSchedulerSnapshot(snapshot)
 }
 func accountExhaustion(a AccountState, now time.Time) (bool, time.Time) {
 	if windowExhausted(a.Quota.LongWindow, now) {
