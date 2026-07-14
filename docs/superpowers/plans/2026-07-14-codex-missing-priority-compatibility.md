@@ -55,14 +55,14 @@ func TestSuiteCapabilityABIMissingCodexPriorityDefaultsToZero(t *testing.T) {
 
 func TestSuiteCapabilityABIIgnoresNonCodexEntries(t *testing.T) {
 	lister := ABIHostAuthLister{call: func(string, any) (json.RawMessage, error) {
-		return json.RawMessage(`{"files":[{"id":"claude","provider":"claude"},{"id":"codex","provider":"codex","priority":3}]}`), nil
+		return json.RawMessage(`{"files":[{"id":"claude","provider":"claude"},{"id":"codex","provider":" CodEx ","priority":3}]}`), nil
 	}}
 
 	entries, err := lister.ListHostAuths(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].ID != "codex" || entries[0].Priority == nil || *entries[0].Priority != 3 {
+	if len(entries) != 1 || entries[0].ID != "codex" || entries[0].Provider != "codex" || entries[0].Priority == nil || *entries[0].Priority != 3 {
 		t.Fatalf("entries = %#v, want only explicit-priority Codex entry", entries)
 	}
 }
@@ -78,6 +78,12 @@ func TestSuiteCapabilityABIOnlyNonCodexRemainsFallback(t *testing.T) {
 	}
 }
 ```
+
+Also rename `TestSuiteCapabilityABINormalizationPreservesMissingPriority` to
+`TestSuiteCapabilityABINormalizationPreservesExplicitAndDefaultZero` and change
+its second-entry assertion to require a non-nil priority pointer with value
+`0`. This existing characterization test must fail under the old adapter along
+with the new regressions.
 
 - [ ] **Step 2: Run the focused tests and verify RED**
 
@@ -107,7 +113,7 @@ for _, file := range response.Files {
 	entries = append(entries, RosterEntry{
 		ID:        file.ID,
 		AuthIndex: file.AuthIndex,
-		Provider:  file.Provider,
+		Provider:  "codex",
 		Priority:  priority,
 	})
 }
