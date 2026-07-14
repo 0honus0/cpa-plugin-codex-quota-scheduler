@@ -213,6 +213,66 @@ func TestManagementUsesActiveRosterOnly(t *testing.T) {
 	}
 }
 
+func TestManagementStatusExposesNonSensitiveRosterAdmissionDiagnostics(t *testing.T) {
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	version := store.ReplaceCPAAdmission(CPAAdmissionState{
+		Observed: true,
+		Priority: 0,
+		AuthIDs:  map[string]struct{}{"codex-a": {}, "codex-b": {}},
+	})
+	lifecycle := ManagementLifecycleSnapshot{Roster: ActiveRoster{
+		Capability: CapabilityA, Confirmed: true, HighestPriority: 0,
+		Generation: 7, Instances: []string{"codex-a", "codex-b"},
+		Entries: []RosterEntry{{ID: "codex-a"}, {ID: "codex-b"}},
+		Health:  RosterHealthy, BackgroundAllowed: true,
+	}}
+
+	resp := HandleManagementRequestWithLifecycle(store, pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/plugins/codex-quota-scheduler/status",
+		Query:  url.Values{"format": []string{"json"}},
+	}, now, lifecycle)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", resp.StatusCode, resp.Body)
+	}
+	var body StatusPayload
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Roster.AdmissionObserved || body.Roster.AdmissionVersion != version || body.Roster.AdmissionPriority != 0 || body.Roster.AdmittedAuthCount != 2 {
+		t.Fatalf("admission diagnostics = %#v, want observed version=%d priority=0 count=2", body.Roster, version)
+	}
+	if body.Roster.RosterEntryCount != 2 || body.Roster.RosterInstanceCount != 2 {
+		t.Fatalf("roster diagnostics = %#v, want entry/instance count 2/2", body.Roster)
+	}
+	var raw struct {
+		Roster map[string]json.RawMessage `json:"roster"`
+	}
+	if err := json.Unmarshal(resp.Body, &raw); err != nil {
+		t.Fatal(err)
+	}
+	allowed := map[string]struct{}{
+		"capability": {}, "health": {}, "confirmed": {}, "provisional": {},
+		"degraded": {}, "fail_closed": {}, "waiting_roster": {}, "background_allowed": {},
+		"highest_priority": {}, "generation": {}, "admission_observed": {}, "admission_version": {},
+		"admission_priority": {}, "admitted_auth_count": {}, "roster_entry_count": {},
+		"roster_instance_count": {}, "credential_ambiguous": {}, "risk_option_enabled": {},
+		"risk_option_available": {}, "warning": {}, "risk_warning": {},
+	}
+	for key := range raw.Roster {
+		if _, ok := allowed[key]; !ok {
+			t.Fatalf("unexpected roster diagnostic key %q in %s", key, resp.Body)
+		}
+	}
+	rawBody := string(resp.Body)
+	for _, sensitive := range []string{`"codex-a"`, `"codex-b"`, `"auth_ids"`, `"auth_index"`, `"entries"`, `"instances"`, `"credentials"`, `"path"`} {
+		if strings.Contains(rawBody, sensitive) {
+			t.Fatalf("sensitive roster detail %s leaked in %s", sensitive, resp.Body)
+		}
+	}
+}
+
 func TestManagementExposesRosterLifecycle(t *testing.T) {
 	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
 	store := NewPluginState(DefaultConfig())

@@ -166,6 +166,7 @@ type StateSnapshot struct {
 	Config              Config
 	Accounts            []AccountState
 	CPAAdmission        CPAAdmissionState
+	CPAAdmissionVersion uint64
 	Annotations         AnnotationState
 	Logs                []LogEntry
 	LastSelected        string

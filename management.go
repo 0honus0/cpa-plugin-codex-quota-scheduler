@@ -60,6 +60,12 @@ type RosterLifecyclePayload struct {
 	BackgroundAllowed   bool           `json:"background_allowed"`
 	HighestPriority     int            `json:"highest_priority"`
 	Generation          uint64         `json:"generation"`
+	AdmissionObserved   bool           `json:"admission_observed"`
+	AdmissionVersion    uint64         `json:"admission_version"`
+	AdmissionPriority   int            `json:"admission_priority"`
+	AdmittedAuthCount   int            `json:"admitted_auth_count"`
+	RosterEntryCount    int            `json:"roster_entry_count"`
+	RosterInstanceCount int            `json:"roster_instance_count"`
 	CredentialAmbiguous bool           `json:"credential_ambiguous"`
 	RiskOptionEnabled   bool           `json:"risk_option_enabled"`
 	RiskOptionAvailable bool           `json:"risk_option_available"`
@@ -528,7 +534,7 @@ func buildStatusPayload(snapshot StateSnapshot, ordered []ScheduledAccount, life
 		Logs:                  cloneLogs(snapshot.Logs),
 	}
 	if lifecycle != nil {
-		payload.Roster = rosterLifecyclePayload(*lifecycle, snapshot.Config, snapshot.Now)
+		payload.Roster = rosterLifecyclePayload(*lifecycle, snapshot, snapshot.Now)
 	}
 	if payload.RefreshActive {
 		payload.RefreshState = "active"
@@ -603,19 +609,22 @@ func buildStatusPayload(snapshot StateSnapshot, ordered []ScheduledAccount, life
 	return payload
 }
 
-func rosterLifecyclePayload(snapshot ManagementLifecycleSnapshot, cfg Config, now time.Time) RosterLifecyclePayload {
-	roster := snapshot.Roster
-	available := !snapshot.CredentialAmbiguous && roster.Capability == CapabilityB && roster.Provisional && !roster.Confirmed && provisionalAgeValid(now, roster.ConfirmedAt)
+func rosterLifecyclePayload(lifecycle ManagementLifecycleSnapshot, snapshot StateSnapshot, now time.Time) RosterLifecyclePayload {
+	roster := lifecycle.Roster
+	available := !lifecycle.CredentialAmbiguous && roster.Capability == CapabilityB && roster.Provisional && !roster.Confirmed && provisionalAgeValid(now, roster.ConfirmedAt)
 	payload := RosterLifecyclePayload{
 		Capability: roster.Capability, Health: roster.Health, Confirmed: roster.Confirmed,
 		Provisional: roster.Provisional, Degraded: roster.Health == RosterDegraded,
 		FailClosed: roster.Health == RosterFailClosed, WaitingRoster: roster.Health == RosterWaiting,
 		BackgroundAllowed: roster.BackgroundAllowed, HighestPriority: roster.HighestPriority,
-		Generation: roster.Generation, CredentialAmbiguous: snapshot.CredentialAmbiguous,
-		RiskOptionEnabled: cfg.ProbeOnProvisionalRoster, RiskOptionAvailable: available,
+		Generation: roster.Generation, CredentialAmbiguous: lifecycle.CredentialAmbiguous,
+		AdmissionObserved: snapshot.CPAAdmission.Observed, AdmissionVersion: snapshot.CPAAdmissionVersion,
+		AdmissionPriority: snapshot.CPAAdmission.Priority, AdmittedAuthCount: len(snapshot.CPAAdmission.AuthIDs),
+		RosterEntryCount: len(roster.Entries), RosterInstanceCount: len(roster.Instances),
+		RiskOptionEnabled: snapshot.Config.ProbeOnProvisionalRoster, RiskOptionAvailable: available,
 	}
 	switch {
-	case snapshot.CredentialAmbiguous:
+	case lifecycle.CredentialAmbiguous:
 		payload.Warning = "CredentialAmbiguous: credential-chain conversion is frozen until a later observation can be classified; existing non-AuthBlocked credentials remain usable."
 	case payload.FailClosed:
 		payload.Warning = "FailClosed: authoritative roster synchronization exceeded the degraded limit; background requests are stopped."

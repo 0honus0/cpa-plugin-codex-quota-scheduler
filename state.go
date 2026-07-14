@@ -501,6 +501,7 @@ func (s *PluginState) Snapshot(now time.Time) StateSnapshot {
 		Config:              s.cfg,
 		Accounts:            accounts,
 		CPAAdmission:        cloneCPAAdmission(s.cpaAdmission),
+		CPAAdmissionVersion: s.cpaAdmissionVersion,
 		Annotations:         cloneAnnotationState(s.annotations),
 		Logs:                cloneLogs(retainedLogs(s.logs, NormalizeConfig(s.cfg), now)),
 		LastSelected:        s.lastSelected,
