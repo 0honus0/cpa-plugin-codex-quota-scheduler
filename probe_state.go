@@ -121,6 +121,14 @@ func (c *ProbeController) Window(i AuthInstanceID, k ProbeWindowKind) (ProbeWind
 	w, ok := c.windows[i][k]
 	return w, ok
 }
+func (c *ProbeController) RemoveWindow(i AuthInstanceID, k ProbeWindowKind) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.windows[i], k)
+	if len(c.windows[i]) == 0 {
+		delete(c.windows, i)
+	}
+}
 func (c *ProbeController) Advance(i AuthInstanceID, e ProbeEvent) []Intent {
 	c.mu.Lock()
 	defer c.mu.Unlock()

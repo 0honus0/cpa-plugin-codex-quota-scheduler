@@ -801,7 +801,17 @@ func NewQuotaRefresher(host HostClient, state *PluginState, now func() time.Time
 			if result.Journal == nil {
 				return nil
 			}
+			var applyErr error
 			apply := func() {
+				for _, account := range result.Journal.Accounts {
+					if account.AuthID != intent.AuthID || account.LastSuccessAt.IsZero() || account.LastError != "" {
+						continue
+					}
+					if err := r.reconcileObservedProbeWindows(intent.Instance, account.Quota); err != nil {
+						applyErr = err
+						return
+					}
+				}
 				r.state.applyLegacyEffectJournal(*result.Journal)
 			}
 			if r.bindings != nil && !r.bindings.ApplyIfCurrent(intent.AuthID, WritebackVersion{Token: result.Token, Login: result.Login, Fingerprint: result.Fingerprint}, apply) {
@@ -809,6 +819,12 @@ func NewQuotaRefresher(host HostClient, state *PluginState, now func() time.Time
 			}
 			if r.bindings == nil {
 				apply()
+			}
+			if applyErr != nil {
+				return applyErr
+			}
+			if err := r.bootstrapProbeWindows(); err != nil {
+				r.state.RecordLog("warn", "probe.bootstrap_failed", "Probe 状态初始化失败，将在下次刷新重试", map[string]any{"auth_id": intent.AuthID, "error": redactSecrets(err.Error())}, r.now())
 			}
 			return nil
 		},

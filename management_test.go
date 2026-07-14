@@ -1153,6 +1153,32 @@ func TestStatusJSONIncludesQuotaWindowsForProgressBars(t *testing.T) {
 	}
 }
 
+func TestStatusPayloadAllowsMissingFiveHourWithLongWindow(t *testing.T) {
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	account := weeklyAccount("auth-1", 0, now.Add(24*time.Hour), false)
+	account.Quota.FiveHour = nil
+	account.LastSuccessAt = now
+	store.UpsertQuota(account)
+	snapshot := store.Snapshot(now)
+	ordered := BuildOrderedAccounts(requestWithCandidates("auth-1"), snapshot, now)
+	payload := BuildStatusPayload(snapshot, ordered)
+
+	if len(payload.Accounts) != 1 {
+		t.Fatalf("accounts = %#v", payload.Accounts)
+	}
+	got := payload.Accounts[0]
+	if !got.Available || got.QueueStatus != QueueStatusAvailable {
+		t.Fatalf("account = %#v, want available", got)
+	}
+	if !got.FiveHour.Missing {
+		t.Fatalf("five_hour = %#v, want missing", got.FiveHour)
+	}
+	if got.LongWindow.Missing {
+		t.Fatalf("long_window = %#v, want visible", got.LongWindow)
+	}
+}
+
 func TestStatusWindowPrefersRealUsagePercentOverExhaustedFlag(t *testing.T) {
 	used := 40.0
 	status := statusWindow(&QuotaWindow{

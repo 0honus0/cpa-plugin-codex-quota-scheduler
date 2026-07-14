@@ -90,6 +90,59 @@ func (r *QuotaRefresher) persistProbeWindows() error {
 	return err
 }
 
+func nonterminalProbeAttempt(attempt ProbeAttempt) bool {
+	switch attempt.Phase {
+	case ProbeAttemptPrepared, ProbeAttemptSending, ProbeAttemptSent, ProbeAttemptSentUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func attemptReferencesWindow(attempt ProbeAttempt, kind ProbeWindowKind) bool {
+	for _, candidate := range attempt.Windows {
+		if candidate == kind {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *QuotaRefresher) reconcileObservedProbeWindows(instance AuthInstanceID, quota ParsedQuota) error {
+	if r.runtimeStore == nil || r.probeController == nil || instance == 0 {
+		return nil
+	}
+	observed := map[ProbeWindowKind]bool{
+		ProbeWindowFiveHour: quota.FiveHour != nil,
+		ProbeWindowLong:     quota.LongWindow != nil,
+	}
+	updated, err := r.runtimeStore.Update(func(persisted *PersistentState) error {
+		attempt := persisted.ProbeAttempts[instance]
+		for kind, present := range observed {
+			if present || (nonterminalProbeAttempt(attempt) && attemptReferencesWindow(attempt, kind)) {
+				continue
+			}
+			delete(persisted.ProbeWindows[instance], kind)
+			if len(persisted.ProbeWindows[instance]) == 0 {
+				delete(persisted.ProbeWindows, instance)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for kind, present := range observed {
+		if present {
+			continue
+		}
+		if _, retained := updated.ProbeWindows[instance][kind]; !retained {
+			r.probeController.RemoveWindow(instance, kind)
+		}
+	}
+	return nil
+}
+
 func (r *QuotaRefresher) reconcileProbeOrphans(persisted PersistentState, active map[AuthInstanceID]struct{}) error {
 	keys := map[AuthInstanceID]struct{}{}
 	for i := range persisted.ProbeWindows {
@@ -539,6 +592,9 @@ func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *
 			if err = r.probeWAL.Complete(intent.Instance); err != nil {
 				return fail(err, true)
 			}
+			if err = r.reconcileObservedProbeWindows(intent.Instance, vr.Quota); err != nil {
+				return OperationResult{Token: intent.Token, Err: err}
+			}
 			if err = r.persistProbeWindows(); err != nil {
 				return OperationResult{Token: intent.Token, Err: err}
 			}
@@ -567,6 +623,9 @@ func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *
 		if len(lazy) == 0 {
 			if err = r.probeWAL.Complete(intent.Instance); err != nil {
 				return fail(err, false)
+			}
+			if err = r.reconcileObservedProbeWindows(intent.Instance, pre.Quota); err != nil {
+				return OperationResult{Token: intent.Token, Err: err}
 			}
 			if err = r.persistProbeWindows(); err != nil {
 				return OperationResult{Token: intent.Token, Err: err}
@@ -627,6 +686,9 @@ func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *
 		}
 		if err = r.probeWAL.Complete(intent.Instance); err != nil {
 			return fail(err, true)
+		}
+		if err = r.reconcileObservedProbeWindows(intent.Instance, vr.Quota); err != nil {
+			return OperationResult{Token: intent.Token, Err: err}
 		}
 		if err = r.persistProbeWindows(); err != nil {
 			return OperationResult{Token: intent.Token, Err: err}

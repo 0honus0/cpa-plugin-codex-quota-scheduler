@@ -220,12 +220,6 @@ func accountQueueState(account AccountState, now time.Time) (QueueStatus, bool, 
 	}
 	switch account.Family {
 	case AccountFamilyWeekly:
-		if account.Quota.FiveHour == nil {
-			return QueueStatusUnavailable, false, "missing_five_hour_window", time.Time{}
-		}
-		if account.Quota.FiveHour.ResetAt.IsZero() {
-			return QueueStatusUnavailable, false, "missing_five_hour_reset", time.Time{}
-		}
 		if account.Quota.LongWindow == nil {
 			return QueueStatusUnavailable, false, "missing_weekly_window", time.Time{}
 		}
@@ -235,8 +229,13 @@ func accountQueueState(account AccountState, now time.Time) (QueueStatus, bool, 
 		if windowExhausted(account.Quota.LongWindow, now) {
 			return QueueStatusLongWindowExhausted, false, "weekly_exhausted", account.Quota.LongWindow.ResetAt
 		}
-		if windowExhausted(account.Quota.FiveHour, now) {
-			return QueueStatusFiveHourExhausted, false, "five_hour_exhausted", account.Quota.FiveHour.ResetAt
+		if account.Quota.FiveHour != nil {
+			if account.Quota.FiveHour.ResetAt.IsZero() {
+				return QueueStatusUnavailable, false, "missing_five_hour_reset", time.Time{}
+			}
+			if windowExhausted(account.Quota.FiveHour, now) {
+				return QueueStatusFiveHourExhausted, false, "five_hour_exhausted", account.Quota.FiveHour.ResetAt
+			}
 		}
 		return QueueStatusAvailable, true, "", account.Quota.LongWindow.ResetAt
 	case AccountFamilyMonthly:
@@ -249,8 +248,13 @@ func accountQueueState(account AccountState, now time.Time) (QueueStatus, bool, 
 		if windowExhausted(account.Quota.LongWindow, now) {
 			return QueueStatusLongWindowExhausted, false, "monthly_exhausted", account.Quota.LongWindow.ResetAt
 		}
-		if windowExhausted(account.Quota.FiveHour, now) {
-			return QueueStatusFiveHourExhausted, false, "five_hour_exhausted", account.Quota.FiveHour.ResetAt
+		if account.Quota.FiveHour != nil {
+			if account.Quota.FiveHour.ResetAt.IsZero() {
+				return QueueStatusUnavailable, false, "missing_five_hour_reset", time.Time{}
+			}
+			if windowExhausted(account.Quota.FiveHour, now) {
+				return QueueStatusFiveHourExhausted, false, "five_hour_exhausted", account.Quota.FiveHour.ResetAt
+			}
 		}
 		return QueueStatusAvailable, true, "", account.Quota.LongWindow.ResetAt
 	default:

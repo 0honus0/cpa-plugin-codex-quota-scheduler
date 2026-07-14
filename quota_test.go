@@ -229,3 +229,31 @@ func TestParseCodexUsageAdditionalRateLimitWindows(t *testing.T) {
 		t.Fatalf("additional monthly reset = %s, want %s", parsed.AdditionalWindows[1].ResetAt, now.Add(72*time.Hour))
 	}
 }
+
+func TestParseCodexUsagePayloadAllowsSecondaryOnlyLongWindow(t *testing.T) {
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	parsed, err := ParseCodexUsagePayload([]byte(`{"rate_limit":{"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.FiveHour != nil || parsed.LongWindow == nil || parsed.LongWindow.Kind != WindowWeekly || parsed.Family != AccountFamilyWeekly {
+		t.Fatalf("parsed = %#v, want secondary-only weekly quota", parsed)
+	}
+	if !parsed.LongWindow.ResetAt.Equal(now.Add(24 * time.Hour)) {
+		t.Fatalf("reset = %s, want %s", parsed.LongWindow.ResetAt, now.Add(24*time.Hour))
+	}
+}
+
+func TestParseCodexUsagePayloadAllowsSecondaryOnlyMonthlyWindow(t *testing.T) {
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	parsed, err := ParseCodexUsagePayload([]byte(`{"rate_limit":{"secondary_window":{"used_percent":20,"limit_window_seconds":2592000,"reset_after_seconds":172800}}}`), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.FiveHour != nil || parsed.LongWindow == nil || parsed.LongWindow.Kind != WindowMonthly || parsed.Family != AccountFamilyMonthly {
+		t.Fatalf("parsed = %#v, want secondary-only monthly quota", parsed)
+	}
+	if !parsed.LongWindow.ResetAt.Equal(now.Add(48 * time.Hour)) {
+		t.Fatalf("reset = %s, want %s", parsed.LongWindow.ResetAt, now.Add(48*time.Hour))
+	}
+}

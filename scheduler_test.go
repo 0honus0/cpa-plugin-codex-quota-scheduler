@@ -674,3 +674,50 @@ func TestPickSkipsOpenCircuitButAllowsHalfOpen(t *testing.T) {
 		t.Fatalf("second ordered account = %#v, want open circuit unavailable", ordered[1])
 	}
 }
+
+func TestPickAllowsWeeklyWithoutFiveHour(t *testing.T) {
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	account := weeklyAccount("weekly", 0, now.Add(24*time.Hour), false)
+	account.Quota.FiveHour = nil
+
+	status, available, reason, sortAt := accountQueueState(account, now)
+	if status != QueueStatusAvailable || !available || reason != "" || !sortAt.Equal(account.Quota.LongWindow.ResetAt) {
+		t.Fatalf("state = %s %v %q %s", status, available, reason, sortAt)
+	}
+}
+
+func TestPickAllowsMonthlyWithoutFiveHour(t *testing.T) {
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	account := monthlyAccount("monthly", 0, now.Add(30*24*time.Hour))
+	account.Quota.FiveHour = nil
+
+	status, available, reason, sortAt := accountQueueState(account, now)
+	if status != QueueStatusAvailable || !available || reason != "" || !sortAt.Equal(account.Quota.LongWindow.ResetAt) {
+		t.Fatalf("state = %s %v %q %s", status, available, reason, sortAt)
+	}
+}
+
+func TestPickSkipsMonthlyWhenPresentFiveHourResetMissing(t *testing.T) {
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	used := 20.0
+	account := monthlyAccount("monthly", 0, now.Add(30*24*time.Hour))
+	account.Quota.FiveHour = &QuotaWindow{Kind: WindowFiveHour, UsedPercent: &used}
+
+	status, available, reason, _ := accountQueueState(account, now)
+	if status != QueueStatusUnavailable || available || reason != "missing_five_hour_reset" {
+		t.Fatalf("state = %s %v %q, want missing five-hour reset", status, available, reason)
+	}
+}
+
+func TestPickRejectsAccountWithoutLongWindow(t *testing.T) {
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	for _, family := range []AccountFamily{AccountFamilyWeekly, AccountFamilyMonthly} {
+		t.Run(string(family), func(t *testing.T) {
+			account := AccountState{AuthID: "unknown", Family: family, Quota: ParsedQuota{Family: family}, LastSuccessAt: now}
+			status, available, _, _ := accountQueueState(account, now)
+			if status != QueueStatusUnavailable || available {
+				t.Fatalf("state = %s %v, want unavailable", status, available)
+			}
+		})
+	}
+}

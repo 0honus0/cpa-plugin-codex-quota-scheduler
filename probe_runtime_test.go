@@ -33,6 +33,14 @@ type sequenceProbeHost struct {
 	releaseDo     chan struct{}
 }
 
+func newProbeFixtureHost() *sequenceProbeHost {
+	return &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{
+		AuthIndex: "idx",
+		Name:      "a.json",
+		JSON:      json.RawMessage(`{"access_token":"access","refresh_token":"refresh","account_id":"acct"}`),
+	}}
+}
+
 func TestProbeAuthBlockedResumesOnlyAfterExternalLoginEpoch(t *testing.T) {
 	store := NewStateStore(filepath.Join(t.TempDir(), "state.json"), OSFileHooks(), nil)
 	finger := NewCredentialFingerprint("acct", "r0", "idx")
@@ -148,6 +156,163 @@ func newDueProbeRuntime(t *testing.T, now time.Time, host *sequenceProbeHost) *Q
 	refresherMu.Unlock()
 	t.Cleanup(func() { refresherMu.Lock(); globalRosterController = previous; refresherMu.Unlock() })
 	return r
+}
+
+func TestProbeRefreshRemovesAbsentFiveHourWindow(t *testing.T) {
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	r := newDueProbeRuntime(t, now, newProbeFixtureHost())
+	binding, ok := r.bindings.Lookup("a")
+	if !ok {
+		t.Fatal("binding missing")
+	}
+	r.probeController.SetWindow(binding.Instance, ProbeWindowLong, ProbeWindow{State: ProbeWaitingReset, Deadline: now.Add(24 * time.Hour)})
+	if err := r.persistProbeWindows(); err != nil {
+		t.Fatal(err)
+	}
+
+	quota := ParsedQuota{Family: AccountFamilyWeekly, LongWindow: &QuotaWindow{Kind: WindowWeekly, ResetAt: now.Add(24 * time.Hour)}}
+	if err := r.reconcileObservedProbeWindows(binding.Instance, quota); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := r.probeController.Window(binding.Instance, ProbeWindowFiveHour); ok {
+		t.Fatal("absent FiveHour Probe window retained")
+	}
+	if _, ok := r.probeController.Window(binding.Instance, ProbeWindowLong); !ok {
+		t.Fatal("LongWindow Probe state removed")
+	}
+	persisted, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := persisted.ProbeWindows[binding.Instance][ProbeWindowFiveHour]; ok {
+		t.Fatal("persisted absent FiveHour Probe window retained")
+	}
+	if _, ok := persisted.ProbeWindows[binding.Instance][ProbeWindowLong]; !ok {
+		t.Fatal("persisted LongWindow Probe state removed")
+	}
+}
+
+func TestProbeRefreshPreservesAbsentFiveHourDuringNonterminalAttempt(t *testing.T) {
+	for _, phase := range []ProbeAttemptPhase{ProbeAttemptPrepared, ProbeAttemptSending, ProbeAttemptSent, ProbeAttemptSentUnknown} {
+		t.Run(string(phase), func(t *testing.T) {
+			now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+			r := newDueProbeRuntime(t, now, newProbeFixtureHost())
+			binding, ok := r.bindings.Lookup("a")
+			if !ok {
+				t.Fatal("binding missing")
+			}
+			if _, err := r.runtimeStore.Update(func(s *PersistentState) error {
+				s.ProbeWindows = r.probeController.Snapshot()
+				s.ProbeAttempts[binding.Instance] = ProbeAttempt{Instance: binding.Instance, AttemptID: "active", Windows: []ProbeWindowKind{ProbeWindowFiveHour}, Phase: phase}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			quota := ParsedQuota{Family: AccountFamilyWeekly, LongWindow: &QuotaWindow{Kind: WindowWeekly, ResetAt: now.Add(24 * time.Hour)}}
+			if err := r.reconcileObservedProbeWindows(binding.Instance, quota); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := r.probeController.Window(binding.Instance, ProbeWindowFiveHour); !ok {
+				t.Fatal("nonterminal attempt lost referenced FiveHour state")
+			}
+			persisted, err := r.runtimeStore.PersistentSnapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := persisted.ProbeWindows[binding.Instance][ProbeWindowFiveHour]; !ok {
+				t.Fatal("nonterminal attempt lost persisted FiveHour state")
+			}
+		})
+	}
+}
+
+func TestProbeBootstrapRecreatesReappearedFiveHour(t *testing.T) {
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	r := newDueProbeRuntime(t, now, newProbeFixtureHost())
+	binding, ok := r.bindings.Lookup("a")
+	if !ok {
+		t.Fatal("binding missing")
+	}
+	r.probeController.RemoveWindow(binding.Instance, ProbeWindowFiveHour)
+	if err := r.persistProbeWindows(); err != nil {
+		t.Fatal(err)
+	}
+	fiveUsed := 20.0
+	fiveReset := now.Add(5 * time.Hour)
+	r.state.UpsertQuota(AccountState{AuthID: "a", AuthIndex: "idx", Provider: "codex", Family: AccountFamilyWeekly, LastSuccessAt: now, Quota: ParsedQuota{
+		Family:     AccountFamilyWeekly,
+		FiveHour:   &QuotaWindow{Kind: WindowFiveHour, UsedPercent: &fiveUsed, ResetAt: fiveReset},
+		LongWindow: &QuotaWindow{Kind: WindowWeekly, ResetAt: now.Add(7 * 24 * time.Hour)},
+	}})
+
+	if err := r.bootstrapProbeWindows(); err != nil {
+		t.Fatal(err)
+	}
+	window, ok := r.probeController.Window(binding.Instance, ProbeWindowFiveHour)
+	if !ok || !window.Baseline.ResetAt.Equal(fiveReset) {
+		t.Fatalf("recreated FiveHour window = %#v, ok=%v", window, ok)
+	}
+}
+
+func TestSuccessfulQuotaRefreshRemovesAbsentFiveHourProbeState(t *testing.T) {
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	host := newProbeFixtureHost()
+	host.quota = [][]byte{
+		[]byte(`{"rate_limit":{"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+		[]byte(`{}`),
+	}
+	r := newDueProbeRuntime(t, now, host)
+	binding, ok := r.bindings.Lookup("a")
+	if !ok {
+		t.Fatal("binding missing")
+	}
+
+	if err := r.RefreshOnce(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := r.probeController.Window(binding.Instance, ProbeWindowFiveHour); ok {
+		persisted, err := r.runtimeStore.PersistentSnapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Fatalf("successful secondary-only refresh retained FiveHour Probe state: persisted=%#v attempts=%#v requests=%#v remaining_quota=%d snapshot=%#v", persisted.ProbeWindows[binding.Instance], persisted.ProbeAttempts[binding.Instance], host.requests, len(host.quota), r.state.Snapshot(now).Accounts)
+	}
+	snapshot := r.state.Snapshot(now)
+	if len(snapshot.Accounts) != 1 {
+		t.Fatalf("accounts = %#v", snapshot.Accounts)
+	}
+	status, available, reason, _ := accountQueueState(snapshot.Accounts[0], now)
+	if status != QueueStatusAvailable || !available || reason != "" {
+		t.Fatalf("queue state = %s %v %q", status, available, reason)
+	}
+}
+
+func TestProbeSequenceCleansMissingFiveHourAfterAttemptCompletes(t *testing.T) {
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	host := newProbeFixtureHost()
+	host.quota = [][]byte{
+		[]byte(`{"rate_limit":{"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`),
+	}
+	r := newDueProbeRuntime(t, now, host)
+	binding, ok := r.bindings.Lookup("a")
+	if !ok {
+		t.Fatal("binding missing")
+	}
+
+	if err := r.RunProbeDueOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := r.probeController.Window(binding.Instance, ProbeWindowFiveHour); ok {
+		t.Fatal("completed Probe precheck retained absent FiveHour state")
+	}
+	persisted, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := persisted.ProbeAttempts[binding.Instance]; ok {
+		t.Fatal("completed Probe attempt retained")
+	}
 }
 
 func TestProductionProbeFinalStartDeniedEndToEnd(t *testing.T) {
