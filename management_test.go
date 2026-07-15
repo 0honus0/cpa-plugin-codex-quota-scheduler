@@ -858,6 +858,32 @@ func TestStatusPageShowsResetProbeWarningOnlyAfterProtectedLoadWhenDisabled(t *t
 	}
 }
 
+func TestStatusPageUsesPlainChineseProbeAndMonthlyCopy(t *testing.T) {
+	page := renderStatusPageForTest(t, NewPluginState(DefaultConfig()))
+	for _, want := range []string{
+		"自动激活新的额度周期",
+		"当额度重置时间已经到达，但 OpenAI 尚未生成新的额度周期时",
+		"账号列表未确认时仍允许额度探测（高风险）",
+		"通常应保持关闭",
+		"月度账号使用方式",
+		"优先使用月度账号",
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("status page missing %q", want)
+		}
+	}
+	for _, unwanted := range []string{
+		"启用自动 reset probe",
+		"启用 provisional roster Probe 风险模式",
+		"Monthly 模式",
+		"优先使用 Monthly",
+	} {
+		if strings.Contains(page, unwanted) {
+			t.Fatalf("status page still contains mixed-language copy %q", unwanted)
+		}
+	}
+}
+
 func TestStatusPageDoesNotClobberDirtySettingsOnProtectedPoll(t *testing.T) {
 	store := NewPluginState(DefaultConfig())
 	page := renderStatusPageForTest(t, store)
