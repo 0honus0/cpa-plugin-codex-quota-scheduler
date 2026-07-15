@@ -546,8 +546,8 @@ func TestStatusNextAuthIDScansLowerPluginPriority(t *testing.T) {
 	if body.NextAuthID != "low-available" {
 		t.Fatalf("NextAuthID = %q, want lower plugin priority account", body.NextAuthID)
 	}
-	if len(body.Accounts) != 2 || body.Accounts[0].CPAPriority != 5 || body.Accounts[0].SchedulerPriority != 1 {
-		t.Fatalf("Accounts = %#v, want distinct status priorities", body.Accounts)
+	if len(body.Accounts) != 2 || body.Accounts[0].AuthID != "low-available" || body.Accounts[0].CPAPriority != 5 || body.Accounts[0].SchedulerPriority != 0 || body.Accounts[1].AuthID != "high-blocked" || body.Accounts[1].SchedulerPriority != 1 {
+		t.Fatalf("Accounts = %#v, want availability-first order with distinct status priorities", body.Accounts)
 	}
 }
 

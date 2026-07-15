@@ -945,7 +945,7 @@ func sanitizePublicStatusPayload(payload StatusPayload) StatusPayload {
 
 func buildCurrentStatusPayload(store *PluginState, now time.Time) StatusPayload {
 	snapshot := store.Snapshot(now)
-	ordered := BuildOrderedAccounts(syntheticStatusRequest(snapshot), snapshot, now)
+	ordered := buildOrderedAccounts(syntheticStatusRequest(snapshot), snapshot, now, globalTrials)
 	return BuildStatusPayload(snapshot, ordered)
 }
 
@@ -966,7 +966,7 @@ func buildCurrentStatusPayloadWithLifecycle(store *PluginState, now time.Time, l
 		account.Priority = lifecycle.Roster.HighestPriority
 		filtered.Accounts = append(filtered.Accounts, account)
 	}
-	ordered := BuildOrderedAccounts(syntheticRosterStatusRequest(filtered, lifecycle.Roster), filtered, now)
+	ordered := buildOrderedAccounts(syntheticRosterStatusRequest(filtered, lifecycle.Roster), filtered, now, globalTrials)
 	return buildStatusPayload(filtered, ordered, &lifecycle)
 }
 

@@ -226,18 +226,18 @@ func TestSixAccountIncidentUsesPluginPriorityFallthroughWhenCPAPrioritiesMatch(t
 	for _, account := range decision.Ordered {
 		gotIDs = append(gotIDs, account.AuthID)
 	}
-	wantIDs := []string{"exhausted-a", "exhausted-b", "usable-a", "usable-b", "usable-c", "usable-d"}
+	wantIDs := []string{"usable-a", "usable-b", "usable-c", "usable-d", "exhausted-a", "exhausted-b"}
 	if !slices.Equal(gotIDs, wantIDs) {
 		t.Fatalf("ordered IDs = %#v, want %#v", gotIDs, wantIDs)
 	}
-	if decision.Ordered[0].SchedulerPriority != 1 || decision.Ordered[1].SchedulerPriority != 1 {
-		t.Fatalf("first plugin tier = %#v, want two plugin-priority-1 accounts", decision.Ordered[:2])
+	if decision.Ordered[4].SchedulerPriority != 1 || decision.Ordered[5].SchedulerPriority != 1 {
+		t.Fatalf("excluded plugin tier = %#v, want two plugin-priority-1 accounts", decision.Ordered[4:])
 	}
-	if decision.Ordered[0].Available || decision.Ordered[1].Available {
-		t.Fatalf("first plugin tier unexpectedly usable: %#v", decision.Ordered[:2])
+	if decision.Ordered[4].Available || decision.Ordered[5].Available {
+		t.Fatalf("excluded plugin tier unexpectedly usable: %#v", decision.Ordered[4:])
 	}
-	if decision.Ordered[2].AuthID != usableA.AuthID || decision.Ordered[2].SchedulerPriority != 0 || !decision.Ordered[2].Available {
-		t.Fatalf("first usable lower plugin tier account = %#v, want %q", decision.Ordered[2], usableA.AuthID)
+	if decision.Ordered[0].AuthID != usableA.AuthID || decision.Ordered[0].SchedulerPriority != 0 || !decision.Ordered[0].Available {
+		t.Fatalf("first usable lower plugin tier account = %#v, want %q", decision.Ordered[0], usableA.AuthID)
 	}
 }
 

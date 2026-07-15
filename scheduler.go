@@ -25,6 +25,8 @@ type ScheduledAccount struct {
 	UnavailableReason string
 	SortTime          time.Time
 	Annotation        AccountAnnotation
+	selectionClass    AvailabilityClass
+	selectionView     AccountView
 }
 
 type QueueStatus string
@@ -104,6 +106,10 @@ func PickCodexAccount(req pluginapi.SchedulerPickRequest, snapshot StateSnapshot
 }
 
 func BuildOrderedAccounts(req pluginapi.SchedulerPickRequest, snapshot StateSnapshot, now time.Time) []ScheduledAccount {
+	return buildOrderedAccounts(req, snapshot, now, nil)
+}
+
+func buildOrderedAccounts(req pluginapi.SchedulerPickRequest, snapshot StateSnapshot, now time.Time, trials *TrialRegistry) []ScheduledAccount {
 	admission, ok := HighestPriorityCodexAdmission(req)
 	if !ok {
 		return nil
@@ -142,11 +148,14 @@ func BuildOrderedAccounts(req pluginapi.SchedulerPickRequest, snapshot StateSnap
 				Family:            AccountFamilyUnknown,
 				QueueStatus:       QueueStatusUnavailable,
 				UnavailableReason: "unknown_account",
+				selectionClass:    Excluded,
+				selectionView:     AccountView{ID: candidate.ID},
 			})
 			continue
 		}
 
 		queueStatus, available, reason, sortTime := accountQueueState(account, now)
+		view := accountViewFromState(account, snapshot.Config, now, trials)
 		ordered = append(ordered, ScheduledAccount{
 			AuthID:            candidate.ID,
 			CPAPriority:       candidate.Priority,
@@ -157,27 +166,18 @@ func BuildOrderedAccounts(req pluginapi.SchedulerPickRequest, snapshot StateSnap
 			UnavailableReason: reason,
 			SortTime:          sortTime,
 			Annotation:        account.Annotation,
+			selectionClass:    ClassifyAccount(view, now),
+			selectionView:     view,
 		})
 	}
 
 	sort.SliceStable(ordered, func(i, j int) bool {
-		left := ordered[i]
-		right := ordered[j]
-		if left.SchedulerPriority != right.SchedulerPriority {
-			return left.SchedulerPriority > right.SchedulerPriority
+		left, right := ordered[i], ordered[j]
+		if left.selectionClass != right.selectionClass {
+			return left.selectionClass < right.selectionClass
 		}
-		leftRank := queueStatusRank(left.QueueStatus)
-		rightRank := queueStatusRank(right.QueueStatus)
-		if leftRank != rightRank {
-			return leftRank < rightRank
-		}
-		if left.QueueStatus == QueueStatusAvailable && snapshot.Config.MonthlyMode == MonthlyModePriority && left.Family != right.Family {
-			if left.Family == AccountFamilyMonthly {
-				return true
-			}
-			if right.Family == AccountFamilyMonthly {
-				return false
-			}
+		if left.selectionClass != Excluded {
+			return accountViewLess(left.selectionView, right.selectionView, snapshot.Config.MonthlyMode)
 		}
 		if !left.SortTime.Equal(right.SortTime) {
 			if left.SortTime.IsZero() {
@@ -279,19 +279,6 @@ func accountSortTime(account AccountState) time.Time {
 		return account.Quota.LongWindow.ResetAt
 	}
 	return time.Time{}
-}
-
-func queueStatusRank(status QueueStatus) int {
-	switch status {
-	case QueueStatusAvailable:
-		return 0
-	case QueueStatusFiveHourExhausted:
-		return 1
-	case QueueStatusLongWindowExhausted:
-		return 2
-	default:
-		return 3
-	}
 }
 
 func windowExhausted(window *QuotaWindow, now time.Time) bool {

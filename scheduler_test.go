@@ -299,8 +299,15 @@ func TestPickSkipsLocalRefreshFailureAccount(t *testing.T) {
 	if decision.AuthID != "available" {
 		t.Fatalf("AuthID = %q, want available; ordered=%#v", decision.AuthID, decision.Ordered)
 	}
-	if decision.Ordered[1].Available || decision.Ordered[1].UnavailableReason != "local_failure" {
-		t.Fatalf("blocked account = %#v, want unavailable local_failure", decision.Ordered[1])
+	var blockedAccount ScheduledAccount
+	for _, account := range decision.Ordered {
+		if account.AuthID == blocked.AuthID {
+			blockedAccount = account
+			break
+		}
+	}
+	if blockedAccount.Available || blockedAccount.UnavailableReason != "local_failure" {
+		t.Fatalf("blocked account = %#v, want unavailable local_failure", blockedAccount)
 	}
 }
 
@@ -316,6 +323,76 @@ func TestOrderedAccountsPutAvailableBeforeExhaustedWithinPriority(t *testing.T) 
 	ordered := BuildOrderedAccounts(requestWithCandidates("blocked", "available"), snapshot, now)
 	if len(ordered) != 2 || ordered[0].AuthID != "available" || !ordered[0].Available {
 		t.Fatalf("ordered = %#v, want available account first", ordered)
+	}
+}
+
+func TestManagementQueueMatchesProductionAvailabilityClasses(t *testing.T) {
+	now := time.Date(2026, 7, 15, 9, 0, 0, 0, time.UTC)
+	used := 100.0
+	exhaustedHigh := weeklyAccount("exhausted-high", 0, now.Add(2*time.Hour), false)
+	exhaustedHigh.Quota.LongWindow.UsedPercent = &used
+	exhaustedHigh.Quota.LongWindow.Exhausted = true
+	exhaustedHigh.Annotation.SchedulerPriority = 100
+	availableLow := weeklyAccount("available-low", 0, now.Add(4*time.Hour), false)
+	availableLow.Annotation.SchedulerPriority = 0
+	snapshot := StateSnapshot{Config: DefaultConfig(), Now: now, Accounts: []AccountState{exhaustedHigh, availableLow}}
+
+	ordered := BuildOrderedAccounts(requestWithCandidates("exhausted-high", "available-low"), snapshot, now)
+	if len(ordered) != 2 || ordered[0].AuthID != "available-low" || ordered[1].AuthID != "exhausted-high" {
+		t.Fatalf("ordered = %#v", ordered)
+	}
+}
+
+func TestExcludedManagementQueueIgnoresPluginPriorityAndSortsByRecovery(t *testing.T) {
+	now := time.Date(2026, 7, 15, 9, 0, 0, 0, time.UTC)
+	used := 100.0
+	laterHigh := weeklyAccount("later-high", 0, now.Add(8*time.Hour), false)
+	laterHigh.Quota.LongWindow.UsedPercent = &used
+	laterHigh.Quota.LongWindow.Exhausted = true
+	laterHigh.Annotation.SchedulerPriority = 100
+	earlierLow := weeklyAccount("earlier-low", 0, now.Add(2*time.Hour), false)
+	earlierLow.Quota.LongWindow.UsedPercent = &used
+	earlierLow.Quota.LongWindow.Exhausted = true
+	earlierLow.Annotation.SchedulerPriority = 0
+	unknown := weeklyAccount("unknown", 0, now.Add(24*time.Hour), false)
+	unknown.Refresh.AuthFailure = true
+	unknown.Annotation.SchedulerPriority = 1000
+	snapshot := StateSnapshot{Config: DefaultConfig(), Now: now, Accounts: []AccountState{laterHigh, earlierLow, unknown}}
+
+	ordered := BuildOrderedAccounts(requestWithCandidates("later-high", "earlier-low", "unknown"), snapshot, now)
+	want := []string{"earlier-low", "later-high", "unknown"}
+	for i := range want {
+		if ordered[i].AuthID != want[i] {
+			t.Fatalf("ordered = %#v, want %v", ordered, want)
+		}
+	}
+}
+
+func TestSelectableManagementQueueKeepsPluginPriorityWithinClass(t *testing.T) {
+	now := time.Date(2026, 7, 15, 9, 0, 0, 0, time.UTC)
+	preferredLow := weeklyAccount("preferred-low", 0, now.Add(2*time.Hour), false)
+	preferredHigh := weeklyAccount("preferred-high", 0, now.Add(8*time.Hour), false)
+	preferredLow.Annotation.SchedulerPriority = 0
+	preferredHigh.Annotation.SchedulerPriority = 10
+
+	opportunisticLow := weeklyAccount("opportunistic-low", 0, now.Add(3*time.Hour), false)
+	opportunisticHigh := weeklyAccount("opportunistic-high", 0, now.Add(9*time.Hour), false)
+	opportunisticLow.LastSuccessAt = time.Time{}
+	opportunisticHigh.LastSuccessAt = time.Time{}
+	opportunisticLow.Annotation.SchedulerPriority = 0
+	opportunisticHigh.Annotation.SchedulerPriority = 10
+
+	snapshot := StateSnapshot{Config: DefaultConfig(), Now: now, Accounts: []AccountState{
+		preferredLow, preferredHigh, opportunisticLow, opportunisticHigh,
+	}}
+	ordered := BuildOrderedAccounts(requestWithCandidates(
+		"preferred-low", "preferred-high", "opportunistic-low", "opportunistic-high",
+	), snapshot, now)
+	want := []string{"preferred-high", "preferred-low", "opportunistic-high", "opportunistic-low"}
+	for i := range want {
+		if ordered[i].AuthID != want[i] {
+			t.Fatalf("ordered = %#v, want %v", ordered, want)
+		}
 	}
 }
 

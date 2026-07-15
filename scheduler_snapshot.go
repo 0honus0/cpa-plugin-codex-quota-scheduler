@@ -91,33 +91,44 @@ func schedulerSnapshotFromState(state StateSnapshot, trials *TrialRegistry) *Sch
 	active := cloneStringSet(state.CPAAdmission.AuthIDs)
 	accounts := make([]AccountView, 0, len(state.Accounts))
 	for _, a := range state.Accounts {
-		cache := CacheFresh
-		if a.LastSuccessAt.IsZero() {
-			cache = CacheUnknown
-		} else if a.Stale {
-			cache = CacheStale
-		} else if state.Now.Sub(a.LastSuccessAt) > state.Config.QuotaRefreshInterval {
-			cache = CacheAging
-		}
-		exhausted, reset := accountExhaustion(a, state.Now)
-		trial := TrialNone
-		if trials != nil {
-			trial = trials.State(a.Instance, state.Now)
-		}
-		circuit := effectiveCircuitState(a.Circuit, state.Now).EffectiveState
-		circuitClass := CircuitClosed
-		if circuit == CircuitStateOpen {
-			circuitClass = CircuitOpen
-		} else if circuit == CircuitStateHalfOpen {
-			circuitClass = CircuitHalfOpen
-		}
-		accounts = append(accounts, AccountView{ID: a.AuthID, AuthIndex: a.AuthIndex, Instance: a.Instance, PluginPriority: a.Annotation.SchedulerPriority, Family: a.Family, Cache: cache, LastKnownAvailable: a.LastError == "", Exhausted: exhausted, ResetAt: reset, AuthBlocked: a.Refresh.AuthFailure, Circuit: circuitClass, TemporaryUnavailable: a.TemporaryExhausted && a.TemporaryResetAt.After(state.Now), Trial: trial, Expiry: accountSortTime(a), RemainingQuota: remainingQuota(a)})
+		accounts = append(accounts, accountViewFromState(a, state.Config, state.Now, trials))
 	}
 	var activity func(pluginapi.SchedulerPickRequest, uint64, time.Time)
 	if pump := globalPickActivityPump.Load(); pump != nil {
 		activity = pump.enqueue
 	}
 	return &SchedulerSnapshot{HandleEnabled: state.Config.HandleEnabled, Fallback: state.Config.Fallback, MonthlyMode: state.Config.MonthlyMode, Accounts: accounts, ActiveHighestTier: active, Trials: trials, EvidenceIntents: globalEvidenceIntents, Activity: activity}
+}
+
+func accountViewFromState(a AccountState, cfg Config, now time.Time, trials *TrialRegistry) AccountView {
+	cache := CacheFresh
+	if a.LastSuccessAt.IsZero() {
+		cache = CacheUnknown
+	} else if a.Stale {
+		cache = CacheStale
+	} else if now.Sub(a.LastSuccessAt) > cfg.QuotaRefreshInterval {
+		cache = CacheAging
+	}
+	exhausted, reset := accountExhaustion(a, now)
+	trial := TrialNone
+	if trials != nil {
+		trial = trials.State(a.Instance, now)
+	}
+	circuit := effectiveCircuitState(a.Circuit, now).EffectiveState
+	circuitClass := CircuitClosed
+	if circuit == CircuitStateOpen {
+		circuitClass = CircuitOpen
+	} else if circuit == CircuitStateHalfOpen {
+		circuitClass = CircuitHalfOpen
+	}
+	return AccountView{
+		ID: a.AuthID, AuthIndex: a.AuthIndex, Instance: a.Instance,
+		PluginPriority: a.Annotation.SchedulerPriority, Family: a.Family,
+		Cache: cache, LastKnownAvailable: a.LastError == "", Exhausted: exhausted,
+		ResetAt: reset, AuthBlocked: a.Refresh.AuthFailure, Circuit: circuitClass,
+		TemporaryUnavailable: a.TemporaryExhausted && a.TemporaryResetAt.After(now),
+		Trial:                trial, Expiry: accountSortTime(a), RemainingQuota: remainingQuota(a),
+	}
 }
 
 func publishSchedulerState(state *PluginState, active map[string]struct{}, now time.Time) {
