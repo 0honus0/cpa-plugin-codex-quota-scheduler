@@ -156,6 +156,13 @@ func buildOrderedAccounts(req pluginapi.SchedulerPickRequest, snapshot StateSnap
 
 		queueStatus, available, reason, sortTime := accountQueueState(account, now)
 		view := accountViewFromState(account, snapshot.Config, now, trials)
+		selectionClass := ClassifyAccount(view, now)
+		if selectionClass == Excluded && available && view.Trial != TrialNone {
+			queueStatus = QueueStatusUnavailable
+			available = false
+			reason = "quota_probe_wait"
+			sortTime = time.Time{}
+		}
 		ordered = append(ordered, ScheduledAccount{
 			AuthID:            candidate.ID,
 			CPAPriority:       candidate.Priority,
@@ -166,7 +173,7 @@ func buildOrderedAccounts(req pluginapi.SchedulerPickRequest, snapshot StateSnap
 			UnavailableReason: reason,
 			SortTime:          sortTime,
 			Annotation:        account.Annotation,
-			selectionClass:    ClassifyAccount(view, now),
+			selectionClass:    selectionClass,
 			selectionView:     view,
 		})
 	}

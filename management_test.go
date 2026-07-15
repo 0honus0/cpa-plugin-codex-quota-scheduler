@@ -568,6 +568,65 @@ func TestStatusNextAuthIDScansLowerPluginPriority(t *testing.T) {
 	}
 }
 
+func TestManagementStatusExcludesActiveTrialConsistently(t *testing.T) {
+	now := time.Date(2026, 7, 15, 9, 0, 0, 0, time.UTC)
+	trialAccount := weeklyAccount("trial", 0, now.Add(time.Hour), false)
+	trialAccount.Instance = 101
+	selectable := weeklyAccount("selectable", 0, now.Add(3*time.Hour), false)
+	selectable.Instance = 102
+	used := 100.0
+	knownRecovery := weeklyAccount("known-recovery", 0, now.Add(2*time.Hour), false)
+	knownRecovery.Instance = 103
+	knownRecovery.Quota.LongWindow.UsedPercent = &used
+	knownRecovery.Quota.LongWindow.Exhausted = true
+
+	trials := NewTrialRegistry()
+	if !trials.TryBegin(trialAccount.Instance, now) {
+		t.Fatal("TryBegin returned false for a new trial")
+	}
+	snapshot := StateSnapshot{Config: DefaultConfig(), Now: now, Accounts: []AccountState{
+		trialAccount, selectable, knownRecovery,
+	}}
+	ordered := buildOrderedAccounts(
+		requestWithCandidates("trial", "selectable", "known-recovery"), snapshot, now, trials,
+	)
+	payload := BuildStatusPayload(snapshot, ordered)
+
+	wantOrder := []string{"selectable", "known-recovery", "trial"}
+	for i, want := range wantOrder {
+		if ordered[i].AuthID != want {
+			t.Errorf("ordered[%d].AuthID = %q, want %q; ordered=%#v", i, ordered[i].AuthID, want, ordered)
+		}
+	}
+	var trialScheduled ScheduledAccount
+	for _, account := range ordered {
+		if account.AuthID == trialAccount.AuthID {
+			trialScheduled = account
+			break
+		}
+	}
+	if trialScheduled.selectionClass != Excluded {
+		t.Errorf("trial selectionClass = %v, want Excluded", trialScheduled.selectionClass)
+	}
+	if trialScheduled.Available {
+		t.Error("trial Available = true, want false")
+	}
+	if trialScheduled.QueueStatus != QueueStatusUnavailable || trialScheduled.UnavailableReason != "quota_probe_wait" {
+		t.Errorf("trial queue state = (%q, %q), want unavailable quota_probe_wait", trialScheduled.QueueStatus, trialScheduled.UnavailableReason)
+	}
+	if !trialScheduled.SortTime.IsZero() {
+		t.Errorf("trial SortTime = %v, want unknown recovery", trialScheduled.SortTime)
+	}
+	if payload.NextAuthID != selectable.AuthID {
+		t.Errorf("NextAuthID = %q, want %q", payload.NextAuthID, selectable.AuthID)
+	}
+	for _, account := range payload.Accounts {
+		if account.AuthID == trialAccount.AuthID && account.Available {
+			t.Error("status trial Available = true, want false")
+		}
+	}
+}
+
 func TestStatusJSONIncludesEmptyLastSelectionFields(t *testing.T) {
 	now := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
 	store := NewPluginState(DefaultConfig())
