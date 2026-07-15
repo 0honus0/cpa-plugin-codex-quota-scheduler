@@ -867,6 +867,12 @@ func TestStatusPageUsesPlainChineseProbeAndMonthlyCopy(t *testing.T) {
 		"通常应保持关闭",
 		"月度账号使用方式",
 		"优先使用月度账号",
+		`'settings.enableResetProbe':'Enable automatic reset probe'`,
+		`'settings.enableResetProbeHelp':'When the quota reset time has arrived but OpenAI has not yet generated a new quota cycle`,
+		`'settings.provisionalProbe':'Allow quota probes when the account roster is unconfirmed (high risk)'`,
+		`'settings.provisionalProbeHelp':'When CPA temporarily cannot confirm the current accounts and priorities`,
+		`'settings.monthlyMode':'Monthly mode'`,
+		`'settings.monthlyPriority':'Prefer Monthly'`,
 	} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("status page missing %q", want)
