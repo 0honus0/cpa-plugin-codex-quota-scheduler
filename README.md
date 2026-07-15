@@ -1,8 +1,11 @@
 # Codex Quota Scheduler
 
-## v0.2 upgrade
+## v0.2.0 upgrade
 
-v0.2 automatically migrates the legacy state filename to `.user-data.json` and retains the original for one version cycle as `<legacy-name>.migrated`. Machine-owned runtime state is stored separately in `.runtime-state.json` in the same directory.
+v0.2.0 automatically migrates the legacy state filename to `.user-data.json`
+and retains the original for one version cycle as `<legacy-name>.migrated`.
+Machine-owned runtime state is stored separately in `.runtime-state.json` in
+the same directory.
 
 `codex-quota-scheduler` is a CLIProxyAPI (CPA) dynamic library plugin that
 improves Codex account selection with an optimized Fill First scheduler.
@@ -233,13 +236,13 @@ make build
 Build and package the release zip:
 
 ```bash
-make package VERSION=0.1.6
+make package VERSION=0.2.0
 ```
 
 Generate an aggregate checksum file for local release assets:
 
 ```bash
-make checksums VERSION=0.1.6
+make checksums VERSION=0.2.0
 ```
 
 Windows users can also use the PowerShell helper:
@@ -253,12 +256,15 @@ compiler such as MinGW-w64 on `PATH`.
 
 ## GitHub Releases
 
-Version `0.1.6` isolates CPA priority admission to the maximum observed tier,
-adds plugin-owned per-account priority with internal exhausted-tier
-fallthrough, and consumes successful reset-trigger refreshes once. Historical
-version `0.1.5` restored interval-based per-account refreshes inside the active
-window and kept quota-exhaustion feedback separate from circuit-breaker
-failures. Version `0.1.4` keeps account cards, logs, refresh actions, scheduler
+Version `0.2.0` completes the spec-driven scheduler refactor, including
+authoritative roster lifecycle handling, persisted single-lease reset probes,
+Codex quota-window compatibility, availability-ordered management queues, and
+bilingual settings guidance. Historical version `0.1.6` isolates CPA priority
+admission to the maximum observed tier, adds plugin-owned per-account priority
+with internal exhausted-tier fallthrough, and consumes successful reset-trigger
+refreshes once. Version `0.1.5` restored interval-based per-account refreshes
+inside the active window and kept quota-exhaustion feedback separate from
+circuit-breaker failures. Version `0.1.4` keeps account cards, logs, refresh actions, scheduler
 status, and reset-probe notices behind the CPA Management key. Version `0.1.3`
 adds the opt-in automatic reset probe for lazy Codex quota windows. Version
 `0.1.2` adds adaptive refresh scheduling and a dynamically updating bilingual
@@ -269,8 +275,8 @@ this repository. GitHub Actions builds release assets when a tag matching `v*`
 is pushed. Use a dotted numeric version tag such as:
 
 ```bash
-git tag v0.1.6
-git push origin v0.1.6
+git tag -a v0.2.0 -m "v0.2.0"
+git push origin v0.2.0
 ```
 
 The `Build` workflow runs tests and creates the release automatically. Release
@@ -281,21 +287,21 @@ codex-quota-scheduler_<version>_<goos>_<goarch>.zip
 checksums.txt
 ```
 
-For `v0.1.6`, the expected platform assets are:
+For `v0.2.0`, the expected platform assets are:
 
-- `codex-quota-scheduler_0.1.6_darwin_amd64.zip`
-- `codex-quota-scheduler_0.1.6_darwin_arm64.zip`
-- `codex-quota-scheduler_0.1.6_freebsd_amd64.zip`
-- `codex-quota-scheduler_0.1.6_linux_amd64.zip`
-- `codex-quota-scheduler_0.1.6_linux_arm64.zip`
-- `codex-quota-scheduler_0.1.6_windows_amd64.zip`
-- `codex-quota-scheduler_0.1.6_windows_arm64.zip`
+- `codex-quota-scheduler_0.2.0_darwin_amd64.zip`
+- `codex-quota-scheduler_0.2.0_darwin_arm64.zip`
+- `codex-quota-scheduler_0.2.0_freebsd_amd64.zip`
+- `codex-quota-scheduler_0.2.0_linux_amd64.zip`
+- `codex-quota-scheduler_0.2.0_linux_arm64.zip`
+- `codex-quota-scheduler_0.2.0_windows_amd64.zip`
+- `codex-quota-scheduler_0.2.0_windows_arm64.zip`
 - `checksums.txt`
 
 `checksums.txt` uses sha256sum format:
 
 ```text
-<sha256>  codex-quota-scheduler_0.1.6_darwin_arm64.zip
+<sha256>  codex-quota-scheduler_0.2.0_darwin_arm64.zip
 ```
 
 ## Management API
