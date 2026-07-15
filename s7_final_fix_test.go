@@ -245,8 +245,11 @@ func TestProductionSchedulerPickActivityIsAsyncBoundedAndWakesDormantRefresh(t *
 	if got := rosterHost.callCount(); got != 2 {
 		t.Fatalf("concurrent picks were not bounded/coalesced: roster calls=%d want=2 (startup + one TTL sync)", got)
 	}
-	if state.Snapshot(clock.Now()).LastCodexActivityAt.IsZero() == false {
-		t.Fatal("pick activity synchronously mutated legacy activity state")
+	if !waitForCondition(t, time.Second, func() bool {
+		snapshot := state.Snapshot(clock.Now())
+		return !snapshot.LastCodexActivityAt.IsZero() && snapshot.LastSelected == "a"
+	}) {
+		t.Fatal("async pick observation did not update management activity state")
 	}
 
 	clock.Set(clock.Now().Add(rosterActiveTTL + time.Second))

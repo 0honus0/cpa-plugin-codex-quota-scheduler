@@ -17,6 +17,7 @@ type SchedulerSnapshot struct {
 	EvidenceIntents   chan<- EvidenceIntent
 	AdmissionVersion  uint64
 	Activity          func(pluginapi.SchedulerPickRequest, uint64, time.Time)
+	Observation       func(pluginapi.SchedulerPickRequest, PickDecision, time.Time)
 }
 
 type EvidenceIntent struct {
@@ -49,11 +50,14 @@ func cloneStringSet(in map[string]struct{}) map[string]struct{} {
 
 func schedulerPickPublished(req pluginapi.SchedulerPickRequest, now time.Time) PickDecision {
 	snapshot := publishedSchedulerSnapshot.Load()
-	if snapshot == nil || !snapshot.HandleEnabled {
+	if snapshot == nil {
 		return PickDecision{Reason: "handle_disabled"}
 	}
 	if !requestIncludesCodex(req) {
 		return PickDecision{Reason: "provider_not_codex"}
+	}
+	if !snapshot.HandleEnabled {
+		return observeSchedulerDecision(snapshot, req, PickDecision{Reason: "handle_disabled"}, now)
 	}
 	if snapshot.Activity != nil {
 		snapshot.Activity(req, snapshot.AdmissionVersion, now)
@@ -79,12 +83,19 @@ func schedulerPickPublished(req pluginapi.SchedulerPickRequest, now time.Time) P
 		}
 	}
 	if result.AuthID != "" {
-		return PickDecision{AuthID: result.AuthID, Handled: true, Reason: "selected"}
+		return observeSchedulerDecision(snapshot, req, PickDecision{AuthID: result.AuthID, Handled: true, Reason: "selected"}, now)
 	}
 	if snapshot.Fallback == FallbackFillFirst {
-		return PickDecision{Handled: true, DelegateBuiltin: pluginapi.SchedulerBuiltinFillFirst, Reason: result.Reason}
+		return observeSchedulerDecision(snapshot, req, PickDecision{Handled: true, DelegateBuiltin: pluginapi.SchedulerBuiltinFillFirst, Reason: result.Reason}, now)
 	}
-	return PickDecision{Reason: result.Reason}
+	return observeSchedulerDecision(snapshot, req, PickDecision{Reason: result.Reason}, now)
+}
+
+func observeSchedulerDecision(snapshot *SchedulerSnapshot, req pluginapi.SchedulerPickRequest, decision PickDecision, now time.Time) PickDecision {
+	if snapshot != nil && snapshot.Observation != nil {
+		snapshot.Observation(req, decision, now)
+	}
+	return decision
 }
 
 func schedulerSnapshotFromState(state StateSnapshot, trials *TrialRegistry) *SchedulerSnapshot {
@@ -94,10 +105,12 @@ func schedulerSnapshotFromState(state StateSnapshot, trials *TrialRegistry) *Sch
 		accounts = append(accounts, accountViewFromState(a, state.Config, state.Now, trials))
 	}
 	var activity func(pluginapi.SchedulerPickRequest, uint64, time.Time)
+	var observation func(pluginapi.SchedulerPickRequest, PickDecision, time.Time)
 	if pump := globalPickActivityPump.Load(); pump != nil {
 		activity = pump.enqueue
+		observation = pump.enqueueObservation
 	}
-	return &SchedulerSnapshot{HandleEnabled: state.Config.HandleEnabled, Fallback: state.Config.Fallback, MonthlyMode: state.Config.MonthlyMode, Accounts: accounts, ActiveHighestTier: active, Trials: trials, EvidenceIntents: globalEvidenceIntents, Activity: activity}
+	return &SchedulerSnapshot{HandleEnabled: state.Config.HandleEnabled, Fallback: state.Config.Fallback, MonthlyMode: state.Config.MonthlyMode, Accounts: accounts, ActiveHighestTier: active, Trials: trials, EvidenceIntents: globalEvidenceIntents, Activity: activity, Observation: observation}
 }
 
 func accountViewFromState(a AccountState, cfg Config, now time.Time, trials *TrialRegistry) AccountView {

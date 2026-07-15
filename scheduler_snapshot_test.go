@@ -35,6 +35,115 @@ func TestSchedulerPickABIPathSnapshotOnly(t *testing.T) {
 	_ = now
 }
 
+func TestSchedulerPickPublishesManagementObservationAsynchronously(t *testing.T) {
+	store := NewPluginState(DefaultConfig())
+
+	refresherMu.Lock()
+	previousState := globalState
+	globalState = store
+	refresherMu.Unlock()
+	replaceGlobalPickActivityPump(nil, nil)
+	t.Cleanup(func() {
+		stopGlobalPickActivityPump()
+		refresherMu.Lock()
+		globalState = previousState
+		refresherMu.Unlock()
+	})
+
+	pump := globalPickActivityPump.Load()
+	if pump == nil {
+		t.Fatal("pick activity pump missing")
+	}
+	PublishSchedulerSnapshot(&SchedulerSnapshot{
+		HandleEnabled:     true,
+		Accounts:          []AccountView{{ID: "a", Instance: 1, Cache: CacheFresh}},
+		ActiveHighestTier: map[string]struct{}{"a": {}},
+		Activity:          pump.enqueue,
+		Observation:       pump.enqueueObservation,
+	})
+	raw, _ := json.Marshal(pluginapi.SchedulerPickRequest{
+		Provider:   "codex",
+		Model:      "gpt-5-codex",
+		Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "a", Provider: "codex"}},
+	})
+
+	encoded, err := handleSchedulerPick(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env envelope
+	if err := json.Unmarshal(encoded, &env); err != nil {
+		t.Fatal(err)
+	}
+	var response pluginapi.SchedulerPickResponse
+	if err := json.Unmarshal(env.Result, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.AuthID != "a" || !response.Handled {
+		t.Fatalf("response=%#v", response)
+	}
+
+	if !waitForCondition(t, time.Second, func() bool {
+		snapshot := store.Snapshot(time.Now())
+		if snapshot.LastSelected != "a" || snapshot.LastReason != "selected" || snapshot.LastCodexActivityAt.IsZero() {
+			return false
+		}
+		for _, entry := range snapshot.Logs {
+			if entry.Event == "scheduler.selected" && entry.Fields["auth_id"] == "a" {
+				return true
+			}
+		}
+		return false
+	}) {
+		t.Fatalf("management observation missing after scheduler pick: %#v", store.Snapshot(time.Now()))
+	}
+}
+
+func TestDisabledSchedulerStillObservesCodexRequestAsUnhandled(t *testing.T) {
+	store := NewPluginState(DefaultConfig())
+
+	refresherMu.Lock()
+	previousState := globalState
+	globalState = store
+	refresherMu.Unlock()
+	replaceGlobalPickActivityPump(nil, nil)
+	t.Cleanup(func() {
+		stopGlobalPickActivityPump()
+		refresherMu.Lock()
+		globalState = previousState
+		refresherMu.Unlock()
+	})
+
+	pump := globalPickActivityPump.Load()
+	PublishSchedulerSnapshot(&SchedulerSnapshot{
+		HandleEnabled: false,
+		Observation:   pump.enqueueObservation,
+	})
+	raw, _ := json.Marshal(pluginapi.SchedulerPickRequest{
+		Provider:   "codex",
+		Model:      "gpt-5-codex",
+		Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "a", Provider: "codex"}},
+	})
+
+	if _, err := handleSchedulerPick(raw); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForCondition(t, time.Second, func() bool {
+		snapshot := store.Snapshot(time.Now())
+		if snapshot.LastCodexActivityAt.IsZero() {
+			return false
+		}
+		for _, entry := range snapshot.Logs {
+			if entry.Event == "scheduler.unhandled" && entry.Fields["reason"] == "handle_disabled" {
+				return true
+			}
+		}
+		return false
+	}) {
+		t.Fatalf("disabled Codex observation missing: %#v", store.Snapshot(time.Now()))
+	}
+}
+
 func TestProductionEvidenceQueueAndDynamicTrial(t *testing.T) {
 	now := time.Now()
 	trials := NewTrialRegistry()
