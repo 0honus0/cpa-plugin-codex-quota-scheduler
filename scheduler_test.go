@@ -774,6 +774,50 @@ func TestPickAllowsMonthlyWithoutFiveHour(t *testing.T) {
 	}
 }
 
+func TestLongWindowExhaustionPrecedesTemporaryFeedbackWithoutFiveHour(t *testing.T) {
+	now := time.Date(2026, 7, 15, 9, 0, 0, 0, time.UTC)
+	used := 100.0
+	weekly := weeklyAccount("weekly", 0, now.Add(6*time.Hour), false)
+	weekly.Quota.FiveHour = nil
+	weekly.Quota.LongWindow.UsedPercent = &used
+	weekly.Quota.LongWindow.Exhausted = true
+	weekly.TemporaryExhausted = true
+	weekly.TemporaryResetAt = now.Add(time.Hour)
+
+	status, available, reason, resetAt := accountQueueState(weekly, now)
+	if status != QueueStatusLongWindowExhausted || available || reason != "weekly_exhausted" || !resetAt.Equal(weekly.Quota.LongWindow.ResetAt) {
+		t.Fatalf("state = %q/%v/%q/%v", status, available, reason, resetAt)
+	}
+}
+
+func TestMonthlyLongWindowExhaustionPrecedesTemporaryFeedback(t *testing.T) {
+	now := time.Date(2026, 7, 15, 9, 0, 0, 0, time.UTC)
+	used := 100.0
+	monthly := monthlyAccount("monthly", 0, now.Add(6*time.Hour))
+	monthly.Quota.LongWindow.UsedPercent = &used
+	monthly.Quota.LongWindow.Exhausted = true
+	monthly.TemporaryExhausted = true
+	monthly.TemporaryResetAt = now.Add(time.Hour)
+
+	status, available, reason, resetAt := accountQueueState(monthly, now)
+	if status != QueueStatusLongWindowExhausted || available || reason != "monthly_exhausted" || !resetAt.Equal(monthly.Quota.LongWindow.ResetAt) {
+		t.Fatalf("state = %q/%v/%q/%v", status, available, reason, resetAt)
+	}
+}
+
+func TestTemporaryFeedbackStillAppliesWhenLongWindowIsAvailable(t *testing.T) {
+	now := time.Date(2026, 7, 15, 9, 0, 0, 0, time.UTC)
+	weekly := weeklyAccount("weekly", 0, now.Add(6*time.Hour), false)
+	weekly.Quota.FiveHour = nil
+	weekly.TemporaryExhausted = true
+	weekly.TemporaryResetAt = now.Add(time.Hour)
+
+	status, available, reason, resetAt := accountQueueState(weekly, now)
+	if status != QueueStatusFiveHourExhausted || available || reason != "temporary_exhausted" || !resetAt.Equal(weekly.TemporaryResetAt) {
+		t.Fatalf("state = %q/%v/%q/%v", status, available, reason, resetAt)
+	}
+}
+
 func TestPickSkipsMonthlyWhenPresentFiveHourResetMissing(t *testing.T) {
 	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
 	used := 20.0

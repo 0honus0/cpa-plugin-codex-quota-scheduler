@@ -215,9 +215,6 @@ func accountQueueState(account AccountState, now time.Time) (QueueStatus, bool, 
 	if circuit.EffectiveState == CircuitStateClosed && circuit.FailureCount > 0 && !circuit.NextProbeAt.IsZero() && circuit.NextProbeAt.After(now) {
 		return QueueStatusUnavailable, false, "quota_probe_wait", circuit.NextProbeAt
 	}
-	if account.TemporaryExhausted && (account.TemporaryResetAt.IsZero() || account.TemporaryResetAt.After(now)) {
-		return QueueStatusFiveHourExhausted, false, "temporary_exhausted", account.TemporaryResetAt
-	}
 	switch account.Family {
 	case AccountFamilyWeekly:
 		if account.Quota.LongWindow == nil {
@@ -228,6 +225,9 @@ func accountQueueState(account AccountState, now time.Time) (QueueStatus, bool, 
 		}
 		if windowExhausted(account.Quota.LongWindow, now) {
 			return QueueStatusLongWindowExhausted, false, "weekly_exhausted", account.Quota.LongWindow.ResetAt
+		}
+		if account.TemporaryExhausted && (account.TemporaryResetAt.IsZero() || account.TemporaryResetAt.After(now)) {
+			return QueueStatusFiveHourExhausted, false, "temporary_exhausted", account.TemporaryResetAt
 		}
 		if account.Quota.FiveHour != nil {
 			if account.Quota.FiveHour.ResetAt.IsZero() {
@@ -248,6 +248,9 @@ func accountQueueState(account AccountState, now time.Time) (QueueStatus, bool, 
 		if windowExhausted(account.Quota.LongWindow, now) {
 			return QueueStatusLongWindowExhausted, false, "monthly_exhausted", account.Quota.LongWindow.ResetAt
 		}
+		if account.TemporaryExhausted && (account.TemporaryResetAt.IsZero() || account.TemporaryResetAt.After(now)) {
+			return QueueStatusFiveHourExhausted, false, "temporary_exhausted", account.TemporaryResetAt
+		}
 		if account.Quota.FiveHour != nil {
 			if account.Quota.FiveHour.ResetAt.IsZero() {
 				return QueueStatusUnavailable, false, "missing_five_hour_reset", time.Time{}
@@ -258,6 +261,9 @@ func accountQueueState(account AccountState, now time.Time) (QueueStatus, bool, 
 		}
 		return QueueStatusAvailable, true, "", account.Quota.LongWindow.ResetAt
 	default:
+		if account.TemporaryExhausted && (account.TemporaryResetAt.IsZero() || account.TemporaryResetAt.After(now)) {
+			return QueueStatusFiveHourExhausted, false, "temporary_exhausted", account.TemporaryResetAt
+		}
 		return QueueStatusUnavailable, false, "unknown_family", time.Time{}
 	}
 }

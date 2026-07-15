@@ -431,6 +431,23 @@ func TestStatusPayloadExplainsEmptyQueueBeforeFirstRequest(t *testing.T) {
 	}
 }
 
+func TestManagementReportsLongWindowExhaustionAheadOfTemporaryFeedback(t *testing.T) {
+	now := time.Date(2026, 7, 15, 9, 0, 0, 0, time.UTC)
+	used := 100.0
+	account := weeklyAccount("weekly", 0, now.Add(6*time.Hour), false)
+	account.Quota.FiveHour = nil
+	account.Quota.LongWindow.UsedPercent = &used
+	account.Quota.LongWindow.Exhausted = true
+	account.TemporaryExhausted = true
+	account.TemporaryResetAt = now.Add(time.Hour)
+	snapshot := StateSnapshot{Config: DefaultConfig(), Accounts: []AccountState{account}, Now: now}
+
+	payload := BuildStatusPayload(snapshot, BuildOrderedAccounts(requestWithCandidates("weekly"), snapshot, now))
+	if len(payload.Accounts) != 1 || payload.Accounts[0].UnavailableReason != "weekly_exhausted" {
+		t.Fatalf("accounts = %#v", payload.Accounts)
+	}
+}
+
 func TestStatusPayloadExplainsNoCodexAuthAfterAuthScan(t *testing.T) {
 	now := time.Date(2026, 6, 29, 9, 0, 0, 0, time.UTC)
 	store := NewPluginState(DefaultConfig())
