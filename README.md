@@ -1,89 +1,187 @@
 # Codex Quota Scheduler
 
-## v0.2.0 upgrade
+[简体中文](README.zh-CN.md) | English
 
-v0.2.0 automatically migrates the legacy state filename to `.user-data.json`
-and retains the original for one version cycle as `<legacy-name>.migrated`.
-Machine-owned runtime state is stored separately in `.runtime-state.json` in
-the same directory.
+`codex-quota-scheduler` is a dynamic library plugin for CLIProxyAPI (CPA). It
+provides a quota-aware, optimized Fill First scheduler for Codex accounts, so
+CPA selects accounts by real usability instead of relying on a static account
+order alone.
 
-`codex-quota-scheduler` is a CLIProxyAPI (CPA) dynamic library plugin that
-improves Codex account selection with an optimized Fill First scheduler.
+## v0.2.0 Highlights
 
-The plugin keeps CPA's own auth priority as the first ordering rule. Within the
-active CPA priority tier, it refreshes Codex quota status, tracks exhausted or
-temporarily unavailable accounts, and picks the next account by availability and
-reset or expiry time.
+- Availability now comes before plugin priority: an unusable high-priority
+  account can no longer outrank a usable account.
+- Unavailable accounts are displayed by expected recovery time, earliest first,
+  with unknown recovery times last.
+- The five-hour quota window is optional. Accounts remain schedulable when
+  OpenAI omits it, provided a valid weekly or monthly long window is present.
+- A missing or invalid long window remains Unknown and unavailable, allowing CPA
+  fallback instead of making an unsafe selection.
+- The active Codex account list is synchronized from CPA's authoritative auth
+  roster and restricted to the highest confirmed CPA auth-priority tier.
+- Reset-window activation uses a persisted, single-flight sequence that verifies
+  the result after one small Codex request. It remains opt-in.
+- The Management UI queue follows the same availability classes and ordering
+  rules as production selection.
 
-## v0.1.6 Priority Isolation
+## How Scheduling Works
 
-Version `0.1.6` loads only the maximum observed CPA priority tier from the
-candidates CPA provides. Set every Codex account managed by this plugin to the
-same CPA priority; `0` is recommended. Lower CPA priority tiers are not loaded,
-refreshed, displayed, or scheduled by the plugin.
+The scheduler applies four layers of decisions. Each layer narrows or orders the
+accounts passed to the next one.
 
-This is an operational requirement until CPA's built-in fallback can continue
-past an exhausted maximum auth-priority tier. Track the upstream behavior in
-[CLIProxyAPI issue #4196](https://github.com/router-for-me/CLIProxyAPI/issues/4196)
-and the plugin isolation work in
-[codex-quota-scheduler issue #2](https://github.com/JefferyZhang2019/cpa-plugin-codex-quota-scheduler/issues/2).
+### 1. Admit the active CPA priority tier
 
-Plugin priority is independent of CPA priority and defaults to `0`. Higher
-plugin-priority accounts are considered first, but the plugin falls through
-exhausted internal tiers to the first usable lower plugin-priority tier before
-using fallback. Plugin priority never reads from or writes to CPA.
+- Only candidates whose provider is `codex` are considered. Other providers are
+  ignored.
+- A Codex account without an explicit CPA auth priority is treated as priority `0`.
+- The plugin admits every Codex account in the highest confirmed CPA auth
+  priority tier. Lower CPA tiers remain under CPA's own fallback behavior and
+  are not loaded into the plugin queue.
+- If all Codex accounts should participate together, give them the same CPA auth
+  priority. Priority `0` is the simplest recommended configuration.
+
+CPA auth priority and the plugin-owned account priority are separate settings.
+The plugin never reads its account priority from CPA and never writes it back to
+CPA.
+
+### 2. Classify real availability
+
+Admitted accounts are divided into three practical groups:
+
+1. **Ready:** quota evidence is fresh or aging and the account is usable.
+2. **Trial eligible:** evidence is unknown or stale but the account can be
+   verified safely before use.
+3. **Unavailable:** the long quota window is exhausted, authentication is
+   blocked, the circuit is open, temporary exhaustion feedback is active, or
+   the account cannot be verified safely.
+
+Ready accounts are considered before trial-eligible accounts. Unavailable
+accounts are not selected by the plugin.
+
+A valid long window—weekly or monthly—is required. The five-hour window is optional:
+if OpenAI temporarily omits it, a valid long window is enough for the
+account to remain usable. If the long window is missing or invalid, the account
+stays Unknown and unavailable so CPA fallback can take over.
+
+When both long-window exhaustion and older temporary-exhaustion feedback are
+present, the weekly or monthly exhaustion is authoritative and is shown as the
+reason the account is unavailable.
+
+### 3. Order selectable accounts
+
+Plugin priority is applied only after availability classification, and only
+inside the same selectable class. A higher plugin priority is considered first,
+but it cannot move an unavailable account ahead of a usable one.
+
+Within the same plugin priority:
+
+1. If `monthly_mode` is `priority`, monthly accounts come before weekly
+   accounts.
+2. Otherwise, or within the same account family, the earlier account expiry is
+   preferred.
+3. Higher remaining quota wins the next tie.
+4. The stable account ID order breaks the final tie.
+
+With the default `monthly_mode: expiry_order`, weekly and monthly accounts share
+the same expiry-based Fill First ordering. The alternative `priority` mode
+explicitly prefers monthly accounts.
+
+### 4. Order unavailable accounts
+
+Plugin priority is ignored after an account becomes unavailable: priority
+cannot make an exhausted account usable.
+
+The Management queue orders unavailable accounts by expected recovery time from
+earliest to latest. Accounts with no known recovery time appear last. This makes
+the visible queue describe what can actually become usable next rather than
+preserving an irrelevant priority order.
+
+If neither the Ready nor trial-eligible group contains a safe choice, the plugin
+returns no selection and allows CPA fallback.
+
+### Example
+
+Given four admitted Codex accounts, the visible and effective order is:
+
+| Order | State | Plugin priority | Recovery | Why |
+| --- | --- | ---: | --- | --- |
+| 1 | Ready | 10 | — | Highest priority among Ready accounts |
+| 2 | Ready | 0 | — | Still usable, so it stays ahead of every unavailable account |
+| 3 | Weekly quota exhausted | 100 | 2 hours | Unavailable; high priority is ignored and this is the earliest recovery |
+| 4 | Exhausted or Unknown | 1000 | Later or unknown | Unavailable and expected to recover last |
+
+## Quota Refresh And Reset-Window Activation
+
+### Quota refresh
+
+Quota refresh reads the current Codex quota state from ChatGPT. It does not send
+an ordinary model request and does not need the Management page to remain open.
+
+During recent Codex activity, accounts are refreshed when their individual
+deadlines become due; the worker does not repeatedly scan every account at a
+fixed global interval. After the active window becomes idle, normal background
+refresh sleeps until a Codex request, a management action, or a due reset-window
+operation wakes it.
+
+A `usage_limit_reached` response immediately marks the selected account
+temporarily exhausted until its reported reset time, or for two minutes when no
+reset time is provided. Quota exhaustion does not count as a circuit-breaker
+failure. Repeated non-quota failures use the circuit breaker instead.
+
+### Reset-window activation
+
+OpenAI may report that a quota reset time has passed without creating the next
+quota window until the account sends another Codex request. When automatic
+reset-window activation is enabled, the plugin:
+
+1. checks the quota again;
+2. sends one tiny Codex request only if the new window is still missing;
+3. verifies the quota afterward; and
+4. persists the operation state so restart recovery verifies before retrying.
+
+This feature is disabled by default because the activation request may consume
+a small amount of quota. Concurrent triggers share one operation rather than
+sending duplicate requests.
+
+### When CPA cannot confirm the account list
+
+Normal refresh and reset-window activation stop when CPA cannot confirm the
+current Codex account list and priorities. The plugin can continue serving safe
+management information while it retries roster synchronization.
+
+The high-risk setting `probe_on_provisional_roster` permits reset-window
+activation using the most recently saved account list during that condition.
+Credentials are revalidated before each attempt, but the plugin still cannot
+guarantee that an account was not removed or moved to another CPA priority tier.
+Keep this setting disabled unless you understand and accept that risk.
 
 ## Features
 
-- Scheduler plugin for CPA Codex accounts.
-- Usage feedback handling for `usage_limit_reached` responses without counting
-  quota exhaustion as a circuit-breaker failure.
-- Five-hour, weekly, monthly, and reset-credit quota display when available.
-- Circuit breaker state for repeated account failures.
-- Bilingual Management UI: English and Chinese, with browser-language detection
-  and a manual language selector.
-- Account aliases, notes, tags, and groups stored in the plugin's local state.
+- Optimized Fill First scheduling for CPA Codex accounts.
+- Availability-first production selection and Management queue ordering.
+- Weekly and monthly quota support with an optional five-hour window.
+- Usage feedback handling for `usage_limit_reached` responses.
+- Per-account failure circuit breaker.
+- Deadline-driven quota refresh and opt-in reset-window activation.
+- English and Chinese Management UI with browser-language detection.
+- Account aliases, notes, tags, groups, and plugin priorities.
 - JSON export and import for scheduler settings and annotations.
-- Release packaging for Linux, macOS, Windows, and FreeBSD.
-
-## Privacy And Data Disclosure
-
-This plugin runs inside CPA and uses CPA-provided host callbacks plus
-plugin-owned CPA Management API routes. The browser resource page is only the UI
-surface. State-changing actions require the CPA Management key and are sent to
-`/v0/management/plugins/codex-quota-scheduler/...`. The page keeps that key only
-in the current browser page session and does not write it to plugin state,
-exports, logs, `localStorage`, or `sessionStorage`. The plugin does not run an
-external service and does not send data to the plugin author.
-
-The plugin may send authenticated requests to ChatGPT's quota and reset-credit
-endpoints:
-
-```text
-GET https://chatgpt.com/backend-api/wham/usage
-GET https://chatgpt.com/backend-api/wham/rate-limit-reset-credits
-```
-
-Those requests use the Codex credentials already configured in CPA. The plugin
-uses the responses to calculate account quota state, reset-credit availability,
-and scheduling order.
-
-The plugin stores local state in CPA's plugin state area. Stored data can
-include scheduler settings, recent quota snapshots, logs, aliases, notes, tags,
-and group names. Do not put secrets in account notes, group notes, aliases, or
-tags. The Management UI avoids rendering access tokens, authorization headers,
-cookies, and other credential fields.
+- Release packages for Linux, macOS, Windows, and FreeBSD.
 
 ## Installation
 
-Download the zip for your platform from the latest GitHub release:
+The recommended method is CPA's Plugin Store. Find **Codex Quota Scheduler**,
+review the third-party plugin warning, and install the latest stable release.
+
+For manual installation, download the archive for your platform from the
+[latest GitHub release](https://github.com/JefferyZhang2019/cpa-plugin-codex-quota-scheduler/releases/latest):
 
 ```text
 codex-quota-scheduler_<version>_<goos>_<goarch>.zip
 ```
 
-Extract the dynamic library and place it in CPA's plugin directory for your
-platform. The zip contains the library at the archive root:
+Extract the library from the archive root and place it in CPA's matching plugin
+directory:
 
 - macOS: `codex-quota-scheduler.dylib`
 - Linux and FreeBSD: `codex-quota-scheduler.so`
@@ -98,7 +196,7 @@ cp codex-quota-scheduler.dylib /path/to/CLIProxyAPI/plugins/darwin/arm64/
 
 ## CPA Configuration
 
-Enable global plugins and this plugin in CPA:
+Enable plugins globally and enable this plugin:
 
 ```yaml
 plugins:
@@ -109,16 +207,12 @@ plugins:
       priority: 1 # CPA plugin registration/load priority
 ```
 
-The `plugins.configs.codex-quota-scheduler.priority` value above is CPA's plugin
-registration/load priority. It is unrelated to the per-account, plugin-owned
-`scheduler_priority` edited in this plugin's Management UI, and it is also
-separate from CPA auth priority on managed Codex accounts.
+The registration/load `priority` above is not CPA account priority and is not
+the plugin-owned per-account scheduler priority. Account annotations and
+scheduler settings are managed from the plugin page rather than CPA's generic
+plugin form.
 
-The plugin does not declare Management Center form fields. Scheduler settings,
-aliases, notes, tags, and groups are edited from the plugin resource page and
-persisted to the plugin state file.
-
-The default scheduler settings are:
+Default scheduler settings:
 
 ```yaml
 handle_enabled: true
@@ -131,6 +225,8 @@ refresh_on_startup: false
 monthly_mode: expiry_order
 fallback: fill-first
 enable_usage_feedback: true
+enable_reset_probe: false
+probe_on_provisional_roster: false
 max_refresh_concurrency: 1
 quota_endpoint: https://chatgpt.com/backend-api/wham/usage
 circuit_failure_threshold: 5
@@ -142,83 +238,66 @@ log_retention: 24h
 
 `monthly_mode` accepts:
 
-- `expiry_order`: order monthly and weekly accounts by reset or expiry time
-  within the same CPA priority tier.
-- `priority`: prefer monthly accounts before weekly accounts within the same CPA
-  priority tier.
+- `expiry_order`: use expiry-based ordering across weekly and monthly accounts.
+- `priority`: prefer monthly accounts before weekly accounts within the same
+  selectable class and plugin priority.
 
-While the scheduler is inside `refresh_active_window`,
-`quota_refresh_interval` is the normal per-account refresh cadence. The worker
-refreshes only accounts that are due; it does not run a fixed full-account poll.
-`stale_after` remains the maximum cache-age safety threshold. A
-`usage_limit_reached` response immediately marks the selected account
-temporarily exhausted until its reported reset time (or for 2 minutes when no
-reset time is reported) and does not increment the circuit breaker. Reset
-timestamps already consumed by a successful refresh are one-shot triggers; a
-repeated upstream timestamp cannot create a two-second refresh loop.
+`quota_endpoint` is restricted to the expected ChatGPT quota endpoint and cannot
+be redirected to an arbitrary host.
 
 ## Management UI
 
-### Authoritative roster lifecycle
-
-Only the highest CPA priority tier reported by the host is active; accounts at
-lower CPA priorities are not loaded into scheduler or Management payloads.
-Using equal CPA priorities (preferably `0`) is recommended when all Codex
-accounts should participate.
-
-When the host cannot confirm priorities (Capability B), restart recovery keeps
-normal refresh Dormant and Probe windows in `WaitingRoster`. The
-`probe_on_provisional_roster` setting is an explicit risk option and defaults to
-`false`; provisional data never becomes authoritative merely because an account
-appears among scheduler candidates. A later successful authoritative roster
-sync automatically recovers Capability B to Capability A.
-
-Normal quota refresh makes no real requests while Dormant. Probe scheduling is
-independent and may pre-wake roster synchronization before a due window.
-
-Open the resource page from CPA's plugin resources, or visit:
+Open **Codex Scheduler** from CPA Management Center, or visit:
 
 ```text
 /v0/resource/plugins/codex-quota-scheduler/status
 ```
 
-The page follows the browser language by default and can be switched between
-English and Chinese manually. Settings, buttons, account cards, common status
-text, and new UI log messages follow the selected language.
-
-The resource page asks for the CPA Management key before it performs protected
-actions such as saving settings, importing state, editing annotations, viewing
-logs through the API, or requesting quota refresh. This follows CPA's security
-boundary: `/v0/resource/plugins/...` serves the browser resource page, while
-`/v0/management/...` handles authenticated management operations.
-
-The resource page under `/v0/resource/plugins/codex-quota-scheduler/status`
-serves UI content only. Settings, import/export, annotations, logs, and refresh
-actions use `/v0/management/plugins/codex-quota-scheduler/...` and require the
-CPA Management key. The quota endpoint is restricted to
-`https://chatgpt.com/backend-api/wham/usage`.
-
 The page provides:
 
-- Scheduler settings.
-- Sorted account queue.
-- Separate CPA priority and plugin priority badges.
-- Per-account plugin priority editing. Plugin priority defaults to `0`, is
-  independent of CPA, and falls through exhausted internal tiers.
-- Quota bars and reset times.
-- Circuit breaker state.
-- Account and group annotations.
-- Log viewing and export.
-- Configuration export and import.
+- the production-ordered account queue and next-account preview;
+- separate CPA priority and plugin priority indicators;
+- quota bars, reset times, availability reasons, and circuit state;
+- scheduler settings with plain-language safety guidance;
+- aliases, notes, tags, groups, and per-account plugin priority editing;
+- quota refresh, log viewing/export, and configuration import/export; and
 - English and Chinese interface switching.
+
+Protected data and actions require the CPA Management key. The key remains only
+in the current browser page session and is not saved to plugin state,
+`localStorage`, `sessionStorage`, exports, or logs.
+
+## Privacy And Data Disclosure
+
+The plugin runs inside CPA. It uses CPA host callbacks and plugin-owned CPA
+Management API routes; it does not run an external service and does not send
+data to the plugin author.
+
+It may send authenticated requests using the Codex credentials already
+configured in CPA to:
+
+```text
+GET https://chatgpt.com/backend-api/wham/usage
+GET https://chatgpt.com/backend-api/wham/rate-limit-reset-credits
+```
+
+When reset-window activation is enabled, the plugin may also send the small
+Codex activation request described above.
+
+Local plugin state can contain scheduler settings, quota snapshots, operation
+state, logs, aliases, notes, tags, and group names. Do not put secrets in notes,
+aliases, tags, or group annotations. The Management UI avoids rendering access
+tokens, authorization headers, cookies, and other credential fields.
+
+Resource routes serve UI assets only. Account data and privileged operations use
+Management routes and require the CPA Management key.
 
 ## Build
 
 Requirements:
 
 - Go 1.26 or newer, as declared by `go.mod`.
-- CGO support.
-- A C compiler for `-buildmode=c-shared`.
+- CGO support and a C compiler for `-buildmode=c-shared`.
 - `make` for the cross-platform release workflow.
 
 Run tests:
@@ -227,94 +306,51 @@ Run tests:
 make test
 ```
 
-Build the dynamic library for the current platform:
+Build the current platform library:
 
 ```bash
 make build
 ```
 
-Build and package the release zip:
+Build release archives and checksums:
 
 ```bash
 make package VERSION=0.2.0
-```
-
-Generate an aggregate checksum file for local release assets:
-
-```bash
 make checksums VERSION=0.2.0
 ```
 
-Windows users can also use the PowerShell helper:
+Windows users can build `dist/codex-quota-scheduler.dll` with:
 
 ```powershell
 .\build.ps1
 ```
 
-The PowerShell script builds `dist/codex-quota-scheduler.dll` and requires a C
-compiler such as MinGW-w64 on `PATH`.
-
 ## GitHub Releases
 
-Version `0.2.0` completes the spec-driven scheduler refactor, including
-authoritative roster lifecycle handling, persisted single-lease reset probes,
-Codex quota-window compatibility, availability-ordered management queues, and
-bilingual settings guidance. Historical version `0.1.6` isolates CPA priority
-admission to the maximum observed tier, adds plugin-owned per-account priority
-with internal exhausted-tier fallthrough, and consumes successful reset-trigger
-refreshes once. Version `0.1.5` restored interval-based per-account refreshes
-inside the active window and kept quota-exhaustion feedback separate from
-circuit-breaker failures. Version `0.1.4` keeps account cards, logs, refresh actions, scheduler
-status, and reset-probe notices behind the CPA Management key. Version `0.1.3`
-adds the opt-in automatic reset probe for lazy Codex quota windows. Version
-`0.1.2` adds adaptive refresh scheduling and a dynamically updating bilingual
-UI. Version `0.1.1` moves all state-changing and privileged operations behind
-CPA Management API routes and restricts `quota_endpoint` to the expected
-ChatGPT quota endpoint. Version `0.1.0` was the first public release version for
-this repository. GitHub Actions builds release assets when a tag matching `v*`
-is pushed. Use a dotted numeric version tag such as:
+Pushing a dotted numeric tag such as `v0.2.0` runs the GitHub Actions release
+workflow. It tests the repository and publishes platform archives plus
+`checksums.txt`:
 
 ```bash
 git tag -a v0.2.0 -m "v0.2.0"
 git push origin v0.2.0
 ```
 
-The `Build` workflow runs tests and creates the release automatically. Release
-assets are named:
+Release archives use this naming scheme:
 
 ```text
 codex-quota-scheduler_<version>_<goos>_<goarch>.zip
-checksums.txt
-```
-
-For `v0.2.0`, the expected platform assets are:
-
-- `codex-quota-scheduler_0.2.0_darwin_amd64.zip`
-- `codex-quota-scheduler_0.2.0_darwin_arm64.zip`
-- `codex-quota-scheduler_0.2.0_freebsd_amd64.zip`
-- `codex-quota-scheduler_0.2.0_linux_amd64.zip`
-- `codex-quota-scheduler_0.2.0_linux_arm64.zip`
-- `codex-quota-scheduler_0.2.0_windows_amd64.zip`
-- `codex-quota-scheduler_0.2.0_windows_arm64.zip`
-- `checksums.txt`
-
-`checksums.txt` uses sha256sum format:
-
-```text
-<sha256>  codex-quota-scheduler_0.2.0_darwin_arm64.zip
 ```
 
 ## Management API
 
-The plugin resource page is served from:
+The UI resource is served from:
 
 ```text
 GET /v0/resource/plugins/codex-quota-scheduler/status
 ```
 
-That resource route must not be used as a write-action API. All state-changing
-or privileged operations are exposed through CPA Management API routes and
-require the Management key:
+Privileged operations require the CPA Management key:
 
 ```text
 GET  /v0/management/plugins/codex-quota-scheduler/status?format=json
@@ -327,12 +363,6 @@ POST /v0/management/plugins/codex-quota-scheduler/import
 PUT  /v0/management/plugins/codex-quota-scheduler/annotations
 PATCH /v0/management/plugins/codex-quota-scheduler/annotations/account
 PATCH /v0/management/plugins/codex-quota-scheduler/annotations/group
-```
-
-For quota refresh safety, `quota_endpoint` is restricted to:
-
-```text
-https://chatgpt.com/backend-api/wham/usage
 ```
 
 ## License
