@@ -315,7 +315,10 @@ UsageOnlyBaseline { usage, next_recheck_at }
 P2a 只接受显式零 usage、已知窗口长度和 3 分钟锚点容差。5 小时窗口在
 `limit_window_seconds` 缺失时按 5h，周窗口按 7d；月窗口必须提供正数
 `limit_window_seconds`。usage 缺失/非零、窗口长度未知或锚点超出容差时不得标记
-`suspected_lazy`。该标记随 ResetBaseline 持久化，重启恢复不得丢失。
+`suspected_lazy`。`observation_time` 必须取产生该 quota snapshot 的可靠写回时间，
+不得用可能延迟数分钟的 bootstrap 执行时间替代。该标记随 ResetBaseline 持久化，
+重启恢复不得丢失；若因 roster 不权威进入 WaitingRoster，权威 roster 恢复后必须
+直接回到 PendingCheck，不得重新等待整个窗口周期。
 
 **UsageOnlyBaseline 专用表**（不得进入需要 prev_reset_at 的主表）：
 
@@ -333,7 +336,9 @@ P2a 只接受显式零 usage、已知窗口长度和 3 分钟锚点容差。5 �
 skew_tol → ActivatedNew；usage 变为非零 → ActivatedInferred；reset 仍约等于 baseline
 且 usage 仍为零 → StillLazy，进入单 lease 激活序列。ActivatedNew/
 ActivatedInferred 必须清除 `suspected_lazy`；无效或矛盾证据仍进入既有
-RetryWait/Anomaly 路径。
+RetryWait/Anomaly 路径。QuotaSnapshot 必须保留上游 usage 缺失为 nil，禁止把缺失值
+归一化成 0；否则预检查会把无效证据误判为 StillLazy 并外发激活请求。reset 倒退或
+超过既有 2 × window_len / 120 天上限的异常检查必须先于激活确认。
 
 | # | 条件 | 判定 |
 |---|---|---|
