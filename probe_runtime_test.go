@@ -255,6 +255,86 @@ func TestProbeBootstrapRecreatesReappearedFiveHour(t *testing.T) {
 	}
 }
 
+func TestProbeBootstrapSchedulesFirstObservationLazyWindowsImmediately(t *testing.T) {
+	now := time.Date(2026, 7, 18, 22, 59, 55, 0, time.UTC)
+	fiveSeconds := int64(5 * time.Hour / time.Second)
+	weekSeconds := int64(7 * 24 * time.Hour / time.Second)
+	monthSeconds := int64(30 * 24 * time.Hour / time.Second)
+	zero := 0.0
+
+	tests := []struct {
+		name   string
+		kind   ProbeWindowKind
+		family AccountFamily
+		window QuotaWindow
+	}{
+		{"five-hour", ProbeWindowFiveHour, AccountFamilyWeekly, QuotaWindow{Kind: WindowFiveHour, UsedPercent: &zero, LimitWindowSeconds: &fiveSeconds, ResetAt: now.Add(5 * time.Hour)}},
+		{"weekly", ProbeWindowLong, AccountFamilyWeekly, QuotaWindow{Kind: WindowWeekly, UsedPercent: &zero, LimitWindowSeconds: &weekSeconds, ResetAt: now.Add(7 * 24 * time.Hour)}},
+		{"monthly", ProbeWindowLong, AccountFamilyMonthly, QuotaWindow{Kind: WindowMonthly, UsedPercent: &zero, LimitWindowSeconds: &monthSeconds, ResetAt: now.Add(30 * 24 * time.Hour)}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newDueProbeRuntime(t, now, newProbeFixtureHost())
+			binding, ok := r.bindings.Lookup("a")
+			if !ok {
+				t.Fatal("binding missing")
+			}
+			r.probeController.RemoveWindow(binding.Instance, tt.kind)
+			quota := ParsedQuota{Family: tt.family, LongWindow: &tt.window}
+			if tt.kind == ProbeWindowFiveHour {
+				quota.FiveHour = &tt.window
+				quota.LongWindow = &QuotaWindow{Kind: WindowWeekly, ResetAt: now.Add(24 * time.Hour)}
+			}
+			r.state.UpsertQuota(AccountState{AuthID: "a", AuthIndex: "idx", Provider: "codex", Family: quota.Family, LastSuccessAt: now, Quota: quota})
+
+			if err := r.bootstrapProbeWindows(); err != nil {
+				t.Fatal(err)
+			}
+			window, ok := r.probeController.Window(binding.Instance, tt.kind)
+			if !ok || window.State != ProbePendingCheck || !window.Baseline.SuspectedLazy || window.Baseline.WindowLength <= 0 {
+				t.Fatalf("window = %#v, ok=%v", window, ok)
+			}
+		})
+	}
+}
+
+func TestProbeBootstrapRejectsFirstObservationLazyFalsePositives(t *testing.T) {
+	now := time.Date(2026, 7, 18, 22, 59, 55, 0, time.UTC)
+	zero, used := 0.0, 1.0
+	weekSeconds := int64(7 * 24 * time.Hour / time.Second)
+
+	tests := []struct {
+		name   string
+		family AccountFamily
+		window QuotaWindow
+	}{
+		{"non-zero-usage", AccountFamilyWeekly, QuotaWindow{Kind: WindowWeekly, UsedPercent: &used, LimitWindowSeconds: &weekSeconds, ResetAt: now.Add(7 * 24 * time.Hour)}},
+		{"missing-usage", AccountFamilyWeekly, QuotaWindow{Kind: WindowWeekly, LimitWindowSeconds: &weekSeconds, ResetAt: now.Add(7 * 24 * time.Hour)}},
+		{"monthly-duration-unknown", AccountFamilyMonthly, QuotaWindow{Kind: WindowMonthly, UsedPercent: &zero, ResetAt: now.Add(30 * 24 * time.Hour)}},
+		{"anchor-outside-tolerance", AccountFamilyWeekly, QuotaWindow{Kind: WindowWeekly, UsedPercent: &zero, LimitWindowSeconds: &weekSeconds, ResetAt: now.Add(7*24*time.Hour + 10*time.Minute)}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newDueProbeRuntime(t, now, newProbeFixtureHost())
+			binding, ok := r.bindings.Lookup("a")
+			if !ok {
+				t.Fatal("binding missing")
+			}
+			r.probeController.RemoveWindow(binding.Instance, ProbeWindowLong)
+			r.state.UpsertQuota(AccountState{AuthID: "a", AuthIndex: "idx", Provider: "codex", Family: tt.family, LastSuccessAt: now, Quota: ParsedQuota{Family: tt.family, LongWindow: &tt.window}})
+			if err := r.bootstrapProbeWindows(); err != nil {
+				t.Fatal(err)
+			}
+			window, ok := r.probeController.Window(binding.Instance, ProbeWindowLong)
+			if !ok || window.State != ProbeWaitingReset || window.Baseline.SuspectedLazy {
+				t.Fatalf("window = %#v, ok=%v", window, ok)
+			}
+		})
+	}
+}
+
 func TestSuccessfulQuotaRefreshRemovesAbsentFiveHourProbeState(t *testing.T) {
 	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
 	host := newProbeFixtureHost()

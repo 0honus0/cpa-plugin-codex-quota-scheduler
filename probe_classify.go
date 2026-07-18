@@ -25,6 +25,7 @@ type ProbeBaseline struct {
 	WindowLength    time.Duration     `json:"window_length,omitempty"`
 	CandidateLength time.Duration     `json:"candidate_length,omitempty"`
 	StableIntervals int               `json:"stable_intervals,omitempty"`
+	SuspectedLazy   bool              `json:"suspected_lazy,omitempty"`
 }
 
 func ResetProbeBaseline(reset time.Time, usage float64, length time.Duration) ProbeBaseline {

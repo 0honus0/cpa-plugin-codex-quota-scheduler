@@ -65,12 +65,20 @@ func (r *QuotaRefresher) bootstrapProbeWindows() error {
 			if pair.w.UsedPercent != nil {
 				usage = *pair.w.UsedPercent
 			}
+			duration, durationKnown := probeWindowDuration(*pair.w)
 			base := ResetProbeBaseline(pair.w.ResetAt, usage, 0)
+			if durationKnown {
+				base.WindowLength = duration
+			}
 			state := ProbeWaitingReset
 			deadline := pair.w.ResetAt.Add(probeRefreshAfterResetDelay)
-			if !deadline.After(now) {
+			if _, lazy := firstObservationLazyWindow(now, *pair.w); lazy {
+				base.SuspectedLazy = true
 				state = ProbePendingCheck
-				deadline = now
+				deadline = time.Time{}
+			} else if !deadline.After(now) {
+				state = ProbePendingCheck
+				deadline = time.Time{}
 			}
 			if r.runtimeRoster().Capability != CapabilityA {
 				state = ProbeWaitingRoster

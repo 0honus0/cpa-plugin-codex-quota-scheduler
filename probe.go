@@ -27,6 +27,17 @@ func probeWindowDuration(window QuotaWindow) (time.Duration, bool) {
 	}
 }
 
+func firstObservationLazyWindow(now time.Time, window QuotaWindow) (time.Duration, bool) {
+	if window.UsedPercent == nil || *window.UsedPercent != 0 || window.ResetAt.IsZero() {
+		return 0, false
+	}
+	duration, ok := probeWindowDuration(window)
+	if !ok || duration <= 0 {
+		return 0, false
+	}
+	return duration, absDuration(window.ResetAt.Sub(now.Add(duration))) <= resetProbeCloseThreshold
+}
+
 func scheduleResetProbesFromPrevious(previous AccountState, current map[WindowKind]ResetProbeState, now time.Time) map[WindowKind]ResetProbeState {
 	next := cloneResetProbes(current)
 	for _, window := range resetProbeCandidateWindows(previous.Quota) {
