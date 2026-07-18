@@ -44,6 +44,36 @@ func TestUsageOnlyNeverEntersResetRules(t *testing.T) {
 	}
 }
 
+func TestClassifySuspectedFirstObservationLazyWindow(t *testing.T) {
+	now := time.Date(2026, 7, 18, 23, 0, 0, 0, time.UTC)
+	reset := now.Add(7 * 24 * time.Hour)
+	zero := 0.0
+	used := 1.0
+	base := ResetProbeBaseline(reset, 0, 7*24*time.Hour)
+	base.SuspectedLazy = true
+
+	tests := []struct {
+		name string
+		snap QuotaSnapshot
+		want ProbeClassificationKind
+	}{
+		{"unchanged-zero-is-lazy", QuotaSnapshot{Valid: true, ResetAt: &reset, Usage: &zero}, ProbeStillLazy},
+		{"usage-proves-active", QuotaSnapshot{Valid: true, ResetAt: &reset, Usage: &used}, ProbeActivatedInferred},
+		{"moved-reset-proves-active", QuotaSnapshot{Valid: true, ResetAt: ptrTime(reset.Add(time.Hour)), Usage: &zero}, ProbeActivatedNew},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ClassifyProbeWindow(base, tt.snap, now)
+			if got.Kind != tt.want {
+				t.Fatalf("kind = %s, want %s", got.Kind, tt.want)
+			}
+			if got.Kind != ProbeStillLazy && got.Baseline.SuspectedLazy {
+				t.Fatal("confirmed baseline retained suspected-lazy marker")
+			}
+		})
+	}
+}
+
 func ptrTime(v time.Time) *time.Time { return &v }
 func ptrFloat(v float64) *float64    { return &v }
 

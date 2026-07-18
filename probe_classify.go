@@ -62,6 +62,22 @@ func ClassifyProbeWindow(base ProbeBaseline, snap QuotaSnapshot, now time.Time) 
 	if !snap.Valid || snap.Usage == nil {
 		return ProbeClassification{Kind: ProbeInvalid, Baseline: base}
 	}
+	if base.SuspectedLazy {
+		if snap.ResetAt != nil && snap.ResetAt.After(base.ResetAt.Add(probeSkewTolerance)) {
+			base.ResetAt = *snap.ResetAt
+			base.Usage = *snap.Usage
+			base.SuspectedLazy = false
+			return ProbeClassification{Kind: ProbeActivatedNew, Baseline: base}
+		}
+		if *snap.Usage > 0 {
+			base.Usage = *snap.Usage
+			base.SuspectedLazy = false
+			return ProbeClassification{Kind: ProbeActivatedInferred, Baseline: base}
+		}
+		if snap.ResetAt != nil && absDuration(snap.ResetAt.Sub(base.ResetAt)) <= probeSkewTolerance {
+			return ProbeClassification{Kind: ProbeStillLazy, Baseline: base}
+		}
+	}
 	if base.Kind == ProbeBaselineNone {
 		if snap.ResetAt == nil {
 			return ProbeClassification{Kind: ProbeNotDueYet, Baseline: UsageOnlyProbeBaseline(*snap.Usage, now.Add(probeUnknownResetRecheck))}
@@ -83,6 +99,7 @@ func ClassifyProbeWindow(base ProbeBaseline, snap QuotaSnapshot, now time.Time) 
 		if usageActivated(base.Usage, *snap.Usage) {
 			base.Usage = *snap.Usage
 			base.NextRecheckAt = now.Add(probeUnknownResetRecheck)
+			base.SuspectedLazy = false
 			return ProbeClassification{Kind: ProbeActivatedInferred, Baseline: base}
 		}
 		if now.Before(base.NextRecheckAt) {
@@ -106,6 +123,7 @@ func ClassifyProbeWindow(base ProbeBaseline, snap QuotaSnapshot, now time.Time) 
 			n := base
 			n.ResetAt = *snap.ResetAt
 			n.Usage = *snap.Usage
+			n.SuspectedLazy = false
 			if n.WindowLength == 0 {
 				if n.CandidateLength > 0 && absDuration(n.CandidateLength-delta) <= probeSkewTolerance {
 					n.StableIntervals++
@@ -126,6 +144,7 @@ func ClassifyProbeWindow(base ProbeBaseline, snap QuotaSnapshot, now time.Time) 
 	if snap.ResetAt == nil {
 		if usageActivated(base.Usage, *snap.Usage) {
 			base.Usage = *snap.Usage
+			base.SuspectedLazy = false
 			return ProbeClassification{Kind: ProbeActivatedInferred, Baseline: base}
 		}
 		if *snap.Usage == base.Usage {
