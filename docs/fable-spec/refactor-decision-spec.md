@@ -297,7 +297,7 @@ Confirmed --可推导下一 reset--> WaitingReset
 ### 7.3 Baseline（tagged union）与 WaitingRoster 恢复映射
 
 ```text
-ResetBaseline     { reset_at, usage }
+ResetBaseline     { reset_at, usage, window_len, suspected_lazy }
 UsageOnlyBaseline { usage, next_recheck_at }
 ```
 
@@ -306,10 +306,16 @@ UsageOnlyBaseline { usage, next_recheck_at }
 | 条件 | 处置 |
 |---|---|
 | snapshot 无效 / 字段类型错误 | **P1** → RetryWait |
-| 无 baseline，reset_at 存在且 > now | **P2** 建 ResetBaseline → WaitingReset |
+| 无 baseline，`usage == 0`、window_len 已知，且 `abs(reset_at − (observation_time + window_len)) ≤ 3m` | **P2a** 建 `suspected_lazy=true` 的 ResetBaseline → 立即 PendingCheck |
+| 无 baseline，reset_at 存在且 > now，但不满足 P2a | **P2** 建 ResetBaseline → WaitingReset |
 | 无 baseline，reset_at 存在且 ≤ now | **P3** 建 ResetBaseline → PendingCheck（经 delay 延迟检查；首装即 lazy 不被推迟整周期） |
 | 无 baseline，reset_at 缺失 | **P4** 建 UsageOnlyBaseline（next_recheck = 30m）→ WaitingReset |
 | 已有 baseline（含 WaitingRoster 恢复） | **P5** 恢复既有 baseline，按其类型进入对应表，不作首次 |
+
+P2a 只接受显式零 usage、已知窗口长度和 3 分钟锚点容差。5 小时窗口在
+`limit_window_seconds` 缺失时按 5h，周窗口按 7d；月窗口必须提供正数
+`limit_window_seconds`。usage 缺失/非零、窗口长度未知或锚点超出容差时不得标记
+`suspected_lazy`。该标记随 ResetBaseline 持久化，重启恢复不得丢失。
 
 **UsageOnlyBaseline 专用表**（不得进入需要 prev_reset_at 的主表）：
 
@@ -322,6 +328,12 @@ UsageOnlyBaseline { usage, next_recheck_at }
 | reset 仍缺失，usage 不变 | 按 next_recheck_at 继续复查 |
 
 **主判定表（仅 ResetBaseline；按序首个命中）**：
+
+`suspected_lazy=true` 的首次预检查先于下表普通 NotDueYet 规则：reset 锚点移动超过
+skew_tol → ActivatedNew；usage 变为非零 → ActivatedInferred；reset 仍约等于 baseline
+且 usage 仍为零 → StillLazy，进入单 lease 激活序列。ActivatedNew/
+ActivatedInferred 必须清除 `suspected_lazy`；无效或矛盾证据仍进入既有
+RetryWait/Anomaly 路径。
 
 | # | 条件 | 判定 |
 |---|---|---|
