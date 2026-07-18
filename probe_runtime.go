@@ -47,6 +47,10 @@ func (r *QuotaRefresher) bootstrapProbeWindows() error {
 	}
 	now := r.now()
 	for _, a := range r.state.Snapshot(now).Accounts {
+		observedAt := a.LastSuccessAt
+		if observedAt.IsZero() || observedAt.After(now) {
+			observedAt = now
+		}
 		b, ok := r.bindings.Lookup(a.AuthID)
 		if !ok {
 			continue
@@ -72,7 +76,7 @@ func (r *QuotaRefresher) bootstrapProbeWindows() error {
 			}
 			state := ProbeWaitingReset
 			deadline := pair.w.ResetAt.Add(probeRefreshAfterResetDelay)
-			if _, lazy := firstObservationLazyWindow(now, *pair.w); lazy {
+			if _, lazy := firstObservationLazyWindow(observedAt, *pair.w); lazy {
 				base.SuspectedLazy = true
 				state = ProbePendingCheck
 				deadline = time.Time{}
@@ -763,12 +767,13 @@ func probeSnapshots(q ParsedQuota) map[ProbeWindowKind]QuotaSnapshot {
 		if p.w == nil {
 			continue
 		}
-		usage := 0.0
+		var usage *float64
 		if p.w.UsedPercent != nil {
-			usage = *p.w.UsedPercent
+			value := *p.w.UsedPercent
+			usage = &value
 		}
 		reset := p.w.ResetAt
-		out[p.k] = QuotaSnapshot{Valid: true, ResetAt: &reset, Usage: &usage}
+		out[p.k] = QuotaSnapshot{Valid: true, ResetAt: &reset, Usage: usage}
 	}
 	return out
 }

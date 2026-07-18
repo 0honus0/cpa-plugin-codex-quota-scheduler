@@ -46,6 +46,21 @@ func TestProbeControllerDormantDeadlineStillEmitsProbe(t *testing.T) {
 	}
 }
 
+func TestProbeRosterConfirmedRestoresSuspectedLazyToPendingCheck(t *testing.T) {
+	now := time.Date(2026, 7, 19, 0, 0, 0, 0, time.UTC)
+	base := ResetProbeBaseline(now.Add(7*24*time.Hour), 0, 7*24*time.Hour)
+	base.SuspectedLazy = true
+	c := NewProbeController(now)
+	c.SetWindow(3, ProbeWindowLong, ProbeWindow{State: ProbeWaitingRoster, Baseline: base})
+
+	c.Advance(3, ProbeEvent{Kind: ProbeEventRosterConfirmed, Window: ProbeWindowLong, Now: now})
+
+	window, ok := c.Window(3, ProbeWindowLong)
+	if !ok || window.State != ProbePendingCheck || !window.Deadline.IsZero() {
+		t.Fatalf("window = %#v, ok=%v; want PendingCheck with no deadline", window, ok)
+	}
+}
+
 func TestMockGroupC(t *testing.T) {
 	t.Run("classifier", TestProbeClassifierOrderedRules)
 	t.Run("dual", TestProbeControllerDualWindowIndependent)

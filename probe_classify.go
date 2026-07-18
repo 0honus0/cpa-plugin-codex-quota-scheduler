@@ -63,6 +63,18 @@ func ClassifyProbeWindow(base ProbeBaseline, snap QuotaSnapshot, now time.Time) 
 		return ProbeClassification{Kind: ProbeInvalid, Baseline: base}
 	}
 	if base.SuspectedLazy {
+		if snap.ResetAt != nil && snap.ResetAt.Before(base.ResetAt.Add(-probeSkewTolerance)) {
+			return ProbeClassification{Kind: ProbeAnomaly, Baseline: base}
+		}
+		if snap.ResetAt != nil {
+			delta := snap.ResetAt.Sub(base.ResetAt)
+			if base.WindowLength > 0 && delta > 2*base.WindowLength {
+				return ProbeClassification{Kind: ProbeAnomaly, Baseline: base}
+			}
+			if base.WindowLength == 0 && delta > probeMaxPlausibleWindow {
+				return ProbeClassification{Kind: ProbeAnomaly, Baseline: base}
+			}
+		}
 		if snap.ResetAt != nil && snap.ResetAt.After(base.ResetAt.Add(probeSkewTolerance)) {
 			base.ResetAt = *snap.ResetAt
 			base.Usage = *snap.Usage

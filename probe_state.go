@@ -202,8 +202,13 @@ func (c *ProbeController) Advance(i AuthInstanceID, e ProbeEvent) []Intent {
 			}
 		case ProbeEventRosterConfirmed:
 			if w.State == ProbeWaitingRoster {
-				w.State = ProbeWaitingReset
-				w.Deadline = deadlineFor(w.Baseline, e.Now)
+				if w.Baseline.SuspectedLazy {
+					w.State = ProbePendingCheck
+					w.Deadline = time.Time{}
+				} else {
+					w.State = ProbeWaitingReset
+					w.Deadline = deadlineFor(w.Baseline, e.Now)
+				}
 				ws[k] = w
 			}
 		}

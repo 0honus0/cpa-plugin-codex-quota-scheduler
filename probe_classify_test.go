@@ -60,6 +60,8 @@ func TestClassifySuspectedFirstObservationLazyWindow(t *testing.T) {
 		{"unchanged-zero-is-lazy", QuotaSnapshot{Valid: true, ResetAt: &reset, Usage: &zero}, ProbeStillLazy},
 		{"usage-proves-active", QuotaSnapshot{Valid: true, ResetAt: &reset, Usage: &used}, ProbeActivatedInferred},
 		{"moved-reset-proves-active", QuotaSnapshot{Valid: true, ResetAt: ptrTime(reset.Add(time.Hour)), Usage: &zero}, ProbeActivatedNew},
+		{"backwards-reset-remains-anomaly", QuotaSnapshot{Valid: true, ResetAt: ptrTime(reset.Add(-3 * time.Minute)), Usage: &used}, ProbeAnomaly},
+		{"oversized-forward-reset-remains-anomaly", QuotaSnapshot{Valid: true, ResetAt: ptrTime(reset.Add(15 * 24 * time.Hour)), Usage: &zero}, ProbeAnomaly},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -67,7 +69,7 @@ func TestClassifySuspectedFirstObservationLazyWindow(t *testing.T) {
 			if got.Kind != tt.want {
 				t.Fatalf("kind = %s, want %s", got.Kind, tt.want)
 			}
-			if got.Kind != ProbeStillLazy && got.Baseline.SuspectedLazy {
+			if (got.Kind == ProbeActivatedNew || got.Kind == ProbeActivatedInferred) && got.Baseline.SuspectedLazy {
 				t.Fatal("confirmed baseline retained suspected-lazy marker")
 			}
 		})
