@@ -238,6 +238,8 @@ type QuotaRefresher struct {
 	probeWAL             *ProbeWAL
 	probeFence           *FenceAllocator
 	probeRunMu           sync.Mutex
+	probeRunStateMu      sync.Mutex
+	probeRerunPending    bool
 	probeHoldMu          sync.Mutex
 	probeHoldPending     bool
 	probeHoldErr         error

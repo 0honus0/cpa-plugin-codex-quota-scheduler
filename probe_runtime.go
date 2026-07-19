@@ -178,7 +178,11 @@ func (r *QuotaRefresher) persistTerminalProbeCompletion(instance AuthInstanceID,
 		if !ok || attempt.AttemptID != attemptID {
 			return fmt.Errorf("probe completion attempt changed for instance %d", instance)
 		}
-		persisted.ProbeWindows = windows
+		if instanceWindows, ok := windows[instance]; ok {
+			persisted.ProbeWindows[instance] = instanceWindows
+		} else {
+			delete(persisted.ProbeWindows, instance)
+		}
 		delete(persisted.ProbeAttempts, instance)
 		return nil
 	})
@@ -308,10 +312,33 @@ func activeProbeBindings(roster HostRosterSnapshot, bindings map[string]RuntimeB
 }
 
 func (r *QuotaRefresher) RunProbeDueOnce(ctx context.Context) error {
+	r.probeRunStateMu.Lock()
 	if !r.probeRunMu.TryLock() {
+		r.probeRerunPending = true
+		r.probeRunStateMu.Unlock()
 		return nil
 	}
-	defer r.probeRunMu.Unlock()
+	r.probeRerunPending = false
+	r.probeRunStateMu.Unlock()
+	var firstErr error
+	for {
+		err := r.runProbeDuePass(ctx)
+		if firstErr == nil {
+			firstErr = err
+		}
+		r.probeRunStateMu.Lock()
+		if r.probeRerunPending {
+			r.probeRerunPending = false
+			r.probeRunStateMu.Unlock()
+			continue
+		}
+		r.probeRunMu.Unlock()
+		r.probeRunStateMu.Unlock()
+		return firstErr
+	}
+}
+
+func (r *QuotaRefresher) runProbeDuePass(ctx context.Context) error {
 	if err := r.retryProbeRosterHold(); err != nil {
 		return err
 	}

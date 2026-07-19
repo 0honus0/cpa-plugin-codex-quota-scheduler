@@ -22,6 +22,8 @@ import (
 type sequenceProbeHost struct {
 	mu            sync.Mutex
 	auth          pluginapi.HostAuthGetResponse
+	authByIndex   map[string]pluginapi.HostAuthGetResponse
+	authFiles     []pluginapi.HostAuthFileEntry
 	authReads     []pluginapi.HostAuthGetResponse
 	quota         [][]byte
 	urls          []string
@@ -76,12 +78,18 @@ func TestProbeAuthBlockedResumesOnlyAfterExternalLoginEpoch(t *testing.T) {
 }
 
 func (h *sequenceProbeHost) ListAuths() ([]pluginapi.HostAuthFileEntry, error) {
+	if len(h.authFiles) > 0 {
+		return append([]pluginapi.HostAuthFileEntry(nil), h.authFiles...), nil
+	}
 	return []pluginapi.HostAuthFileEntry{{ID: "a", AuthIndex: "idx", Provider: "codex", Priority: 9}}, nil
 }
 func (h *sequenceProbeHost) GetAuth(authIndex string) (pluginapi.HostAuthGetResponse, error) {
 	h.mu.Lock()
 	h.gets++
 	auth, started, release := h.auth, h.getStarted, h.releaseGet
+	if indexed, ok := h.authByIndex[authIndex]; ok {
+		auth = indexed
+	}
 	if h.gateAuthIndex != "" && h.gateAuthIndex != authIndex {
 		started, release = nil, nil
 	}
@@ -753,6 +761,165 @@ func TestProbeTerminalCompletionFailureRestartsVerifyFirst(t *testing.T) {
 	}
 	if window := completed.ProbeWindows[binding.Instance][ProbeWindowLong]; window.State != ProbeConfirmed {
 		t.Fatalf("recovery window = %#v, want Confirmed", window)
+	}
+}
+
+func TestProbeTerminalCompletionMergesOnlyCompletingInstance(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := NewStateStore(path, OSFileHooks(), nil)
+	attempt := ProbeAttempt{Instance: 1, AttemptID: "a-terminal", Windows: []ProbeWindowKind{ProbeWindowFiveHour}, Phase: ProbeAttemptSent, SendFenceSeq: 7, VerifyNotBefore: now}
+	bPending := ProbeWindow{State: ProbePendingCheck, Baseline: ResetProbeBaseline(now.Add(7*24*time.Hour), 0, 7*24*time.Hour)}
+	if _, err := store.Update(func(state *PersistentState) error {
+		state.ProbeAttempts[1] = attempt
+		state.ProbeWindows[1] = map[ProbeWindowKind]ProbeWindow{ProbeWindowFiveHour: {State: ProbeSentAwaitingVerify}}
+		state.ProbeWindows[2] = map[ProbeWindowKind]ProbeWindow{ProbeWindowLong: bPending}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	controller := NewProbeController(now)
+	controller.SetWindow(1, ProbeWindowFiveHour, ProbeWindow{State: ProbeConfirmed})
+	r := &QuotaRefresher{runtimeStore: store, probeController: controller}
+	quota := ParsedQuota{FiveHour: &QuotaWindow{Kind: WindowFiveHour, ResetAt: now.Add(5 * time.Hour)}}
+
+	if err := r.persistTerminalProbeCompletion(1, attempt.AttemptID, quota); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := NewStateStore(r.runtimeStore.path, OSFileHooks(), nil).PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := persisted.ProbeWindows[2][ProbeWindowLong]; !ok || !reflect.DeepEqual(got, bPending) {
+		t.Fatalf("instance B window overwritten by A completion: got=%#v ok=%v want=%#v", got, ok, bPending)
+	}
+	if _, ok := persisted.ProbeAttempts[1]; ok {
+		t.Fatalf("instance A attempt survived completion: %#v", persisted.ProbeAttempts[1])
+	}
+}
+
+func probePOSTCountsByAccount(host *sequenceProbeHost) map[string]int {
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	counts := map[string]int{}
+	for _, req := range host.requests {
+		if req.URL == codexResetProbeEndpoint {
+			counts[req.Headers.Get("Chatgpt-Account-Id")]++
+		}
+	}
+	return counts
+}
+
+func TestProbeRefreshDuringActiveRunCoalescesRerunAndPersistsSecondInstance(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 30, 0, 0, time.UTC)
+	aLazyReset := now.Add(-time.Hour)
+	aActiveReset := now.Add(4 * time.Hour)
+	bReset := now.Add(7 * 24 * time.Hour)
+	aLazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":80,"limit_window_seconds":18000,"reset_at":%q}}}`, aLazyReset.Format(time.RFC3339)))
+	aActive := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, aActiveReset.Format(time.RFC3339)))
+	bLazy := []byte(fmt.Sprintf(`{"rate_limit":{"secondary_window":{"used_percent":0,"limit_window_seconds":604800,"reset_at":%q}}}`, bReset.Format(time.RFC3339)))
+	bActive := []byte(fmt.Sprintf(`{"rate_limit":{"secondary_window":{"used_percent":1,"limit_window_seconds":604800,"reset_at":%q}}}`, bReset.Format(time.RFC3339)))
+	host := newProbeFixtureHost()
+	host.authFiles = []pluginapi.HostAuthFileEntry{
+		{ID: "a", AuthIndex: "idx-a", Provider: "codex", Priority: 9},
+		{ID: "b", AuthIndex: "idx-b", Provider: "codex", Priority: 9},
+	}
+	host.authByIndex = map[string]pluginapi.HostAuthGetResponse{
+		"idx-a": {AuthIndex: "idx-a", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access-a","refresh_token":"refresh-a","account_id":"acct-a"}`)},
+		"idx-b": {AuthIndex: "idx-b", Name: "b.json", JSON: json.RawMessage(`{"access_token":"access-b","refresh_token":"refresh-b","account_id":"acct-b"}`)},
+	}
+	host.quota = [][]byte{aLazy, bLazy, aActive, bLazy, bActive}
+	cfg := DefaultConfig()
+	cfg.EnableResetProbe = true
+	state := NewPluginState(cfg)
+	state.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 9, AuthIDs: map[string]struct{}{"a": {}, "b": {}}})
+	roster := HostRosterSnapshot{Capability: CapabilityA, Entries: []RosterEntry{
+		{ID: "a", AuthIndex: "idx-a", Provider: "codex", Priority: intPtr(9)},
+		{ID: "b", AuthIndex: "idx-b", Provider: "codex", Priority: intPtr(9)},
+	}}
+	adapter := &rosterCredentialHost{host: host, roster: roster}
+	path := filepath.Join(t.TempDir(), "state.json")
+	r, err := NewProductionQuotaRefresher(host, state, adapter, roster, path, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(r.Stop)
+	adapter.bindings = r.bindings
+	aBinding, _, err := r.BootstrapBinding(context.Background(), "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.probeController.SetWindow(aBinding.Instance, ProbeWindowFiveHour, ProbeWindow{State: ProbePendingCheck, Baseline: ResetProbeBaseline(aLazyReset, 80, 5*time.Hour)})
+	if err = r.persistProbeWindows(); err != nil {
+		t.Fatal(err)
+	}
+	refresherMu.Lock()
+	previousRosterController := globalRosterController
+	globalRosterController = nil
+	refresherMu.Unlock()
+	t.Cleanup(func() { refresherMu.Lock(); globalRosterController = previousRosterController; refresherMu.Unlock() })
+
+	propagationStarted := make(chan struct{})
+	releasePropagation := make(chan struct{})
+	var propagationCalls atomic.Int32
+	r.coordinator.opts.PropagationWait = func(context.Context, time.Duration) error {
+		if propagationCalls.Add(1) == 1 {
+			close(propagationStarted)
+			<-releasePropagation
+		}
+		return nil
+	}
+	aDone := make(chan error, 1)
+	go func() { aDone <- r.RunProbeDueOnce(context.Background()) }()
+	<-propagationStarted
+
+	bBinding, _, err := r.BootstrapBinding(context.Background(), "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = r.RefreshOneAuthID("b"); err != nil {
+		t.Fatal(err)
+	}
+	bPending, ok := r.probeController.Window(bBinding.Instance, ProbeWindowLong)
+	if !ok || bPending.State != ProbePendingCheck || !bPending.Deadline.IsZero() {
+		t.Fatalf("refresh did not bootstrap B PendingCheck: window=%#v ok=%v", bPending, ok)
+	}
+	r.wg.Wait() // B's production launch must observe A active before A is released.
+	close(releasePropagation)
+	if err = <-aDone; err != nil {
+		t.Fatal(err)
+	}
+
+	counts := probePOSTCountsByAccount(host)
+	if counts["acct-a"] != 1 || counts["acct-b"] != 1 {
+		t.Fatalf("Probe POST counts = %#v, want one A and one B", counts)
+	}
+	if window, ok := r.probeController.Window(bBinding.Instance, ProbeWindowLong); !ok || window.State != ProbeConfirmed {
+		t.Fatalf("in-memory B window = %#v, ok=%v; want Confirmed", window, ok)
+	}
+	runtimePersisted, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := NewStateStore(r.runtimeStore.path, OSFileHooks(), nil).PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if window, ok := persisted.ProbeWindows[bBinding.Instance][ProbeWindowLong]; !ok || window.State != ProbeConfirmed {
+		t.Fatalf("persisted B window = %#v, ok=%v; want Confirmed; runtime_windows=%#v file_windows=%#v attempts=%#v", window, ok, runtimePersisted.ProbeWindows, persisted.ProbeWindows, persisted.ProbeAttempts)
+	}
+
+	restartAdapter := &rosterCredentialHost{host: host, roster: roster}
+	restart, err := NewProductionQuotaRefresher(host, state, restartAdapter, roster, path, func() time.Time { return now.Add(time.Minute) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	restartAdapter.bindings = restart.bindings
+	if window, ok := restart.probeController.Window(bBinding.Instance, ProbeWindowLong); !ok || window.State != ProbeConfirmed {
+		t.Fatalf("restarted B window = %#v, ok=%v; want Confirmed", window, ok)
+	}
+	if got := probePOSTCountsByAccount(host); got["acct-a"] != 1 || got["acct-b"] != 1 {
+		t.Fatalf("restart changed Probe POST counts: %#v", got)
 	}
 }
 
