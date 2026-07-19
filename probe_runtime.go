@@ -543,12 +543,21 @@ func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *
 			quota, err := r.typedFetchQuota(ctx, held, credentials)
 			return probeReadResult{Quota: quota, Credentials: credentials}, err
 		}
-		fail := func(err error, sent bool) OperationResult {
+		failureError := func(err error) string {
 			logError := redactSecrets(err.Error())
 			var status quotaStatusError
 			if errors.As(err, &status) {
 				logError = fmt.Sprintf("quota request returned status %d", status.status)
 			}
+			return logError
+		}
+		recordFailure := func(err error, sent bool, windows []ProbeWindowKind) {
+			failureFields := fields(windows)
+			failureFields["error"] = failureError(err)
+			failureFields["sent"] = sent
+			recordLog("warn", "probe.failed", "额度周期探测失败，已按安全策略处理", failureFields)
+		}
+		fail := func(err error, sent bool) OperationResult {
 			if r.runtimeRoster().Provisional && (errors.Is(err, ErrProvisionalFingerprintMismatch) || errors.Is(err, ErrCapabilityB)) {
 				r.clearProvisionalPermit()
 				r.rosterMu.Lock()
@@ -558,11 +567,11 @@ func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *
 				}
 				r.rosterMu.Unlock()
 				_ = r.persistProbeRosterHold()
-				recordLog("warn", "probe.failed", "额度周期探测失败，已按安全策略处理", map[string]any{"auth_id": intent.AuthID, "attempt_id": attempt.AttemptID, "windows": append([]ProbeWindowKind(nil), p.Windows...), "error": logError, "sent": sent})
+				recordFailure(err, sent, p.Windows)
 				return OperationResult{Token: intent.Token, Err: err}
 			}
 			if r.runtimeRoster().Health == RosterFailClosed {
-				recordLog("warn", "probe.failed", "额度周期探测失败，已按安全策略处理", map[string]any{"auth_id": intent.AuthID, "attempt_id": attempt.AttemptID, "windows": append([]ProbeWindowKind(nil), p.Windows...), "error": logError, "sent": sent})
+				recordFailure(err, sent, p.Windows)
 				return OperationResult{Token: intent.Token, Err: err}
 			}
 			if status, ok := err.(quotaStatusError); ok && status.status == http.StatusUnauthorized {
@@ -595,10 +604,7 @@ func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *
 				_ = r.probeWAL.PersistSentUnknown(intent.Instance, attempt.SuppressUntil)
 			}
 			_ = r.persistProbeWindows()
-			failureFields := fields(p.Windows)
-			failureFields["error"] = logError
-			failureFields["sent"] = sent
-			recordLog("warn", "probe.failed", "额度周期探测失败，已按安全策略处理", failureFields)
+			recordFailure(err, sent, p.Windows)
 			return OperationResult{Token: intent.Token, Err: err}
 		}
 		if p.Recovery {
@@ -624,9 +630,11 @@ func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *
 				return fail(err, true)
 			}
 			if err = r.reconcileObservedProbeWindows(intent.Instance, vr.Quota); err != nil {
+				recordFailure(err, true, p.Windows)
 				return OperationResult{Token: intent.Token, Err: err}
 			}
 			if err = r.persistProbeWindows(); err != nil {
+				recordFailure(err, true, p.Windows)
 				return OperationResult{Token: intent.Token, Err: err}
 			}
 			recordLog("info", "probe.verified", "额度周期激活验证完成", fields(p.Windows))
@@ -658,9 +666,11 @@ func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *
 				return fail(err, false)
 			}
 			if err = r.reconcileObservedProbeWindows(intent.Instance, pre.Quota); err != nil {
+				recordFailure(err, false, p.Windows)
 				return OperationResult{Token: intent.Token, Err: err}
 			}
 			if err = r.persistProbeWindows(); err != nil {
+				recordFailure(err, false, p.Windows)
 				return OperationResult{Token: intent.Token, Err: err}
 			}
 			return res
@@ -722,9 +732,11 @@ func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *
 			return fail(err, true)
 		}
 		if err = r.reconcileObservedProbeWindows(intent.Instance, vr.Quota); err != nil {
+			recordFailure(err, true, lazy)
 			return OperationResult{Token: intent.Token, Err: err}
 		}
 		if err = r.persistProbeWindows(); err != nil {
+			recordFailure(err, true, lazy)
 			return OperationResult{Token: intent.Token, Err: err}
 		}
 		recordLog("info", "probe.verified", "额度周期激活验证完成", fields(lazy))

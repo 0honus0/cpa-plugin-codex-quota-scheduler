@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -1823,12 +1824,16 @@ func TestLogsEndpointReturnsSchedulerDecision(t *testing.T) {
 
 func TestManagementLogsExposeProbeLifecycleWithoutSensitiveValues(t *testing.T) {
 	now := time.Date(2026, 7, 18, 22, 59, 55, 0, time.UTC)
-	store := NewPluginState(DefaultConfig())
-	store.RecordLog("info", "probe.precheck_started", "开始检查疑似未激活的额度周期", map[string]any{"auth_id": "auth-1", "attempt_id": "attempt-1", "windows": []ProbeWindowKind{ProbeWindowLong}}, now)
-	store.RecordLog("info", "probe.activation_sent", "已发送极小请求以激活额度周期", map[string]any{"auth_id": "auth-1", "attempt_id": "attempt-1", "windows": []ProbeWindowKind{ProbeWindowLong}}, now)
-	store.RecordLog("warn", "probe.failed", "额度周期探测失败，已按安全策略处理", map[string]any{"error": "access_token=[redacted] response_body=[redacted]"}, now)
+	r, host, _ := newFirstObservedWeeklyLazyRuntime(t, now)
+	host.mu.Lock()
+	host.quotaStatus = http.StatusServiceUnavailable
+	host.quota = [][]byte{[]byte(`{"access_token":"access-token-sentinel","refresh_token":"refresh-token-sentinel","account_id":"account-id-sentinel","authorization":"Bearer authorization-header-sentinel","request_body":"request-body-sentinel","response_body":"response-body-sentinel"}`)}
+	host.mu.Unlock()
+	if err := r.RunProbeDueOnce(context.Background()); err == nil {
+		t.Fatal("RunProbeDueOnce returned nil error")
+	}
 
-	resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
+	resp := HandleManagementRequest(r.state, pluginapi.ManagementRequest{
 		Method:  http.MethodGet,
 		Path:    "/v0/management/plugins/codex-quota-scheduler/status",
 		Headers: http.Header{"Authorization": []string{"Bearer management-key"}},
@@ -1841,12 +1846,11 @@ func TestManagementLogsExposeProbeLifecycleWithoutSensitiveValues(t *testing.T) 
 	if err := json.Unmarshal(resp.Body, &body); err != nil {
 		t.Fatalf("json.Unmarshal returned error: %v; body=%s", err, resp.Body)
 	}
-	if len(body.Logs) != 3 {
-		t.Fatalf("logs = %#v, want three lifecycle entries", body.Logs)
+	if len(body.Logs) != 2 {
+		t.Fatalf("logs = %#v, want precheck and terminal failure entries", body.Logs)
 	}
 	for i, want := range []struct{ event, message string }{
 		{"probe.precheck_started", "开始检查疑似未激活的额度周期"},
-		{"probe.activation_sent", "已发送极小请求以激活额度周期"},
 		{"probe.failed", "额度周期探测失败，已按安全策略处理"},
 	} {
 		if body.Logs[i].Event != want.event || body.Logs[i].Message != want.message {
