@@ -105,6 +105,9 @@ func (h *sequenceProbeHost) Log(string, string, map[string]any)     {}
 func (h *sequenceProbeHost) Do(req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
 	h.mu.Lock()
 	started, release := h.doStarted, h.releaseDo
+	if req.URL != codexResetProbeEndpoint {
+		started, release = nil, nil
+	}
 	h.urls = append(h.urls, req.URL)
 	h.requests = append(h.requests, req)
 	h.mu.Unlock()
@@ -122,6 +125,9 @@ func (h *sequenceProbeHost) Do(req pluginapi.HTTPRequest) (pluginapi.HTTPRespons
 	defer h.mu.Unlock()
 	if req.URL == codexResetProbeEndpoint {
 		return pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(`{"usage":{"total_tokens":1}}`)}, nil
+	}
+	if req.URL == resetCreditsEndpoint {
+		return pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(`{}`)}, nil
 	}
 	body := h.quota[0]
 	h.quota = h.quota[1:]
@@ -156,6 +162,66 @@ func newDueProbeRuntime(t *testing.T, now time.Time, host *sequenceProbeHost) *Q
 	refresherMu.Unlock()
 	t.Cleanup(func() { refresherMu.Lock(); globalRosterController = previous; refresherMu.Unlock() })
 	return r
+}
+
+func newProductionLazyRefreshRuntime(t *testing.T, now time.Time, host *sequenceProbeHost) *QuotaRefresher {
+	t.Helper()
+	cfg := DefaultConfig()
+	cfg.EnableResetProbe = true
+	state := NewPluginState(cfg)
+	state.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 9, AuthIDs: map[string]struct{}{"a": {}}})
+	roster := HostRosterSnapshot{Capability: CapabilityA, Entries: []RosterEntry{{ID: "a", AuthIndex: "idx", Provider: "codex", Priority: intPtr(9)}}}
+	adapter := &rosterCredentialHost{host: host, roster: roster}
+	r, err := NewProductionQuotaRefresher(host, state, adapter, roster, filepath.Join(t.TempDir(), "state.json"), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.bindings = r.bindings
+	r.coordinator.opts.PropagationWait = func(context.Context, time.Duration) error { return nil }
+	if _, _, err := r.BootstrapBinding(context.Background(), "a"); err != nil {
+		t.Fatal(err)
+	}
+	refresherMu.Lock()
+	previous := globalRosterController
+	globalRosterController = nil
+	refresherMu.Unlock()
+	t.Cleanup(func() { refresherMu.Lock(); globalRosterController = previous; refresherMu.Unlock() })
+	return r
+}
+
+func TestProductionRefreshLaunchesFirstObservedLazyProbe(t *testing.T) {
+	now := time.Date(2026, 7, 19, 11, 18, 49, 0, time.UTC)
+	reset := now.Add(7 * 24 * time.Hour)
+	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"secondary_window":{"used_percent":0,"limit_window_seconds":604800,"reset_at":%q}}}`, reset.Format(time.RFC3339)))
+	active := []byte(fmt.Sprintf(`{"rate_limit":{"secondary_window":{"used_percent":1,"limit_window_seconds":604800,"reset_at":%q}}}`, reset.Format(time.RFC3339)))
+	host := newProbeFixtureHost()
+	host.quota = [][]byte{lazy, lazy, active}
+	host.doStarted = make(chan struct{})
+	r := newProductionLazyRefreshRuntime(t, now, host)
+	r.Start()
+	t.Cleanup(r.Stop)
+
+	if err := r.RefreshOneAuthID("a"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-host.doStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("production refresh did not launch Probe")
+	}
+	deadline := time.After(5 * time.Second)
+	for {
+		posts, _ := probePOSTCount(host)
+		if posts == 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("probe POST count = %d, want 1", posts)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 }
 
 func TestProbeRefreshRemovesAbsentFiveHourWindow(t *testing.T) {

@@ -834,6 +834,8 @@ func NewQuotaRefresher(host HostClient, state *PluginState, now func() time.Time
 			}
 			if err := r.bootstrapProbeWindows(); err != nil {
 				r.state.RecordLog("warn", "probe.bootstrap_failed", "Probe 状态初始化失败，将在下次刷新重试", map[string]any{"auth_id": intent.AuthID, "error": redactSecrets(err.Error())}, r.now())
+			} else if r.probeController != nil && hasPendingProbeWindows(r.probeController.Snapshot()) {
+				r.launchProbe(false)
 			}
 			return nil
 		},
@@ -1234,6 +1236,17 @@ func (r *QuotaRefresher) Start() {
 			}
 		}
 	}()
+}
+
+func hasPendingProbeWindows(windows map[AuthInstanceID]map[ProbeWindowKind]ProbeWindow) bool {
+	for _, instanceWindows := range windows {
+		for _, window := range instanceWindows {
+			if window.State == ProbePendingCheck {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (r *QuotaRefresher) launchProbe(recoverFirst bool) {
