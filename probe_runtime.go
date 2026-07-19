@@ -155,6 +155,44 @@ func (r *QuotaRefresher) reconcileObservedProbeWindows(instance AuthInstanceID, 
 	return nil
 }
 
+func (r *QuotaRefresher) persistTerminalProbeCompletion(instance AuthInstanceID, attemptID string, quota ParsedQuota) error {
+	if r.runtimeStore == nil || r.probeController == nil || instance == 0 {
+		return nil
+	}
+	observed := map[ProbeWindowKind]bool{
+		ProbeWindowFiveHour: quota.FiveHour != nil,
+		ProbeWindowLong:     quota.LongWindow != nil,
+	}
+	windows := r.probeController.Snapshot()
+	for kind, present := range observed {
+		if present {
+			continue
+		}
+		delete(windows[instance], kind)
+		if len(windows[instance]) == 0 {
+			delete(windows, instance)
+		}
+	}
+	_, err := r.runtimeStore.Update(func(persisted *PersistentState) error {
+		attempt, ok := persisted.ProbeAttempts[instance]
+		if !ok || attempt.AttemptID != attemptID {
+			return fmt.Errorf("probe completion attempt changed for instance %d", instance)
+		}
+		persisted.ProbeWindows = windows
+		delete(persisted.ProbeAttempts, instance)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for kind, present := range observed {
+		if !present {
+			r.probeController.RemoveWindow(instance, kind)
+		}
+	}
+	return nil
+}
+
 func (r *QuotaRefresher) reconcileProbeOrphans(persisted PersistentState, active map[AuthInstanceID]struct{}) error {
 	keys := map[AuthInstanceID]struct{}{}
 	for i := range persisted.ProbeWindows {
@@ -450,7 +488,16 @@ func (r *QuotaRefresher) RunProbeRecoveryOnce(ctx context.Context) error {
 			}
 			continue
 		}
-		intent.Payload = probeSequencePayload{Binding: binding, Windows: windows, Attempt: st.ProbeAttempts[intent.Instance], Recovery: true}
+		attempt := st.ProbeAttempts[intent.Instance]
+		for _, kind := range attempt.Windows {
+			if window, ok := r.probeController.Window(intent.Instance, kind); ok {
+				window.State = ProbeSentUnknown
+				window.AttemptID = attempt.AttemptID
+				window.Deadline = time.Time{}
+				r.probeController.SetWindow(intent.Instance, kind, window)
+			}
+		}
+		intent.Payload = probeSequencePayload{Binding: binding, Windows: windows, Attempt: attempt, Recovery: true}
 		result := r.coordinator.SubmitTyped(intent).Await(ctx)
 		if result.Err != nil {
 			if firstErr == nil {
@@ -626,14 +673,7 @@ func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *
 				return fail(err, true)
 			}
 			r.probeController.Advance(intent.Instance, ProbeEvent{Kind: ProbeEventVerifyResult, Now: r.now(), Snapshots: probeSnapshots(vr.Quota)})
-			if err = r.probeWAL.Complete(intent.Instance); err != nil {
-				return fail(err, true)
-			}
-			if err = r.reconcileObservedProbeWindows(intent.Instance, vr.Quota); err != nil {
-				recordFailure(err, true, p.Windows)
-				return OperationResult{Token: intent.Token, Err: err}
-			}
-			if err = r.persistProbeWindows(); err != nil {
+			if err = r.persistTerminalProbeCompletion(intent.Instance, attempt.AttemptID, vr.Quota); err != nil {
 				recordFailure(err, true, p.Windows)
 				return OperationResult{Token: intent.Token, Err: err}
 			}
@@ -662,14 +702,7 @@ func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *
 			}
 		}
 		if len(lazy) == 0 {
-			if err = r.probeWAL.Complete(intent.Instance); err != nil {
-				return fail(err, false)
-			}
-			if err = r.reconcileObservedProbeWindows(intent.Instance, pre.Quota); err != nil {
-				recordFailure(err, false, p.Windows)
-				return OperationResult{Token: intent.Token, Err: err}
-			}
-			if err = r.persistProbeWindows(); err != nil {
+			if err = r.persistTerminalProbeCompletion(intent.Instance, attempt.AttemptID, pre.Quota); err != nil {
 				recordFailure(err, false, p.Windows)
 				return OperationResult{Token: intent.Token, Err: err}
 			}
@@ -728,14 +761,7 @@ func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *
 				r.probeController.SetWindow(intent.Instance, k, w)
 			}
 		}
-		if err = r.probeWAL.Complete(intent.Instance); err != nil {
-			return fail(err, true)
-		}
-		if err = r.reconcileObservedProbeWindows(intent.Instance, vr.Quota); err != nil {
-			recordFailure(err, true, lazy)
-			return OperationResult{Token: intent.Token, Err: err}
-		}
-		if err = r.persistProbeWindows(); err != nil {
+		if err = r.persistTerminalProbeCompletion(intent.Instance, attempt.AttemptID, vr.Quota); err != nil {
 			recordFailure(err, true, lazy)
 			return OperationResult{Token: intent.Token, Err: err}
 		}

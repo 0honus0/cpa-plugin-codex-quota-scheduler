@@ -204,7 +204,6 @@ func TestProductionRefreshLaunchesFirstObservedLazyProbe(t *testing.T) {
 	host.quota = [][]byte{lazy, lazy, active}
 	host.doStarted = make(chan struct{})
 	r := newProductionLazyRefreshRuntime(t, now, host)
-	r.Start()
 	t.Cleanup(r.Stop)
 
 	if err := r.RefreshOneAuthID("a"); err != nil {
@@ -554,23 +553,74 @@ func TestProbeFailureLogRedactsSecrets(t *testing.T) {
 	}
 }
 
-func failProbeStoreWriteAfter(t *testing.T, r *QuotaRefresher, want int) {
+type probeTerminalWriteFailure struct {
+	before   PersistentState
+	injected bool
+}
+
+func failProbeTerminalWrite(t *testing.T, r *QuotaRefresher, instance AuthInstanceID, kind ProbeWindowKind, final ProbeWindowState) *probeTerminalWriteFailure {
 	t.Helper()
-	previous := r.runtimeStore.hooks.Fail
-	writes := 0
-	r.runtimeStore.hooks.Fail = func(op string) error {
-		if op == "backup-write" {
-			writes++
-			if writes == want {
-				return errors.New("post-completion persistence failed")
+	result := &probeTerminalWriteFailure{}
+	before, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := before.ProbeAttempts[instance]; ok {
+		result.before = before
+	}
+	previous := r.runtimeStore.hooks.Replace
+	r.runtimeStore.hooks.Replace = func(source, target string) error {
+		raw, readErr := os.ReadFile(source)
+		if readErr == nil {
+			var candidate PersistentState
+			if json.Unmarshal(raw, &candidate) == nil {
+				if !result.injected {
+					if _, ok := candidate.ProbeAttempts[instance]; ok {
+						result.before = candidate
+					}
+					window, hasWindow := candidate.ProbeWindows[instance][kind]
+					_, hasAttempt := candidate.ProbeAttempts[instance]
+					if target == r.runtimeStore.path && hasWindow && window.State == final && !hasAttempt {
+						result.injected = true
+						return errors.New("terminal Probe persistence failed")
+					}
+				}
 			}
 		}
 		if previous != nil {
-			return previous(op)
+			return previous(source, target)
 		}
 		return nil
 	}
-	t.Cleanup(func() { r.runtimeStore.hooks.Fail = previous })
+	t.Cleanup(func() { r.runtimeStore.hooks.Replace = previous })
+	return result
+}
+
+func assertProbeTerminalWriteRolledBack(t *testing.T, r *QuotaRefresher, failure *probeTerminalWriteFailure, instance AuthInstanceID) PersistentState {
+	t.Helper()
+	if !failure.injected {
+		t.Fatal("terminal Probe write failure was not injected")
+	}
+	restarted := NewStateStore(r.runtimeStore.path, OSFileHooks(), nil)
+	persisted, err := restarted.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantAttempt, ok := failure.before.ProbeAttempts[instance]
+	if !ok {
+		t.Fatalf("failure injector did not observe a pre-terminal attempt: %#v", failure.before.ProbeAttempts)
+	}
+	got, ok := persisted.ProbeAttempts[instance]
+	phaseOK := got.Phase == wantAttempt.Phase || (wantAttempt.Phase == ProbeAttemptSent && got.Phase == ProbeAttemptSentUnknown)
+	normalized := got
+	normalized.Phase = wantAttempt.Phase
+	if !ok || !phaseOK || !reflect.DeepEqual(normalized, wantAttempt) {
+		t.Fatalf("attempt after failed terminal write = %#v, ok=%v; want unchanged %#v", got, ok, wantAttempt)
+	}
+	if got, want := persisted.ProbeWindows[instance], failure.before.ProbeWindows[instance]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("windows after failed terminal write = %#v; want unchanged %#v", got, want)
+	}
+	return persisted
 }
 
 func assertProbeTerminalFailure(t *testing.T, r *QuotaRefresher, now time.Time, sent bool) {
@@ -596,12 +646,21 @@ func assertProbeTerminalFailure(t *testing.T, r *QuotaRefresher, now time.Time, 
 func TestProbePostCompletionFailuresLogTerminalFailure(t *testing.T) {
 	now := time.Date(2026, 7, 18, 22, 59, 55, 0, time.UTC)
 	t.Run("recovery reconciliation", func(t *testing.T) {
-		r, _, binding := newFirstObservedWeeklyLazyRuntime(t, now)
+		r, host, binding := newFirstObservedWeeklyLazyRuntime(t, now)
+		host.mu.Lock()
+		host.quota = [][]byte{append([]byte(nil), host.quota[1]...)}
+		host.mu.Unlock()
 		if _, err := r.probeFence.Next(); err != nil {
 			t.Fatal(err)
 		}
-		attempt := ProbeAttempt{Instance: binding.Instance, AttemptID: "recovery-attempt", Windows: []ProbeWindowKind{ProbeWindowLong}, Phase: ProbeAttemptSentUnknown, SendFenceSeq: 1}
-		r.probeController.SetWindow(binding.Instance, ProbeWindowLong, ProbeWindow{State: ProbeSentUnknown})
+		attempt := ProbeAttempt{Instance: binding.Instance, AttemptID: "recovery-attempt", Windows: []ProbeWindowKind{ProbeWindowLong}, Phase: ProbeAttemptSentUnknown, SendFenceSeq: 1, VerifyNotBefore: now, SuppressUntil: now.Add(10 * time.Minute)}
+		window, ok := r.probeController.Window(binding.Instance, ProbeWindowLong)
+		if !ok {
+			t.Fatal("long window missing")
+		}
+		window.State = ProbeSentUnknown
+		window.AttemptID = attempt.AttemptID
+		r.probeController.SetWindow(binding.Instance, ProbeWindowLong, window)
 		if err := r.persistProbeWindows(); err != nil {
 			t.Fatal(err)
 		}
@@ -611,11 +670,12 @@ func TestProbePostCompletionFailuresLogTerminalFailure(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		failProbeStoreWriteAfter(t, r, 3)
+		failure := failProbeTerminalWrite(t, r, binding.Instance, ProbeWindowLong, ProbeConfirmed)
 		result := r.runTypedHeld(context.Background(), Intent{AuthID: "a", Instance: binding.Instance, Class: OperationProbeSequence, Source: SourceProbeVerify, StartedAfter: attempt.SendFenceSeq, AttemptID: attempt.AttemptID, Payload: probeSequencePayload{Binding: binding, Windows: attempt.Windows, Attempt: attempt, Recovery: true}}, &HeldLease{coordinator: r.coordinator})
 		if result.Err == nil {
 			t.Fatal("recovery returned nil error")
 		}
+		assertProbeTerminalWriteRolledBack(t, r, failure, binding.Instance)
 		assertProbeTerminalFailure(t, r, now, true)
 	})
 
@@ -624,21 +684,76 @@ func TestProbePostCompletionFailuresLogTerminalFailure(t *testing.T) {
 		host.mu.Lock()
 		host.quota = [][]byte{append([]byte(nil), host.quota[1]...)}
 		host.mu.Unlock()
-		failProbeStoreWriteAfter(t, r, 3)
+		binding, ok := r.bindings.Lookup("a")
+		if !ok {
+			t.Fatal("binding missing")
+		}
+		failure := failProbeTerminalWrite(t, r, binding.Instance, ProbeWindowLong, ProbeConfirmed)
 		if err := r.RunProbeDueOnce(context.Background()); err == nil {
 			t.Fatal("precheck returned nil error")
 		}
+		assertProbeTerminalWriteRolledBack(t, r, failure, binding.Instance)
 		assertProbeTerminalFailure(t, r, now, false)
 	})
 
 	t.Run("verify reconciliation", func(t *testing.T) {
-		r, _, _ := newFirstObservedWeeklyLazyRuntime(t, now)
-		failProbeStoreWriteAfter(t, r, 6)
+		r, _, binding := newFirstObservedWeeklyLazyRuntime(t, now)
+		failure := failProbeTerminalWrite(t, r, binding.Instance, ProbeWindowLong, ProbeConfirmed)
 		if err := r.RunProbeDueOnce(context.Background()); err == nil {
 			t.Fatal("verify returned nil error")
 		}
+		assertProbeTerminalWriteRolledBack(t, r, failure, binding.Instance)
 		assertProbeTerminalFailure(t, r, now, true)
 	})
+}
+
+func TestProbeTerminalCompletionFailureRestartsVerifyFirst(t *testing.T) {
+	now := time.Date(2026, 7, 18, 22, 59, 55, 0, time.UTC)
+	r, host, binding := newFirstObservedWeeklyLazyRuntime(t, now)
+	host.mu.Lock()
+	host.quota = append(host.quota, append([]byte(nil), host.quota[1]...))
+	host.mu.Unlock()
+	failure := failProbeTerminalWrite(t, r, binding.Instance, ProbeWindowLong, ProbeConfirmed)
+
+	if err := r.RunProbeDueOnce(context.Background()); err == nil {
+		t.Fatal("terminal persistence failure was not surfaced")
+	}
+	persisted := assertProbeTerminalWriteRolledBack(t, r, failure, binding.Instance)
+	attempt := persisted.ProbeAttempts[binding.Instance]
+	if attempt.AttemptID == "" || attempt.SendFenceSeq == 0 || (attempt.Phase != ProbeAttemptSent && attempt.Phase != ProbeAttemptSentUnknown) {
+		t.Fatalf("failed completion did not retain recovery attempt: %#v", attempt)
+	}
+	postsBefore, urlsBefore := probePOSTCount(host)
+	if postsBefore != 1 {
+		t.Fatalf("probe POST count before restart = %d, want 1; urls=%v", postsBefore, urlsBefore)
+	}
+
+	restartNow := now.Add(4 * time.Second)
+	roster := r.runtimeRoster()
+	adapter := &rosterCredentialHost{host: host, roster: roster}
+	restart, err := NewProductionQuotaRefresher(host, r.state, adapter, roster, r.runtimeStore.path, func() time.Time { return restartNow })
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.bindings = restart.bindings
+	restart.coordinator.opts.PropagationWait = func(context.Context, time.Duration) error { return nil }
+	if err = restart.RunProbeRecoveryOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	postsAfter, urlsAfter := probePOSTCount(host)
+	if postsAfter != 1 {
+		t.Fatalf("Probe recovery resent activation: posts=%d urls=%v", postsAfter, urlsAfter)
+	}
+	completed, err := restart.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := completed.ProbeAttempts[binding.Instance]; ok {
+		t.Fatalf("recovery attempt survived successful verification: %#v", completed.ProbeAttempts[binding.Instance])
+	}
+	if window := completed.ProbeWindows[binding.Instance][ProbeWindowLong]; window.State != ProbeConfirmed {
+		t.Fatalf("recovery window = %#v, want Confirmed", window)
+	}
 }
 
 func TestFirstObservedWeeklyLazyWindowConcurrentTriggersSingleFlight(t *testing.T) {
