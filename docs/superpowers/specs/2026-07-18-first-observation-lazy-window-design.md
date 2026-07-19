@@ -56,6 +56,17 @@ For a newly bootstrapped or reappeared window:
   enter `PendingCheck` immediately;
 - otherwise enter `WaitingReset` with the existing reset deadline.
 
+Entering `PendingCheck` must also make the production Probe runner runnable
+immediately. The quota-refresh writeback path must asynchronously launch the
+existing Probe runner after bootstrap creates new pending work. It must not wait
+for the ordinary refresh timer, and it must not represent pending work by
+restoring a deadline: the S6 invariant that `PendingCheck` has a cleared
+deadline remains unchanged.
+
+Repeated refresh writebacks may request a launch, but the existing Probe
+single-flight lock, per-instance attempt ownership, coordinator lease, WAL, and
+send fence remain the authorities that prevent duplicate activation sends.
+
 The flag applies only to first observation. Ordinary already-tracked windows
 continue using the existing reset-delta classification table.
 
@@ -80,6 +91,28 @@ ordinary “future reset is not due” rule:
 
 The fix does not bypass roster authority, credential validation, single-flight,
 WAL recovery, resend suppression, or verify-first crash recovery.
+
+## Production Trigger And Observability
+
+The production refresh path, rather than tests or Management actions, owns the
+handoff from newly bootstrapped `PendingCheck` work to `RunProbeDueOnce`.
+Successful quota writeback must therefore:
+
+1. reconcile and bootstrap Probe windows;
+2. detect whether bootstrap left any runnable `PendingCheck` work;
+3. asynchronously launch the existing Probe runner; and
+4. leave duplicate suppression to the existing single-flight and WAL layers.
+
+The Management scheduling log must expose the lifecycle without including
+credentials or response bodies:
+
+- precheck started, including the account and affected window kinds;
+- activation request sent, only after the send fence is persisted;
+- verification confirmed, including the confirmed window kinds; or
+- Probe failed/retry scheduled, using the existing secret-redaction rules.
+
+These records are observability only. They must not become a second source of
+Probe state, affect retry decisions, or weaken crash recovery.
 
 ## False-Positive Control
 
@@ -125,6 +158,12 @@ Add RED-to-GREEN coverage for:
 - concurrent triggers still produce a single activation request;
 - persisted suspected-lazy state survives restart and follows verify-first
   recovery rules.
+- a production quota-refresh writeback that first observes a suspected lazy
+  window launches the Probe runner without a direct test call to
+  `RunProbeDueOnce`;
+- repeated production wakeups still produce at most one activation request;
+- the production sequence emits visible precheck, activation-send, and terminal
+  verification/failure log records with secrets redacted.
 
 Run the focused Probe tests, the full test suite, the race suite, `go vet`, and
 the S7 refactor gate before producing a replacement DLL.
