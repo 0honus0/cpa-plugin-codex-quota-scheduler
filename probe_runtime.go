@@ -517,6 +517,14 @@ func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *
 	case OperationProbeSequence:
 		p := intent.Payload.(probeSequencePayload)
 		attempt := p.Attempt
+		fields := func(windows []ProbeWindowKind) map[string]any {
+			return map[string]any{"auth_id": intent.AuthID, "attempt_id": attempt.AttemptID, "windows": append([]ProbeWindowKind(nil), windows...)}
+		}
+		recordLog := func(level, event, message string, fields map[string]any) {
+			if r.state != nil {
+				r.state.RecordLog(level, event, message, fields, r.now())
+			}
+		}
 		read := func() (probeReadResult, error) {
 			var auth pluginapi.HostAuthGetResponse
 			if err := held.DoHTTP(ctx, func(context.Context) error { var e error; auth, e = r.host.GetAuth(p.Binding.AuthIndex); return e }); err != nil {
@@ -536,6 +544,11 @@ func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *
 			return probeReadResult{Quota: quota, Credentials: credentials}, err
 		}
 		fail := func(err error, sent bool) OperationResult {
+			logError := redactSecrets(err.Error())
+			var status quotaStatusError
+			if errors.As(err, &status) {
+				logError = fmt.Sprintf("quota request returned status %d", status.status)
+			}
 			if r.runtimeRoster().Provisional && (errors.Is(err, ErrProvisionalFingerprintMismatch) || errors.Is(err, ErrCapabilityB)) {
 				r.clearProvisionalPermit()
 				r.rosterMu.Lock()
@@ -545,9 +558,11 @@ func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *
 				}
 				r.rosterMu.Unlock()
 				_ = r.persistProbeRosterHold()
+				recordLog("warn", "probe.failed", "额度周期探测失败，已按安全策略处理", map[string]any{"auth_id": intent.AuthID, "attempt_id": attempt.AttemptID, "windows": append([]ProbeWindowKind(nil), p.Windows...), "error": logError, "sent": sent})
 				return OperationResult{Token: intent.Token, Err: err}
 			}
 			if r.runtimeRoster().Health == RosterFailClosed {
+				recordLog("warn", "probe.failed", "额度周期探测失败，已按安全策略处理", map[string]any{"auth_id": intent.AuthID, "attempt_id": attempt.AttemptID, "windows": append([]ProbeWindowKind(nil), p.Windows...), "error": logError, "sent": sent})
 				return OperationResult{Token: intent.Token, Err: err}
 			}
 			if status, ok := err.(quotaStatusError); ok && status.status == http.StatusUnauthorized {
@@ -580,6 +595,10 @@ func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *
 				_ = r.probeWAL.PersistSentUnknown(intent.Instance, attempt.SuppressUntil)
 			}
 			_ = r.persistProbeWindows()
+			failureFields := fields(p.Windows)
+			failureFields["error"] = logError
+			failureFields["sent"] = sent
+			recordLog("warn", "probe.failed", "额度周期探测失败，已按安全策略处理", failureFields)
 			return OperationResult{Token: intent.Token, Err: err}
 		}
 		if p.Recovery {
@@ -610,10 +629,12 @@ func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *
 			if err = r.persistProbeWindows(); err != nil {
 				return OperationResult{Token: intent.Token, Err: err}
 			}
+			recordLog("info", "probe.verified", "额度周期激活验证完成", fields(p.Windows))
 			res.ReadStartSeq = seq
 			res.Value = vr
 			return res
 		}
+		recordLog("info", "probe.precheck_started", "开始检查疑似未激活的额度周期", fields(p.Windows))
 		_, err := r.probeFence.Next() // actual-start precheck sequence, distinct from completedFence
 		if err != nil {
 			return fail(err, false)
@@ -675,6 +696,7 @@ func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *
 		if err = r.probeWAL.PersistSent(intent.Instance, r.now()); err != nil {
 			return fail(err, true)
 		}
+		recordLog("info", "probe.activation_sent", "已发送极小请求以激活额度周期", fields(lazy))
 		if err = held.WaitPropagation(ctx, 3*time.Second); err != nil {
 			return fail(err, true)
 		}
@@ -705,6 +727,7 @@ func (r *QuotaRefresher) runTypedHeld(ctx context.Context, intent Intent, held *
 		if err = r.persistProbeWindows(); err != nil {
 			return OperationResult{Token: intent.Token, Err: err}
 		}
+		recordLog("info", "probe.verified", "额度周期激活验证完成", fields(lazy))
 		res.ReadStartSeq = seq
 		res.Value = vr
 		return res

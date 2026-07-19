@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +26,7 @@ type sequenceProbeHost struct {
 	quota         [][]byte
 	urls          []string
 	requests      []pluginapi.HTTPRequest
+	quotaStatus   int
 	gets          int
 	gateAuthIndex string
 	getStarted    chan struct{}
@@ -131,7 +133,11 @@ func (h *sequenceProbeHost) Do(req pluginapi.HTTPRequest) (pluginapi.HTTPRespons
 	}
 	body := h.quota[0]
 	h.quota = h.quota[1:]
-	return pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: body}, nil
+	status := h.quotaStatus
+	if status == 0 {
+		status = http.StatusOK
+	}
+	return pluginapi.HTTPResponse{StatusCode: status, Body: body}, nil
 }
 
 func newDueProbeRuntime(t *testing.T, now time.Time, host *sequenceProbeHost) *QuotaRefresher {
@@ -499,6 +505,52 @@ func TestFirstObservedWeeklyLazyWindowSendsOneActivationAndVerifies(t *testing.T
 	window, ok := r.probeController.Window(binding.Instance, ProbeWindowLong)
 	if !ok || window.State != ProbeConfirmed || window.Baseline.SuspectedLazy {
 		t.Fatalf("window = %#v, ok=%v", window, ok)
+	}
+	logs := r.state.Snapshot(now).Logs
+	events := make([]string, 0, len(logs))
+	for _, entry := range logs {
+		if strings.HasPrefix(entry.Event, "probe.") {
+			events = append(events, entry.Event)
+		}
+	}
+	want := []string{"probe.precheck_started", "probe.activation_sent", "probe.verified"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("Probe events = %v, want %v", events, want)
+	}
+}
+
+func TestProbeFailureLogRedactsSecrets(t *testing.T) {
+	now := time.Date(2026, 7, 18, 22, 59, 55, 0, time.UTC)
+	r, host, _ := newFirstObservedWeeklyLazyRuntime(t, now)
+	host.mu.Lock()
+	host.quotaStatus = http.StatusServiceUnavailable
+	host.quota = [][]byte{[]byte(`{"access_token":"access-token-sentinel","refresh_token":"refresh-token-sentinel","account_id":"account-id-sentinel","authorization":"Bearer authorization-header-sentinel","request_body":"request-body-sentinel","response_body":"response-body-sentinel"}`)}
+	host.mu.Unlock()
+
+	if err := r.RunProbeDueOnce(context.Background()); err == nil {
+		t.Fatal("RunProbeDueOnce returned nil error")
+	}
+	logs := r.state.Snapshot(now).Logs
+	var failures []LogEntry
+	for _, entry := range logs {
+		if entry.Event == "probe.failed" {
+			failures = append(failures, entry)
+		}
+	}
+	if len(failures) != 1 {
+		t.Fatalf("probe.failed logs = %#v, want one terminal failure", failures)
+	}
+	if sent, ok := failures[0].Fields["sent"].(bool); !ok || sent {
+		t.Fatalf("probe.failed sent = %#v, want false", failures[0].Fields["sent"])
+	}
+	if windows, ok := failures[0].Fields["windows"].([]ProbeWindowKind); !ok || !reflect.DeepEqual(windows, []ProbeWindowKind{ProbeWindowLong}) {
+		t.Fatalf("probe.failed windows = %#v, want [long]", failures[0].Fields["windows"])
+	}
+	errText, _ := failures[0].Fields["error"].(string)
+	for _, forbidden := range []string{"access-token-sentinel", "refresh-token-sentinel", "account-id-sentinel", "authorization-header-sentinel", "request-body-sentinel", "response-body-sentinel"} {
+		if strings.Contains(errText, forbidden) {
+			t.Fatalf("probe failure log leaked %q: %#v", forbidden, failures[0])
+		}
 	}
 }
 

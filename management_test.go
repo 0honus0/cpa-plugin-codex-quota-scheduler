@@ -1821,6 +1821,45 @@ func TestLogsEndpointReturnsSchedulerDecision(t *testing.T) {
 	}
 }
 
+func TestManagementLogsExposeProbeLifecycleWithoutSensitiveValues(t *testing.T) {
+	now := time.Date(2026, 7, 18, 22, 59, 55, 0, time.UTC)
+	store := NewPluginState(DefaultConfig())
+	store.RecordLog("info", "probe.precheck_started", "开始检查疑似未激活的额度周期", map[string]any{"auth_id": "auth-1", "attempt_id": "attempt-1", "windows": []ProbeWindowKind{ProbeWindowLong}}, now)
+	store.RecordLog("info", "probe.activation_sent", "已发送极小请求以激活额度周期", map[string]any{"auth_id": "auth-1", "attempt_id": "attempt-1", "windows": []ProbeWindowKind{ProbeWindowLong}}, now)
+	store.RecordLog("warn", "probe.failed", "额度周期探测失败，已按安全策略处理", map[string]any{"error": "access_token=[redacted] response_body=[redacted]"}, now)
+
+	resp := HandleManagementRequest(store, pluginapi.ManagementRequest{
+		Method:  http.MethodGet,
+		Path:    "/v0/management/plugins/codex-quota-scheduler/status",
+		Headers: http.Header{"Authorization": []string{"Bearer management-key"}},
+		Query:   url.Values{"format": []string{"json"}},
+	}, now)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, resp.Body)
+	}
+	var body StatusPayload
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		t.Fatalf("json.Unmarshal returned error: %v; body=%s", err, resp.Body)
+	}
+	if len(body.Logs) != 3 {
+		t.Fatalf("logs = %#v, want three lifecycle entries", body.Logs)
+	}
+	for i, want := range []struct{ event, message string }{
+		{"probe.precheck_started", "开始检查疑似未激活的额度周期"},
+		{"probe.activation_sent", "已发送极小请求以激活额度周期"},
+		{"probe.failed", "额度周期探测失败，已按安全策略处理"},
+	} {
+		if body.Logs[i].Event != want.event || body.Logs[i].Message != want.message {
+			t.Fatalf("log %d = %#v, want visible event/message %#v", i, body.Logs[i], want)
+		}
+	}
+	for _, forbidden := range []string{"access-token-sentinel", "refresh-token-sentinel", "account-id-sentinel", "authorization-header-sentinel", "request-body-sentinel", "response-body-sentinel"} {
+		if strings.Contains(string(resp.Body), forbidden) {
+			t.Fatalf("management status leaked %q: %s", forbidden, resp.Body)
+		}
+	}
+}
+
 func TestAnnotationsEndpointsNormalizePatchAndPersist(t *testing.T) {
 	dir := t.TempDir()
 	previousDefaultStatePath := defaultStatePath
