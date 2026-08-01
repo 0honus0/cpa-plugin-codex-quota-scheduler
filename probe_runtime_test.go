@@ -166,7 +166,9 @@ func newDueProbeRuntime(t *testing.T, now time.Time, host *sequenceProbeHost) *Q
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.probeController.SetWindow(binding.Instance, ProbeWindowFiveHour, ProbeWindow{State: ProbePendingCheck, Deadline: now, Baseline: ResetProbeBaseline(now.Add(-time.Hour), 80, fiveHourSeconds*time.Second)})
+	base := ResetProbeBaseline(now.Add(-time.Hour), 0, fiveHourSeconds*time.Second)
+	base.SuspectedLazy = true
+	r.probeController.SetWindow(binding.Instance, ProbeWindowFiveHour, ProbeWindow{State: ProbePendingCheck, Deadline: now, Baseline: base})
 	if err := r.persistProbeWindows(); err != nil {
 		t.Fatal(err)
 	}
@@ -331,6 +333,69 @@ func TestExternalResetObservationMissingEvidenceDoesNotSend(t *testing.T) {
 	}
 	if posts, urls := probePOSTCount(host); posts != 0 {
 		t.Fatalf("missing usage evidence sent %d Probe POSTs; urls=%v", posts, urls)
+	}
+}
+
+func TestProbePrecheckMatureUntrustedObservationDoesNotSend(t *testing.T) {
+	now := time.Date(2026, 8, 1, 13, 30, 0, 0, time.UTC)
+	reset := now.Add(-time.Hour)
+	unchanged := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":80,"limit_window_seconds":18000,"reset_at":%q}}}`, reset.Format(time.RFC3339)))
+	host := newProbeFixtureHost()
+	host.quota = [][]byte{unchanged, unchanged}
+	r := newDueProbeRuntime(t, now, host)
+	binding, ok := r.bindings.Lookup("a")
+	if !ok {
+		t.Fatal("binding missing")
+	}
+	r.probeController.SetWindow(binding.Instance, ProbeWindowFiveHour, ProbeWindow{
+		State:    ProbePendingCheck,
+		Baseline: ResetProbeBaseline(reset, 80, 5*time.Hour),
+	})
+	if err := r.persistProbeWindows(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.RunProbeDueOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if posts, urls := probePOSTCount(host); posts != 0 {
+		t.Fatalf("mature non-strict observation sent %d Probe POSTs; urls=%v", posts, urls)
+	}
+	window, ok := r.probeController.Window(binding.Instance, ProbeWindowFiveHour)
+	if !ok || window.State != ProbeWaitingReset || !window.Deadline.Equal(now.Add(30*time.Minute)) {
+		t.Fatalf("window = %#v, ok=%v; want read-only bounded WaitingReset", window, ok)
+	}
+}
+
+func TestProbePrecheckOutOfToleranceZeroDoesNotSend(t *testing.T) {
+	now := time.Date(2026, 8, 1, 13, 30, 0, 0, time.UTC)
+	oldReset := now.Add(2 * time.Hour)
+	outsideTolerance := now.Add(4 * time.Hour)
+	observation := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, outsideTolerance.Format(time.RFC3339)))
+	host := newProbeFixtureHost()
+	host.quota = [][]byte{observation}
+	r := newDueProbeRuntime(t, now, host)
+	binding, ok := r.bindings.Lookup("a")
+	if !ok {
+		t.Fatal("binding missing")
+	}
+	r.probeController.SetWindow(binding.Instance, ProbeWindowFiveHour, ProbeWindow{
+		State:    ProbePendingCheck,
+		Baseline: ResetProbeBaseline(oldReset, 20, 5*time.Hour),
+	})
+	if err := r.persistProbeWindows(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.RunProbeDueOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if posts, urls := probePOSTCount(host); posts != 0 {
+		t.Fatalf("out-of-tolerance zero sent %d Probe POSTs; urls=%v", posts, urls)
+	}
+	window, ok := r.probeController.Window(binding.Instance, ProbeWindowFiveHour)
+	if !ok || window.State != ProbeWaitingReset || !window.Deadline.Equal(now.Add(30*time.Minute)) || window.Baseline.SuspectedLazy {
+		t.Fatalf("window = %#v, ok=%v; want read-only bounded WaitingReset", window, ok)
 	}
 }
 
@@ -603,6 +668,83 @@ func TestProbeBootstrapDoesNotResurrectConcurrentReconciliation(t *testing.T) {
 	}
 	if _, exists := r.probeController.Window(binding.Instance, ProbeWindowLong); exists {
 		t.Fatal("controller retained reconciled window")
+	}
+}
+
+func TestProbeBootstrapCopiesBindingsBeforeProbeStateLock(t *testing.T) {
+	now := time.Date(2026, 8, 1, 14, 45, 0, 0, time.UTC)
+	r := newDueProbeRuntime(t, now, newProbeFixtureHost())
+	binding, ok := r.bindings.Lookup("a")
+	if !ok {
+		t.Fatal("binding missing")
+	}
+	used := 20.0
+	seconds := int64(5 * time.Hour / time.Second)
+	quota := ParsedQuota{FiveHour: &QuotaWindow{Kind: WindowFiveHour, UsedPercent: &used, LimitWindowSeconds: &seconds, ResetAt: now.Add(5 * time.Hour)}}
+	r.state.UpsertQuota(AccountState{AuthID: "a", AuthIndex: "idx", Provider: "codex", LastSuccessAt: now, Quota: quota})
+
+	bootstrapHasProbeLock := make(chan struct{})
+	releaseBootstrapClock := make(chan struct{})
+	var firstClock atomic.Bool
+	r.now = func() time.Time {
+		if firstClock.CompareAndSwap(false, true) {
+			close(bootstrapHasProbeLock)
+			<-releaseBootstrapClock
+		}
+		return now
+	}
+	bootstrapDone := make(chan error, 1)
+	go func() { bootstrapDone <- r.bootstrapProbeWindows() }()
+	<-bootstrapHasProbeLock
+
+	readerEntered := make(chan struct{})
+	readerDone := make(chan bool, 1)
+	write := WritebackVersion{Token: binding.ExecutionToken(0), Login: binding.Login, Fingerprint: binding.Fingerprint}
+	go func() {
+		readerDone <- r.bindings.ApplyIfCurrent("a", write, func() {
+			close(readerEntered)
+			_ = r.reconcileObservedProbeWindows(binding.Instance, quota)
+		})
+	}()
+	<-readerEntered
+
+	writerDone := make(chan error, 1)
+	go func() { writerDone <- r.bindings.MarkAuthBlocked("a") }()
+	select {
+	case err := <-writerDone:
+		t.Fatalf("binding writer completed while active reader held RLock: %v", err)
+	case <-time.After(10 * time.Millisecond):
+	}
+	close(releaseBootstrapClock)
+
+	deadline := time.After(500 * time.Millisecond)
+	for bootstrapDone != nil || readerDone != nil || writerDone != nil {
+		select {
+		case err := <-bootstrapDone:
+			if err != nil {
+				t.Fatal(err)
+			}
+			bootstrapDone = nil
+		case applied := <-readerDone:
+			if !applied {
+				t.Fatal("active binding reader rejected current writeback")
+			}
+			readerDone = nil
+		case err := <-writerDone:
+			if err != nil {
+				t.Fatal(err)
+			}
+			writerDone = nil
+		case <-deadline:
+			t.Fatal("binding reader/writer and Probe bootstrap deadlocked")
+		}
+	}
+	persisted, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Bindings["a"].AuthBlocked != true {
+		t.Fatal("queued binding writer did not persist after bootstrap")
 	}
 }
 
@@ -935,6 +1077,16 @@ func probePOSTCount(host *sequenceProbeHost) (int, []string) {
 	return posts, urls
 }
 
+func setPendingSuspectedProbe(t *testing.T, r *QuotaRefresher, instance AuthInstanceID, kind ProbeWindowKind, reset time.Time, length time.Duration) {
+	t.Helper()
+	base := ResetProbeBaseline(reset, 0, length)
+	base.SuspectedLazy = true
+	r.probeController.SetWindow(instance, kind, ProbeWindow{State: ProbePendingCheck, Baseline: base})
+	if err := r.persistProbeWindows(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestFirstObservedWeeklyLazyWindowSendsOneActivationAndVerifies(t *testing.T) {
 	now := time.Date(2026, 7, 18, 22, 59, 55, 0, time.UTC)
 	r, host, binding := newFirstObservedWeeklyLazyRuntime(t, now)
@@ -1252,7 +1404,7 @@ func TestProbeRefreshDuringActiveRunCoalescesRerunAndPersistsSecondInstance(t *t
 	aLazyReset := now.Add(-time.Hour)
 	aActiveReset := now.Add(4 * time.Hour)
 	bReset := now.Add(7 * 24 * time.Hour)
-	aLazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":80,"limit_window_seconds":18000,"reset_at":%q}}}`, aLazyReset.Format(time.RFC3339)))
+	aLazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, aLazyReset.Format(time.RFC3339)))
 	aActive := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, aActiveReset.Format(time.RFC3339)))
 	bLazy := []byte(fmt.Sprintf(`{"rate_limit":{"secondary_window":{"used_percent":0,"limit_window_seconds":604800,"reset_at":%q}}}`, bReset.Format(time.RFC3339)))
 	bActive := []byte(fmt.Sprintf(`{"rate_limit":{"secondary_window":{"used_percent":1,"limit_window_seconds":604800,"reset_at":%q}}}`, bReset.Format(time.RFC3339)))
@@ -1290,7 +1442,9 @@ func TestProbeRefreshDuringActiveRunCoalescesRerunAndPersistsSecondInstance(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.probeController.SetWindow(aBinding.Instance, ProbeWindowFiveHour, ProbeWindow{State: ProbePendingCheck, Baseline: ResetProbeBaseline(aLazyReset, 80, 5*time.Hour)})
+	aBaseline := ResetProbeBaseline(aLazyReset, 0, 5*time.Hour)
+	aBaseline.SuspectedLazy = true
+	r.probeController.SetWindow(aBinding.Instance, ProbeWindowFiveHour, ProbeWindow{State: ProbePendingCheck, Baseline: aBaseline})
 	r.probeController.SetWindow(bBinding.Instance, ProbeWindowLong, ProbeWindow{State: ProbeConfirmed, Baseline: ResetProbeBaseline(now.Add(6*24*time.Hour), 1, 7*24*time.Hour)})
 	if err = r.persistProbeWindows(); err != nil {
 		t.Fatal(err)
@@ -1544,7 +1698,7 @@ func TestProductionProbeFinalStartDeniedEndToEnd(t *testing.T) {
 func TestFailClosedHoldsAndRecoveryRecomputesProbe(t *testing.T) {
 	now := time.Date(2026, 7, 14, 8, 30, 0, 0, time.UTC)
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
-	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":80,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(-time.Hour).Format(time.RFC3339)))
+	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(-time.Hour).Format(time.RFC3339)))
 	active := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(4*time.Hour).Format(time.RFC3339)))
 	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)}, quota: [][]byte{lazy, active}}
 	r := newDueProbeRuntime(t, now, host)
@@ -1581,7 +1735,7 @@ func TestFailClosedHoldsAndRecoveryRecomputesProbe(t *testing.T) {
 		t.Fatal(err)
 	}
 	w, ok = r.probeController.Window(b.Instance, ProbeWindowFiveHour)
-	if !ok || w.State != ProbePendingCheck || !w.Deadline.Equal(now) {
+	if !ok || w.State != ProbePendingCheck || !w.Deadline.IsZero() || !w.Baseline.SuspectedLazy {
 		t.Fatalf("recomputed window=%#v ok=%v", w, ok)
 	}
 	if err = r.RunProbeDueOnce(context.Background()); err != nil {
@@ -1784,7 +1938,7 @@ func TestRemovedProbeLateGetDoesNotRecreateState(t *testing.T) {
 func TestProductionProvisionalProbeMarkerEndToEnd(t *testing.T) {
 	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
-	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":80,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(-time.Hour).Format(time.RFC3339)))
+	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(-time.Hour).Format(time.RFC3339)))
 	active := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(4*time.Hour).Format(time.RFC3339)))
 	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)}, quota: [][]byte{lazy, active}}
 	r := newDueProbeRuntime(t, now, host)
@@ -2039,7 +2193,7 @@ func TestProductionProvisionalConfigDisableLinearizesWithHostStart(t *testing.T)
 func TestProductionProvisionalRequestMarkerEndToEnd(t *testing.T) {
 	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
-	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":80,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(-time.Hour).Format(time.RFC3339)))
+	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(-time.Hour).Format(time.RFC3339)))
 	active := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(4*time.Hour).Format(time.RFC3339)))
 	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","refresh_token":"r0","id_token":"` + idToken + `"}`)}, quota: [][]byte{lazy, active}}
 	r := newDueProbeRuntime(t, now, host)
@@ -2077,7 +2231,7 @@ func TestProductionProvisionalRequestMarkerEndToEnd(t *testing.T) {
 func TestProductionProvisionalRecoveryRiskStartRunsVerifiedProbe(t *testing.T) {
 	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
-	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":80,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(-time.Hour).Format(time.RFC3339)))
+	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(-time.Hour).Format(time.RFC3339)))
 	active := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(4*time.Hour).Format(time.RFC3339)))
 	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","refresh_token":"r0","id_token":"` + idToken + `"}`)}, quota: [][]byte{lazy, active}}
 	r := newDueProbeRuntime(t, now, host)
@@ -2170,7 +2324,7 @@ func TestProductionProbeDetectsExternalResetWhileNormalRefreshDormant(t *testing
 func TestProductionProbeRunsWhileNormalRefreshDormant(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
-	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)}, quota: [][]byte{[]byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":80,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(-time.Hour).Format(time.RFC3339))), []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(4*time.Hour).Format(time.RFC3339)))}}
+	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)}, quota: [][]byte{[]byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(-time.Hour).Format(time.RFC3339))), []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(4*time.Hour).Format(time.RFC3339)))}}
 	cfg := DefaultConfig()
 	cfg.EnableResetProbe = true
 	state := NewPluginState(cfg)
@@ -2189,9 +2343,11 @@ func TestProductionProbeRunsWhileNormalRefreshDormant(t *testing.T) {
 	}
 	adapter.bindings = r.bindings
 	r.coordinator.opts.PropagationWait = func(context.Context, time.Duration) error { return nil }
-	if _, _, err = r.BootstrapBinding(context.Background(), "a"); err != nil {
+	binding, _, err := r.BootstrapBinding(context.Background(), "a")
+	if err != nil {
 		t.Fatal(err)
 	}
+	setPendingSuspectedProbe(t, r, binding.Instance, ProbeWindowFiveHour, now.Add(-time.Hour), 5*time.Hour)
 	if r.refreshController.Mode(now) != RefreshModeDormant {
 		t.Fatal("normal refresh not dormant")
 	}
@@ -2226,7 +2382,7 @@ func TestProductionProbeKPointCrashRestartVerifyFirst(t *testing.T) {
 		t.Run(point, func(t *testing.T) {
 			clock := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 			idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
-			host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)}, quota: [][]byte{[]byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":80,"limit_window_seconds":18000,"reset_at":%q}}}`, clock.Add(-time.Hour).Format(time.RFC3339))), []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, clock.Add(4*time.Hour).Format(time.RFC3339)))}}
+			host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)}, quota: [][]byte{[]byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, clock.Add(-time.Hour).Format(time.RFC3339))), []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, clock.Add(4*time.Hour).Format(time.RFC3339)))}}
 			cfg := DefaultConfig()
 			cfg.EnableResetProbe = true
 			pluginState := NewPluginState(cfg)
@@ -2240,9 +2396,11 @@ func TestProductionProbeKPointCrashRestartVerifyFirst(t *testing.T) {
 				t.Fatal(err)
 			}
 			adapter.bindings = r.bindings
-			if _, _, err = r.BootstrapBinding(context.Background(), "a"); err != nil {
+			binding, _, err := r.BootstrapBinding(context.Background(), "a")
+			if err != nil {
 				t.Fatal(err)
 			}
+			setPendingSuspectedProbe(t, r, binding.Instance, ProbeWindowFiveHour, clock.Add(-time.Hour), 5*time.Hour)
 			r.coordinator.opts.PropagationWait = func(context.Context, time.Duration) error { return nil }
 			registry := testsupport.NewKPointRegistry(points...)
 			r.probeWAL.crash = testsupport.NewCrashController(registry, point)
@@ -2280,7 +2438,7 @@ func TestProductionProbeKPointCrashRestartVerifyFirst(t *testing.T) {
 func TestProbeAttemptIDsMonotonicWithFrozenClock(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
-	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":80,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(-time.Hour).Format(time.RFC3339)))
+	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(-time.Hour).Format(time.RFC3339)))
 	active := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(4*time.Hour).Format(time.RFC3339)))
 	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)}, quota: [][]byte{lazy, active, lazy, active}}
 	cfg := DefaultConfig()
@@ -2296,9 +2454,11 @@ func TestProbeAttemptIDsMonotonicWithFrozenClock(t *testing.T) {
 	}
 	adapter.bindings = r.bindings
 	r.coordinator.opts.PropagationWait = func(context.Context, time.Duration) error { return nil }
-	if _, _, err = r.BootstrapBinding(context.Background(), "a"); err != nil {
+	binding, _, err := r.BootstrapBinding(context.Background(), "a")
+	if err != nil {
 		t.Fatal(err)
 	}
+	setPendingSuspectedProbe(t, r, binding.Instance, ProbeWindowFiveHour, now.Add(-time.Hour), 5*time.Hour)
 	if err = r.RunProbeDueOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -2329,7 +2489,7 @@ func TestProbeAttemptIDsMonotonicWithFrozenClock(t *testing.T) {
 func TestProbeDueSingleFlightDuringPropagation(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
-	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":80,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(-time.Hour).Format(time.RFC3339)))
+	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(-time.Hour).Format(time.RFC3339)))
 	active := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(4*time.Hour).Format(time.RFC3339)))
 	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)}, quota: [][]byte{lazy, active}}
 	cfg := DefaultConfig()
@@ -2344,9 +2504,11 @@ func TestProbeDueSingleFlightDuringPropagation(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter.bindings = r.bindings
-	if _, _, err = r.BootstrapBinding(context.Background(), "a"); err != nil {
+	binding, _, err := r.BootstrapBinding(context.Background(), "a")
+	if err != nil {
 		t.Fatal(err)
 	}
+	setPendingSuspectedProbe(t, r, binding.Instance, ProbeWindowFiveHour, now.Add(-time.Hour), 5*time.Hour)
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	r.coordinator.opts.PropagationWait = func(context.Context, time.Duration) error {
@@ -2558,7 +2720,7 @@ func TestProbeRestartAndDemotionDeleteOrphanState(t *testing.T) {
 func TestProbeDueFailureContinuesOtherConfirmedInstance(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
-	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":80,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(-time.Hour).Format(time.RFC3339)))
+	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(-time.Hour).Format(time.RFC3339)))
 	active := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(4*time.Hour).Format(time.RFC3339)))
 	host := &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "x.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)}, quota: [][]byte{[]byte(`bad`), lazy, active}}
 	cfg := DefaultConfig()
@@ -2576,9 +2738,11 @@ func TestProbeDueFailureContinuesOtherConfirmedInstance(t *testing.T) {
 	}
 	adapter.bindings = r.bindings
 	for _, id := range []string{"a", "b"} {
-		if _, _, err = r.BootstrapBinding(context.Background(), id); err != nil {
-			t.Fatal(err)
+		binding, _, bootstrapErr := r.BootstrapBinding(context.Background(), id)
+		if bootstrapErr != nil {
+			t.Fatal(bootstrapErr)
 		}
+		setPendingSuspectedProbe(t, r, binding.Instance, ProbeWindowFiveHour, now.Add(-time.Hour), 5*time.Hour)
 	}
 	r.coordinator.opts.PropagationWait = func(context.Context, time.Duration) error { return nil }
 	if err = r.RunProbeDueOnce(context.Background()); err == nil {

@@ -163,18 +163,31 @@ func (c *ProbeController) Advance(i AuthInstanceID, e ProbeEvent) []Intent {
 				continue
 			}
 			baseline := w.Baseline
+			shiftedZeroCandidate := false
+			strictAuthorized := false
 			if e.Kind == ProbeEventPrecheckResult && baseline.Kind == ProbeBaselineReset && snap.Valid && snap.ResetAt != nil && snap.Usage != nil {
 				migrated := baseline.SuspectedLazy
 				shifted := snap.ResetAt.After(baseline.ResetAt.Add(probeSkewTolerance))
+				shiftedZeroCandidate = shifted && *snap.Usage == 0
 				strictWindow := QuotaWindow{UsedPercent: snap.Usage, ResetAt: *snap.ResetAt}
 				if (shifted || migrated) && looksLikeStrictLazyObservation(e.Now, strictWindow, baseline.WindowLength) {
 					baseline.ResetAt = *snap.ResetAt
 					baseline.Usage = *snap.Usage
 					baseline.SuspectedLazy = true
+					strictAuthorized = true
 				}
 			}
 			cl := ClassifyProbeWindow(baseline, snap, e.Now)
 			w.Baseline = cl.Baseline
+			unauthorizedLazy := e.Kind == ProbeEventPrecheckResult && (cl.Kind == ProbeStillLazy || cl.Kind == ProbeAmbiguous) && !w.Baseline.SuspectedLazy
+			unauthorizedShiftedZero := e.Kind == ProbeEventPrecheckResult && shiftedZeroCandidate && !strictAuthorized && cl.Kind == ProbeActivatedNew
+			if unauthorizedLazy || unauthorizedShiftedZero {
+				w.State = ProbeWaitingReset
+				w.AttemptID = ""
+				w.Deadline = readOnlyObservationDeadline(w.Baseline, e.Now, e.ObservationInterval)
+				ws[k] = w
+				continue
+			}
 			switch cl.Kind {
 			case ProbeActivatedNew, ProbeActivatedInferred:
 				w.State = ProbeConfirmed
@@ -243,6 +256,16 @@ func deadlineFor(b ProbeBaseline, now time.Time, observationInterval time.Durati
 		return observation
 	}
 	return resetMaturity
+}
+func readOnlyObservationDeadline(b ProbeBaseline, now time.Time, observationInterval time.Duration) time.Time {
+	deadline := deadlineFor(b, now, observationInterval)
+	if deadline.After(now) {
+		return deadline
+	}
+	if observationInterval <= 0 {
+		observationInterval = probeUnknownResetRecheck
+	}
+	return now.Add(observationInterval)
 }
 func probeBackoff(n int) time.Duration {
 	if n <= 1 {

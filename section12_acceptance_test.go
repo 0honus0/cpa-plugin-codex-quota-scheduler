@@ -234,13 +234,14 @@ func runSection12C04AllProbePathsAtEveryKPoint(t *testing.T) {
 				if path.window == ProbeWindowLong {
 					windowLength = 7 * 24 * time.Hour
 				}
-				baseline := ResetProbeBaseline(now.Add(-time.Hour), 80, windowLength)
+				baseline := ResetProbeBaseline(now.Add(-time.Hour), 0, windowLength)
+				baseline.SuspectedLazy = true
 				controller.SetWindow(1, path.window, ProbeWindow{State: path.state, Baseline: baseline, Deadline: now})
 				precheck := controller.Advance(1, ProbeEvent{Kind: ProbeEventDeadline, Window: path.window, Now: now})
 				if len(precheck) != 1 || precheck[0].Class != OperationProbePrecheck {
 					t.Fatalf("path=%s precheck=%#v", path.name, precheck)
 				}
-				send := controller.Advance(1, ProbeEvent{Kind: ProbeEventPrecheckResult, Window: path.window, Now: now, Snapshots: map[ProbeWindowKind]QuotaSnapshot{path.window: {Valid: true, ResetAt: ptrTime(now.Add(-time.Hour)), Usage: ptrFloat(80)}}})
+				send := controller.Advance(1, ProbeEvent{Kind: ProbeEventPrecheckResult, Window: path.window, Now: now, Snapshots: map[ProbeWindowKind]QuotaSnapshot{path.window: {Valid: true, ResetAt: ptrTime(now.Add(-time.Hour)), Usage: ptrFloat(0)}}})
 				if len(send) != 1 || send[0].Class != OperationProbeSend {
 					t.Fatalf("path=%s send=%#v", path.name, send)
 				}

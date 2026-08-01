@@ -45,6 +45,14 @@ func (r *QuotaRefresher) bootstrapProbeWindows() error {
 	if r.probeController == nil || !r.state.Config().EnableResetProbe {
 		return nil
 	}
+	bindings := map[string]RuntimeBinding{}
+	if r.bindings != nil {
+		r.bindings.mu.RLock()
+		for authID, binding := range r.bindings.bindings {
+			bindings[authID] = binding
+		}
+		r.bindings.mu.RUnlock()
+	}
 	// The roster-hold mutex is also the Probe controller/persistence
 	// linearization boundary. Keep snapshot-and-merge ordered with authoritative
 	// reconciliation so a stale bootstrap snapshot cannot resurrect a window.
@@ -72,7 +80,7 @@ func (r *QuotaRefresher) bootstrapProbeWindows() error {
 		if !strictObservation {
 			observedAt = now
 		}
-		b, ok := r.bindings.Lookup(a.AuthID)
+		b, ok := bindings[a.AuthID]
 		if !ok {
 			continue
 		}
