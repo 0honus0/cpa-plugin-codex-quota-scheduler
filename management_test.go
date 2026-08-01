@@ -859,17 +859,43 @@ func TestStatusPageShowsResetProbeWarningOnlyAfterProtectedLoadWhenDisabled(t *t
 	}
 }
 
+func TestManagementEnglishResetProbeCopy(t *testing.T) {
+	page := renderStatusPageForTest(t, NewPluginState(DefaultConfig()))
+	for _, want := range []string{
+		"Probe performs read-only checks at the quota refresh interval with a 30-minute minimum, even while normal refresh is dormant",
+		"sends one tiny request only after detecting a lazy reset window",
+		"This may consume a small amount of quota.",
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("English reset-probe disclosure missing %q", want)
+		}
+	}
+}
+
+func TestManagementChineseResetProbeCopy(t *testing.T) {
+	page := renderStatusPageForTest(t, NewPluginState(DefaultConfig()))
+	for _, want := range []string{
+		"即使普通刷新处于休眠状态，Probe 也会按额度刷新间隔执行只读检查，最短 30 分钟",
+		"只有检测到延迟启动的重置窗口时，才发送一次极小请求",
+		"可能消耗少量额度",
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("Chinese reset-probe disclosure missing %q", want)
+		}
+	}
+}
+
 func TestStatusPageUsesPlainChineseProbeAndMonthlyCopy(t *testing.T) {
 	page := renderStatusPageForTest(t, NewPluginState(DefaultConfig()))
 	for _, want := range []string{
 		"自动激活新的额度周期",
-		"当额度重置时间已经到达，但 OpenAI 尚未生成新的额度周期时",
+		"即使普通刷新处于休眠状态，Probe 也会按额度刷新间隔执行只读检查，最短 30 分钟",
 		"账号列表未确认时仍允许额度探测（高风险）",
 		"通常应保持关闭",
 		"月度账号使用方式",
 		"优先使用月度账号",
 		`'settings.enableResetProbe':'Enable automatic reset probe'`,
-		`'settings.enableResetProbeHelp':'When the quota reset time has arrived but OpenAI has not yet generated a new quota cycle`,
+		`'settings.enableResetProbeHelp':'Probe performs read-only checks at the quota refresh interval with a 30-minute minimum`,
 		`'settings.provisionalProbe':'Allow quota probes when the account roster is unconfirmed (high risk)'`,
 		`'settings.provisionalProbeHelp':'When CPA temporarily cannot confirm the current accounts and priorities`,
 		`'settings.monthlyMode':'Monthly mode'`,

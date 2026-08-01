@@ -6,6 +6,13 @@
 账号提供额度感知的优化版 Fill First 调度，让 CPA 按账号的真实可用性选择账号，
 而不只是依赖固定的账号顺序。
 
+## v0.2.1 主要更新
+
+- 已有安装会安全迁移延迟重置基线；全新安装会先观察首个确认的延迟重置窗口，再执行激活。
+- 即使普通刷新处于休眠状态，选择启用的 Probe 仍会按额度刷新间隔执行只读观察，最短 30 分钟。
+- 只有具备严格的延迟窗口证据时才发送极小的激活请求；确认重置后，该窗口会为下个周期重新布防。
+- 持久化状态与按窗口 single-flight 协调可在崩溃和并发触发时保持安全行为。
+
 ## v0.2.0 主要更新
 
 - 真实可用性优先于插件优先级：不可用的高优先级账号不会再排到可用账号前面。
@@ -281,8 +288,8 @@ make build
 构建发布压缩包和校验文件：
 
 ```bash
-make package VERSION=0.2.0
-make checksums VERSION=0.2.0
+make package VERSION=0.2.1
+make checksums VERSION=0.2.1
 ```
 
 Windows 用户可以用以下命令构建 `dist/codex-quota-scheduler.dll`：
@@ -293,12 +300,12 @@ Windows 用户可以用以下命令构建 `dist/codex-quota-scheduler.dll`：
 
 ## GitHub Release
 
-推送 `v0.2.0` 这类点分数字标签后，GitHub Actions 会运行发布流程。流程会测试
+推送 `v0.2.1` 这类点分数字标签后，GitHub Actions 会运行发布流程。流程会测试
 仓库，并发布各平台压缩包和 `checksums.txt`：
 
 ```bash
-git tag -a v0.2.0 -m "v0.2.0"
-git push origin v0.2.0
+git tag -a v0.2.1 -m "v0.2.1"
+git push origin v0.2.1
 ```
 
 发布包使用以下命名方式：

@@ -7,6 +7,17 @@ provides a quota-aware, optimized Fill First scheduler for Codex accounts, so
 CPA selects accounts by real usability instead of relying on a static account
 order alone.
 
+## v0.2.1 Highlights
+
+- Existing installations safely migrate their lazy-reset baselines; fresh
+  installations observe the first confirmed lazy reset window before activation.
+- While normal refresh is dormant, the opt-in Probe continues read-only
+  observation at the quota refresh interval with a 30-minute minimum.
+- A compact activation request is sent only after strict lazy-window evidence;
+  after a confirmed reset, the window re-arms for the next cycle.
+- Persisted state and per-window single-flight coordination preserve safe
+  behavior across crashes and concurrent triggers.
+
 ## v0.2.0 Highlights
 
 - Availability now comes before plugin priority: an unusable high-priority
@@ -315,8 +326,8 @@ make build
 Build release archives and checksums:
 
 ```bash
-make package VERSION=0.2.0
-make checksums VERSION=0.2.0
+make package VERSION=0.2.1
+make checksums VERSION=0.2.1
 ```
 
 Windows users can build `dist/codex-quota-scheduler.dll` with:
@@ -327,13 +338,13 @@ Windows users can build `dist/codex-quota-scheduler.dll` with:
 
 ## GitHub Releases
 
-Pushing a dotted numeric tag such as `v0.2.0` runs the GitHub Actions release
+Pushing a dotted numeric tag such as `v0.2.1` runs the GitHub Actions release
 workflow. It tests the repository and publishes platform archives plus
 `checksums.txt`:
 
 ```bash
-git tag -a v0.2.0 -m "v0.2.0"
-git push origin v0.2.0
+git tag -a v0.2.1 -m "v0.2.1"
+git push origin v0.2.1
 ```
 
 Release archives use this naming scheme:
