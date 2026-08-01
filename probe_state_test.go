@@ -46,6 +46,25 @@ func TestProbeControllerDormantDeadlineStillEmitsProbe(t *testing.T) {
 	}
 }
 
+func TestProbeControllerUsageOnlyZeroWithoutResetDoesNotSend(t *testing.T) {
+	now := time.Unix(2000, 0).UTC()
+	c := NewProbeController(now)
+	c.SetWindow(2, ProbeWindowLong, ProbeWindow{State: ProbePendingCheck, Baseline: UsageOnlyProbeBaseline(0, now)})
+
+	intents := c.Advance(2, ProbeEvent{Kind: ProbeEventPrecheckResult, Window: ProbeWindowLong, Now: now, Snapshots: map[ProbeWindowKind]QuotaSnapshot{
+		ProbeWindowLong: {Valid: true, Usage: ptrFloat(0)},
+	}})
+	for _, intent := range intents {
+		if intent.Class == OperationProbeSend {
+			t.Fatalf("zero usage without reset emitted ProbeSend: %v", intents)
+		}
+	}
+	window, ok := c.Window(2, ProbeWindowLong)
+	if !ok || window.State != ProbeWaitingReset || !window.Deadline.Equal(now.Add(probeUnknownResetRecheck)) {
+		t.Fatalf("window = %#v, ok=%v; want safely rescheduled WaitingReset", window, ok)
+	}
+}
+
 func TestProbeRosterConfirmedRestoresSuspectedLazyToPendingCheck(t *testing.T) {
 	now := time.Date(2026, 7, 19, 0, 0, 0, 0, time.UTC)
 	base := ResetProbeBaseline(now.Add(7*24*time.Hour), 0, 7*24*time.Hour)

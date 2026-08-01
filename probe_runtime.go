@@ -48,7 +48,8 @@ func (r *QuotaRefresher) bootstrapProbeWindows() error {
 	now := r.now()
 	for _, a := range r.state.Snapshot(now).Accounts {
 		observedAt := a.LastSuccessAt
-		if observedAt.IsZero() || observedAt.After(now) {
+		strictObservation := !observedAt.IsZero() && !observedAt.After(now)
+		if !strictObservation {
 			observedAt = now
 		}
 		b, ok := r.bindings.Lookup(a.AuthID)
@@ -66,7 +67,7 @@ func (r *QuotaRefresher) bootstrapProbeWindows() error {
 				if existing.Baseline.Kind == ProbeBaselineReset && existing.Baseline.WindowLength == 0 {
 					if duration, durationKnown := probeWindowDuration(*pair.w); durationKnown {
 						existing.Baseline.WindowLength = duration
-						if looksLikeStrictLazyObservation(observedAt, *pair.w, duration) {
+						if strictObservation && looksLikeStrictLazyObservation(observedAt, *pair.w, duration) {
 							existing.Baseline.ResetAt = pair.w.ResetAt
 							existing.Baseline.Usage = *pair.w.UsedPercent
 							existing.Baseline.SuspectedLazy = true
@@ -89,7 +90,11 @@ func (r *QuotaRefresher) bootstrapProbeWindows() error {
 			}
 			state := ProbeWaitingReset
 			deadline := pair.w.ResetAt.Add(probeRefreshAfterResetDelay)
-			if _, lazy := firstObservationLazyWindow(observedAt, *pair.w); lazy {
+			lazy := false
+			if strictObservation {
+				_, lazy = firstObservationLazyWindow(observedAt, *pair.w)
+			}
+			if lazy {
 				base.SuspectedLazy = true
 				state = ProbePendingCheck
 				deadline = time.Time{}

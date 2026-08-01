@@ -118,7 +118,7 @@ func ClassifyProbeWindow(base ProbeBaseline, snap QuotaSnapshot, now time.Time) 
 			return ProbeClassification{Kind: ProbeNotDueYet, Baseline: base}
 		}
 		base.NextRecheckAt = now.Add(probeUnknownResetRecheck)
-		return ProbeClassification{Kind: ProbeStillLazy, Baseline: base}
+		return ProbeClassification{Kind: ProbeNotDueYet, Baseline: base}
 	}
 	if snap.ResetAt != nil && snap.ResetAt.Before(base.ResetAt.Add(-probeSkewTolerance)) {
 		return ProbeClassification{Kind: ProbeAnomaly, Baseline: base}

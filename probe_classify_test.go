@@ -273,7 +273,7 @@ func independentProbeOracle(base ProbeBaseline, snap QuotaSnapshot, now time.Tim
 		if now.Before(base.NextRecheckAt) {
 			return ProbeNotDueYet
 		}
-		return ProbeStillLazy
+		return ProbeNotDueYet
 	}
 	if snap.ResetAt != nil && snap.ResetAt.Before(base.ResetAt.Add(-probeSkewTolerance)) {
 		return ProbeAnomaly

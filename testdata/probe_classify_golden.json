@@ -4805,7 +4805,7 @@
     "length": "5h",
     "usage": "decreased",
     "delay": "after",
-    "expected": "still_lazy"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -4933,7 +4933,7 @@
     "length": "5h",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "still_lazy"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5189,7 +5189,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "after",
-    "expected": "still_lazy"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5317,7 +5317,7 @@
     "length": "5h",
     "usage": "same",
     "delay": "edge",
-    "expected": "still_lazy"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5573,7 +5573,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "after",
-    "expected": "still_lazy"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5701,7 +5701,7 @@
     "length": "7d",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "still_lazy"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -5957,7 +5957,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "after",
-    "expected": "still_lazy"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6085,7 +6085,7 @@
     "length": "7d",
     "usage": "same",
     "delay": "edge",
-    "expected": "still_lazy"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6341,7 +6341,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "after",
-    "expected": "still_lazy"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6469,7 +6469,7 @@
     "length": "unknown",
     "usage": "decreased",
     "delay": "edge",
-    "expected": "still_lazy"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6725,7 +6725,7 @@
     "length": "unknown",
     "usage": "same",
     "delay": "after",
-    "expected": "still_lazy"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",
@@ -6853,7 +6853,7 @@
     "length": "unknown",
     "usage": "same",
     "delay": "edge",
-    "expected": "still_lazy"
+    "expected": "not_due_yet"
   },
   {
     "baseline": "usage_only",

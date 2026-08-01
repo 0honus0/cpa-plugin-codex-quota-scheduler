@@ -507,6 +507,68 @@ func TestProbeBootstrapMigratesV020LazyBaselineImmediately(t *testing.T) {
 	}
 }
 
+func TestProbeBootstrapRejectsUntrustedObservationTimeForLazyEvidence(t *testing.T) {
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	reset := now.Add(7 * 24 * time.Hour)
+	zero := 0.0
+	seconds := int64(7 * 24 * time.Hour / time.Second)
+	tests := []struct {
+		name       string
+		observedAt time.Time
+		wantLazy   bool
+	}{
+		{"valid", now, true},
+		{"zero", time.Time{}, false},
+		{"future", now.Add(time.Second), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			quota := ParsedQuota{Family: AccountFamilyWeekly, LongWindow: &QuotaWindow{Kind: WindowWeekly, UsedPercent: &zero, LimitWindowSeconds: &seconds, ResetAt: reset}}
+
+			fresh := newDueProbeRuntime(t, now, newProbeFixtureHost())
+			freshBinding, ok := fresh.bindings.Lookup("a")
+			if !ok {
+				t.Fatal("fresh binding missing")
+			}
+			fresh.probeController.RemoveWindow(freshBinding.Instance, ProbeWindowFiveHour)
+			fresh.state.UpsertQuota(AccountState{AuthID: "a", AuthIndex: "idx", Provider: "codex", Family: AccountFamilyWeekly, LastSuccessAt: tt.observedAt, Quota: quota})
+			if err := fresh.bootstrapProbeWindows(); err != nil {
+				t.Fatal(err)
+			}
+			freshWindow, ok := fresh.probeController.Window(freshBinding.Instance, ProbeWindowLong)
+			if !ok || freshWindow.Baseline.SuspectedLazy != tt.wantLazy || (tt.wantLazy && freshWindow.State != ProbePendingCheck) || (!tt.wantLazy && freshWindow.State != ProbeWaitingReset) {
+				t.Fatalf("fresh window = %#v, ok=%v", freshWindow, ok)
+			}
+
+			host := newProbeFixtureHost()
+			migrated := newDueProbeRuntime(t, now, host)
+			migratedBinding, ok := migrated.bindings.Lookup("a")
+			if !ok {
+				t.Fatal("migrated binding missing")
+			}
+			migrated.probeController.RemoveWindow(migratedBinding.Instance, ProbeWindowFiveHour)
+			migrated.probeController.SetWindow(migratedBinding.Instance, ProbeWindowLong, ProbeWindow{State: ProbeWaitingReset, Baseline: ResetProbeBaseline(reset, 0, 0), Deadline: reset.Add(probeRefreshAfterResetDelay)})
+			migrated.state.UpsertQuota(AccountState{AuthID: "a", AuthIndex: "idx", Provider: "codex", Family: AccountFamilyWeekly, LastSuccessAt: tt.observedAt, Quota: quota})
+			if err := migrated.bootstrapProbeWindows(); err != nil {
+				t.Fatal(err)
+			}
+			migratedWindow, ok := migrated.probeController.Window(migratedBinding.Instance, ProbeWindowLong)
+			if !ok || migratedWindow.Baseline.SuspectedLazy != tt.wantLazy || (tt.wantLazy && migratedWindow.State != ProbePendingCheck) || (!tt.wantLazy && migratedWindow.State != ProbeWaitingReset) {
+				t.Fatalf("migrated window = %#v, ok=%v", migratedWindow, ok)
+			}
+			if !tt.wantLazy {
+				if err := migrated.RunProbeDueOnce(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				posts, urls := probePOSTCount(host)
+				if posts != 0 {
+					t.Fatalf("untrusted observation launched %d probe POSTs; urls=%v", posts, urls)
+				}
+			}
+		})
+	}
+}
+
 func TestProbeBootstrapLoadsKnownLengthBaselineWithoutQuotaCache(t *testing.T) {
 	legacyPath := filepath.Join(t.TempDir(), "state.json")
 	store := NewStateStore(semanticStatePaths(legacyPath).Runtime, OSFileHooks(), nil)
