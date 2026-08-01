@@ -19,6 +19,7 @@ const (
 
 type ProbeBaseline struct {
 	Kind            ProbeBaselineKind `json:"kind"`
+	WindowKind      WindowKind        `json:"window_kind,omitempty"`
 	ResetAt         time.Time         `json:"reset_at,omitempty"`
 	Usage           float64           `json:"usage"`
 	NextRecheckAt   time.Time         `json:"next_recheck_at,omitempty"`
@@ -36,9 +37,12 @@ func UsageOnlyProbeBaseline(usage float64, next time.Time) ProbeBaseline {
 }
 
 type QuotaSnapshot struct {
-	Valid   bool
-	ResetAt *time.Time
-	Usage   *float64
+	Valid             bool
+	ResetAt           *time.Time
+	Usage             *float64
+	WindowKind        WindowKind
+	WindowLength      time.Duration
+	WindowLengthKnown bool
 }
 type ProbeClassificationKind string
 
@@ -95,6 +99,10 @@ func ClassifyProbeWindow(base ProbeBaseline, snap QuotaSnapshot, now time.Time) 
 			return ProbeClassification{Kind: ProbeNotDueYet, Baseline: UsageOnlyProbeBaseline(*snap.Usage, now.Add(probeUnknownResetRecheck))}
 		}
 		n := ResetProbeBaseline(*snap.ResetAt, *snap.Usage, 0)
+		n.WindowKind = snap.WindowKind
+		if snap.WindowLengthKnown {
+			n.WindowLength = snap.WindowLength
+		}
 		if snap.ResetAt.After(now) {
 			return ProbeClassification{Kind: ProbeNotDueYet, Baseline: n}
 		}
@@ -103,6 +111,10 @@ func ClassifyProbeWindow(base ProbeBaseline, snap QuotaSnapshot, now time.Time) 
 	if base.Kind == ProbeBaselineUsageOnly {
 		if snap.ResetAt != nil {
 			n := ResetProbeBaseline(*snap.ResetAt, *snap.Usage, 0)
+			n.WindowKind = snap.WindowKind
+			if snap.WindowLengthKnown {
+				n.WindowLength = snap.WindowLength
+			}
 			if snap.ResetAt.After(now) {
 				return ProbeClassification{Kind: ProbeNotDueYet, Baseline: n}
 			}

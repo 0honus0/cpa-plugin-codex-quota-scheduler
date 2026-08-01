@@ -240,6 +240,7 @@ type QuotaRefresher struct {
 	probeRunMu           sync.Mutex
 	probeRunStateMu      sync.Mutex
 	probeRerunPending    bool
+	probeLaunchActive    bool
 	probeHoldMu          sync.Mutex
 	probeHoldPending     bool
 	probeHoldErr         error
@@ -515,8 +516,11 @@ func (r *QuotaRefresher) normalBackgroundAllowed() bool {
 	roster := normalizeHostRosterLifecycle(r.enforceRosterLifecycle())
 	return normalRosterBackgroundAllowed(roster)
 }
+func (r *QuotaRefresher) resetProbeEnabled() bool {
+	return r != nil && r.state != nil && r.state.Config().EnableResetProbe
+}
 func (r *QuotaRefresher) probeBackgroundAllowed() bool {
-	if r == nil {
+	if !r.resetProbeEnabled() {
 		return false
 	}
 	if r.normalBackgroundAllowed() {
@@ -1176,12 +1180,16 @@ func (r *QuotaRefresher) Start() {
 	r.mu.Lock()
 	r.startRequested = true
 	r.mu.Unlock()
-	if !r.normalBackgroundAllowed() && !r.probeBackgroundAllowed() && !r.provisionalProbeRiskConfigured() {
+	if !r.normalBackgroundAllowed() && !r.probeBackgroundAllowed() && !(r.resetProbeEnabled() && r.provisionalProbeRiskConfigured()) {
 		return
 	}
 	r.mu.Lock()
 	if r.running {
 		r.mu.Unlock()
+		if r.probeController != nil && r.resetProbeEnabled() && hasPendingProbeWindows(r.probeController.Snapshot()) {
+			r.launchProbe(false)
+		}
+		r.wakeRefreshLoop()
 		return
 	}
 	stop := make(chan struct{})
@@ -1193,7 +1201,7 @@ func (r *QuotaRefresher) Start() {
 	r.running = true
 	r.stopping = false
 	r.mu.Unlock()
-	if r.probeController != nil {
+	if r.probeController != nil && r.resetProbeEnabled() {
 		r.launchProbe(true)
 	}
 
@@ -1252,15 +1260,33 @@ func hasPendingProbeWindows(windows map[AuthInstanceID]map[ProbeWindowKind]Probe
 }
 
 func (r *QuotaRefresher) launchProbe(recoverFirst bool) {
+	if !r.resetProbeEnabled() {
+		return
+	}
 	r.mu.Lock()
 	if r.stopping {
 		r.mu.Unlock()
 		return
 	}
+	r.probeRunStateMu.Lock()
+	if r.probeLaunchActive {
+		r.probeRerunPending = true
+		r.probeRunStateMu.Unlock()
+		r.mu.Unlock()
+		return
+	}
+	r.probeLaunchActive = true
+	r.probeRunStateMu.Unlock()
 	r.wg.Add(1)
 	r.mu.Unlock()
 	go func() {
-		defer r.wg.Done()
+		defer func() {
+			r.probeRunStateMu.Lock()
+			r.probeLaunchActive = false
+			r.probeRunStateMu.Unlock()
+			r.wakeRefreshLoop()
+			r.wg.Done()
+		}()
 		if recoverFirst {
 			_ = r.RunProbeRecoveryOnce(context.Background())
 		}
@@ -1271,7 +1297,7 @@ func (r *QuotaRefresher) launchProbe(recoverFirst bool) {
 func (r *QuotaRefresher) nextRefreshLoopDelay() (time.Duration, bool) {
 	now := r.now()
 	deadline := r.refreshController.NextDeadline(now)
-	if r.probeController != nil {
+	if r.probeController != nil && r.resetProbeEnabled() {
 		if probe := r.probeController.NextDeadline(); !probe.IsZero() && (deadline.IsZero() || probe.Before(deadline)) {
 			deadline = probe
 		}
@@ -1661,6 +1687,16 @@ func (r *QuotaRefresher) doBackgroundHTTPRequest(req pluginapi.HTTPRequest, prob
 		return pluginapi.HTTPResponse{}, ErrCapabilityB
 	}
 	defer owner.rosterMu.RUnlock()
+	if owner.state == nil && probe {
+		return pluginapi.HTTPResponse{}, ErrCapabilityB
+	}
+	if owner.state != nil && (probe || roster.Provisional) {
+		owner.state.mu.RLock()
+		defer owner.state.mu.RUnlock()
+		if probe && !owner.state.cfg.EnableResetProbe {
+			return pluginapi.HTTPResponse{}, ErrCapabilityB
+		}
+	}
 	allowed := normalRosterBackgroundAllowed(roster)
 	if probe {
 		allowed = allowed || provisionalProbeBackgroundAllowed(roster)
@@ -1669,8 +1705,6 @@ func (r *QuotaRefresher) doBackgroundHTTPRequest(req pluginapi.HTTPRequest, prob
 		if owner.state == nil {
 			return pluginapi.HTTPResponse{}, ErrCapabilityB
 		}
-		owner.state.mu.RLock()
-		defer owner.state.mu.RUnlock()
 		if !owner.state.cfg.ProbeOnProvisionalRoster || !provisionalAgeValid(owner.now(), roster.ConfirmedAt) {
 			allowed = false
 		}

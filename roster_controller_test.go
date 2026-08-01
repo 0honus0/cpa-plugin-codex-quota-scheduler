@@ -478,7 +478,9 @@ func TestProductionProbePrewakesRosterController(t *testing.T) {
 	globalRosterController = controller
 	refresherMu.Unlock()
 	t.Cleanup(func() { refresherMu.Lock(); globalRosterController = previous; refresherMu.Unlock() })
-	_ = (&QuotaRefresher{}).RunProbeDueOnce(context.Background())
+	cfg := DefaultConfig()
+	cfg.EnableResetProbe = true
+	_ = (&QuotaRefresher{state: NewPluginState(cfg)}).RunProbeDueOnce(context.Background())
 	if host.callCount() != 1 {
 		t.Fatalf("probe roster calls=%d", host.callCount())
 	}

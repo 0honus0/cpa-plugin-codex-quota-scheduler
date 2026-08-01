@@ -1562,7 +1562,9 @@ func (h *countingProductionHost) Do(req pluginapi.HTTPRequest) (pluginapi.HTTPRe
 
 func TestProductionRosterLifecycleGatesBackgroundRequests(t *testing.T) {
 	host := &countingProductionHost{httpResp: pluginapi.HTTPResponse{StatusCode: http.StatusOK}}
-	state := NewPluginState(DefaultConfig())
+	probeCfg := DefaultConfig()
+	probeCfg.EnableResetProbe = true
+	state := NewPluginState(probeCfg)
 	version := state.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 7, AuthIDs: map[string]struct{}{"a": {}}})
 	adapter := &rosterCredentialHost{host: host, roster: HostRosterSnapshot{Capability: CapabilityB}}
 	r, err := NewProductionQuotaRefresher(host, state, adapter, HostRosterSnapshot{Capability: CapabilityB}, filepath.Join(t.TempDir(), "state.json"), time.Now)
@@ -1710,7 +1712,9 @@ func TestProductionLifecyclePublicationFencesHTTPStart(t *testing.T) {
 
 func TestProductionProbeLifecycleHostCallGates(t *testing.T) {
 	host := &countingProductionHost{httpResp: pluginapi.HTTPResponse{StatusCode: http.StatusOK}}
-	r, err := NewProductionQuotaRefresher(host, NewPluginState(DefaultConfig()), &runtimeCredentialHost{current: map[AuthInstanceID]HostAuth{}}, HostRosterSnapshot{Capability: CapabilityB}, filepath.Join(t.TempDir(), "state.json"), time.Now)
+	cfg := DefaultConfig()
+	cfg.EnableResetProbe = true
+	r, err := NewProductionQuotaRefresher(host, NewPluginState(cfg), &runtimeCredentialHost{current: map[AuthInstanceID]HostAuth{}}, HostRosterSnapshot{Capability: CapabilityB}, filepath.Join(t.TempDir(), "state.json"), time.Now)
 	if err != nil {
 		t.Fatal(err)
 	}

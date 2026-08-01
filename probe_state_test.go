@@ -25,11 +25,12 @@ func TestProbeControllerDualWindowIndependent(t *testing.T) {
 	c := NewProbeController(now)
 	c.SetWindow(1, ProbeWindowFiveHour, ProbeWindow{State: ProbePendingCheck, Baseline: ResetProbeBaseline(now.Add(-time.Hour), 80, 5*time.Hour)})
 	longBase := ResetProbeBaseline(now.Add(-time.Hour), 0, 7*24*time.Hour)
+	longBase.WindowKind = WindowWeekly
 	longBase.SuspectedLazy = true
 	c.SetWindow(1, ProbeWindowLong, ProbeWindow{State: ProbePendingCheck, Baseline: longBase})
 	ints := c.Advance(1, ProbeEvent{Kind: ProbeEventPrecheckResult, Now: now, Snapshots: map[ProbeWindowKind]QuotaSnapshot{
 		ProbeWindowFiveHour: {Valid: true, ResetAt: ptrTime(now.Add(4 * time.Hour)), Usage: ptrFloat(10)},
-		ProbeWindowLong:     {Valid: true, ResetAt: ptrTime(now.Add(-time.Hour)), Usage: ptrFloat(0)},
+		ProbeWindowLong:     {Valid: true, ResetAt: ptrTime(now.Add(7 * 24 * time.Hour)), Usage: ptrFloat(0), WindowKind: WindowWeekly, WindowLength: 7 * 24 * time.Hour, WindowLengthKnown: true},
 	}})
 	five, _ := c.Window(1, ProbeWindowFiveHour)
 	long, _ := c.Window(1, ProbeWindowLong)
@@ -128,11 +129,12 @@ func TestProbeAllStateEventsAndDualWindowProduct(t *testing.T) {
 		for _, right := range states {
 			c := NewProbeController(now)
 			base := ResetProbeBaseline(now.Add(-time.Hour), 80, 5*time.Hour)
-			longBase := ResetProbeBaseline(now.Add(-time.Hour), 0, 5*time.Hour)
+			longBase := ResetProbeBaseline(now.Add(-time.Hour), 0, 7*24*time.Hour)
+			longBase.WindowKind = WindowWeekly
 			longBase.SuspectedLazy = true
 			c.SetWindow(1, ProbeWindowFiveHour, ProbeWindow{State: left, Baseline: base, Deadline: now})
 			c.SetWindow(1, ProbeWindowLong, ProbeWindow{State: right, Baseline: longBase, Deadline: now})
-			c.Advance(1, ProbeEvent{Kind: ProbeEventPrecheckResult, Now: now, Snapshots: map[ProbeWindowKind]QuotaSnapshot{ProbeWindowFiveHour: {Valid: true, ResetAt: ptrTime(now.Add(-time.Hour)), Usage: ptrFloat(80)}, ProbeWindowLong: {Valid: true, ResetAt: ptrTime(now.Add(-time.Hour)), Usage: ptrFloat(0)}}})
+			c.Advance(1, ProbeEvent{Kind: ProbeEventPrecheckResult, Now: now, Snapshots: map[ProbeWindowKind]QuotaSnapshot{ProbeWindowFiveHour: {Valid: true, ResetAt: ptrTime(now.Add(-time.Hour)), Usage: ptrFloat(80)}, ProbeWindowLong: {Valid: true, ResetAt: ptrTime(now.Add(7 * 24 * time.Hour)), Usage: ptrFloat(0), WindowKind: WindowWeekly, WindowLength: 7 * 24 * time.Hour, WindowLengthKnown: true}}})
 			five, _ := c.Window(1, ProbeWindowFiveHour)
 			long, _ := c.Window(1, ProbeWindowLong)
 			wantFive := left

@@ -169,19 +169,24 @@ func (c *ProbeController) Advance(i AuthInstanceID, e ProbeEvent) []Intent {
 				migrated := baseline.SuspectedLazy
 				shifted := snap.ResetAt.After(baseline.ResetAt.Add(probeSkewTolerance))
 				shiftedZeroCandidate = shifted && *snap.Usage == 0
-				strictWindow := QuotaWindow{UsedPercent: snap.Usage, ResetAt: *snap.ResetAt}
-				if (shifted || migrated) && looksLikeStrictLazyObservation(e.Now, strictWindow, baseline.WindowLength) {
+				kindMatches := baseline.WindowKind == "" || (snap.WindowKind != "" && snap.WindowKind == baseline.WindowKind)
+				strictWindow := QuotaWindow{Kind: snap.WindowKind, UsedPercent: snap.Usage, ResetAt: *snap.ResetAt}
+				if (shifted || migrated) && kindMatches && snap.WindowLengthKnown && looksLikeStrictLazyObservation(e.Now, strictWindow, snap.WindowLength) {
 					baseline.ResetAt = *snap.ResetAt
 					baseline.Usage = *snap.Usage
+					if baseline.WindowKind == "" {
+						baseline.WindowKind = snap.WindowKind
+					}
 					baseline.SuspectedLazy = true
 					strictAuthorized = true
 				}
 			}
 			cl := ClassifyProbeWindow(baseline, snap, e.Now)
 			w.Baseline = cl.Baseline
-			unauthorizedLazy := e.Kind == ProbeEventPrecheckResult && (cl.Kind == ProbeStillLazy || cl.Kind == ProbeAmbiguous) && !w.Baseline.SuspectedLazy
+			unauthorizedLazy := e.Kind == ProbeEventPrecheckResult && (cl.Kind == ProbeStillLazy || cl.Kind == ProbeAmbiguous) && !strictAuthorized
 			unauthorizedShiftedZero := e.Kind == ProbeEventPrecheckResult && shiftedZeroCandidate && !strictAuthorized && cl.Kind == ProbeActivatedNew
 			if unauthorizedLazy || unauthorizedShiftedZero {
+				w.Baseline.SuspectedLazy = false
 				w.State = ProbeWaitingReset
 				w.AttemptID = ""
 				w.Deadline = readOnlyObservationDeadline(w.Baseline, e.Now, e.ObservationInterval)
