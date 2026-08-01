@@ -36,6 +36,39 @@ func TestProbeControllerDualWindowIndependent(t *testing.T) {
 	}
 }
 
+func TestKnownResetDeadlineIncludesBoundedObservation(t *testing.T) {
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	for _, tt := range []struct {
+		name  string
+		reset time.Time
+		want  time.Time
+	}{
+		{name: "observation wins", reset: now.Add(5 * time.Hour), want: now.Add(30 * time.Minute)},
+		{name: "reset maturity wins", reset: now.Add(10 * time.Minute), want: now.Add(11 * time.Minute)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewProbeController(now)
+			c.SetWindow(1, ProbeWindowFiveHour, ProbeWindow{
+				State:    ProbePendingCheck,
+				Baseline: ResetProbeBaseline(tt.reset, 20, 5*time.Hour),
+			})
+			c.Advance(1, ProbeEvent{
+				Kind:                ProbeEventPrecheckResult,
+				Window:              ProbeWindowFiveHour,
+				Now:                 now,
+				ObservationInterval: 30 * time.Minute,
+				Snapshots: map[ProbeWindowKind]QuotaSnapshot{
+					ProbeWindowFiveHour: {Valid: true, ResetAt: ptrTime(tt.reset), Usage: ptrFloat(20)},
+				},
+			})
+			window, ok := c.Window(1, ProbeWindowFiveHour)
+			if !ok || window.State != ProbeWaitingReset || !window.Deadline.Equal(tt.want) {
+				t.Fatalf("window = %#v, ok=%v; want WaitingReset deadline %s", window, ok, tt.want)
+			}
+		})
+	}
+}
+
 func TestProbeControllerDormantDeadlineStillEmitsProbe(t *testing.T) {
 	now := time.Unix(2000, 0).UTC()
 	c := NewProbeController(now)

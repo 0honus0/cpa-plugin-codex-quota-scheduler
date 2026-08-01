@@ -203,6 +203,137 @@ func newProductionLazyRefreshRuntime(t *testing.T, now time.Time, host *sequence
 	return r
 }
 
+func TestProbeObservationIntervalHasThirtyMinuteFloor(t *testing.T) {
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name       string
+		configured time.Duration
+		want       time.Duration
+	}{
+		{name: "ten minutes floors", configured: 10 * time.Minute, want: 30 * time.Minute},
+		{name: "forty five minutes remains", configured: 45 * time.Minute, want: 45 * time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newDueProbeRuntime(t, now, newProbeFixtureHost())
+			cfg := r.state.Config()
+			cfg.QuotaRefreshInterval = tt.configured
+			r.state.ReplaceConfig(cfg)
+			binding, ok := r.bindings.Lookup("a")
+			if !ok {
+				t.Fatal("binding missing")
+			}
+			reset := now.Add(5 * time.Hour)
+			r.probeController.SetWindow(binding.Instance, ProbeWindowLong, ProbeWindow{
+				State:    ProbeWaitingReset,
+				Baseline: ResetProbeBaseline(reset, 20, 5*time.Hour),
+				Deadline: reset.Add(probeRefreshAfterResetDelay),
+			})
+			if err := r.persistProbeWindows(); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := r.bootstrapProbeWindows(); err != nil {
+				t.Fatal(err)
+			}
+			window, ok := r.probeController.Window(binding.Instance, ProbeWindowLong)
+			if !ok || !window.Deadline.Equal(now.Add(tt.want)) {
+				t.Fatalf("window = %#v, ok=%v; want observation deadline %s", window, ok, now.Add(tt.want))
+			}
+		})
+	}
+}
+
+func TestUnchangedWindowObservationReschedulesWithoutProbe(t *testing.T) {
+	now := time.Date(2026, 8, 1, 13, 0, 0, 0, time.UTC)
+	reset := now.Add(5 * time.Hour)
+	host := newProbeFixtureHost()
+	host.quota = [][]byte{[]byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":20,"limit_window_seconds":18000,"reset_at":%q}}}`, reset.Format(time.RFC3339)))}
+	r := newDueProbeRuntime(t, now, host)
+	binding, ok := r.bindings.Lookup("a")
+	if !ok {
+		t.Fatal("binding missing")
+	}
+	r.probeController.SetWindow(binding.Instance, ProbeWindowFiveHour, ProbeWindow{
+		State:    ProbePendingCheck,
+		Baseline: ResetProbeBaseline(reset, 20, 5*time.Hour),
+	})
+	if err := r.persistProbeWindows(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.RunProbeDueOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if posts, urls := probePOSTCount(host); posts != 0 {
+		t.Fatalf("unchanged observation sent %d Probe POSTs; urls=%v", posts, urls)
+	}
+	window, ok := r.probeController.Window(binding.Instance, ProbeWindowFiveHour)
+	if !ok || window.State != ProbeWaitingReset || !window.Deadline.Equal(now.Add(30*time.Minute)) {
+		t.Fatalf("window = %#v, ok=%v; want bounded WaitingReset", window, ok)
+	}
+}
+
+func TestExternalResetObservationSendsOnce(t *testing.T) {
+	now := time.Date(2026, 8, 1, 13, 0, 0, 0, time.UTC)
+	oldReset := now.Add(2 * time.Hour)
+	newReset := now.Add(5 * time.Hour)
+	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, newReset.Format(time.RFC3339)))
+	active := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":1,"limit_window_seconds":18000,"reset_at":%q}}}`, newReset.Format(time.RFC3339)))
+	host := newProbeFixtureHost()
+	host.quota = [][]byte{lazy, active}
+	r := newDueProbeRuntime(t, now, host)
+	binding, ok := r.bindings.Lookup("a")
+	if !ok {
+		t.Fatal("binding missing")
+	}
+	r.probeController.SetWindow(binding.Instance, ProbeWindowFiveHour, ProbeWindow{
+		State:    ProbePendingCheck,
+		Baseline: ResetProbeBaseline(oldReset, 20, 5*time.Hour),
+	})
+	if err := r.persistProbeWindows(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.RunProbeDueOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if posts, urls := probePOSTCount(host); posts != 1 {
+		t.Fatalf("external lazy reset sent %d Probe POSTs, want 1; urls=%v", posts, urls)
+	}
+	window, ok := r.probeController.Window(binding.Instance, ProbeWindowFiveHour)
+	if !ok || window.State != ProbeConfirmed {
+		t.Fatalf("window = %#v, ok=%v; want Confirmed", window, ok)
+	}
+}
+
+func TestExternalResetObservationMissingEvidenceDoesNotSend(t *testing.T) {
+	now := time.Date(2026, 8, 1, 13, 0, 0, 0, time.UTC)
+	oldReset := now.Add(2 * time.Hour)
+	newReset := now.Add(5 * time.Hour)
+	host := newProbeFixtureHost()
+	host.quota = [][]byte{[]byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"limit_window_seconds":18000,"reset_at":%q}}}`, newReset.Format(time.RFC3339)))}
+	r := newDueProbeRuntime(t, now, host)
+	binding, ok := r.bindings.Lookup("a")
+	if !ok {
+		t.Fatal("binding missing")
+	}
+	r.probeController.SetWindow(binding.Instance, ProbeWindowFiveHour, ProbeWindow{
+		State:    ProbePendingCheck,
+		Baseline: ResetProbeBaseline(oldReset, 20, 5*time.Hour),
+	})
+	if err := r.persistProbeWindows(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.RunProbeDueOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if posts, urls := probePOSTCount(host); posts != 0 {
+		t.Fatalf("missing usage evidence sent %d Probe POSTs; urls=%v", posts, urls)
+	}
+}
+
 func TestProductionRefreshLaunchesFirstObservedLazyProbe(t *testing.T) {
 	now := time.Date(2026, 7, 19, 11, 18, 49, 0, time.UTC)
 	reset := now.Add(7 * 24 * time.Hour)
@@ -303,6 +434,175 @@ func TestProbeRefreshPreservesAbsentFiveHourDuringNonterminalAttempt(t *testing.
 				t.Fatal("nonterminal attempt lost persisted FiveHour state")
 			}
 		})
+	}
+}
+
+func TestReconcileConfirmedOrdinaryObservationRearmsWaitingReset(t *testing.T) {
+	now := time.Date(2026, 8, 1, 14, 0, 0, 0, time.UTC)
+	r := newDueProbeRuntime(t, now, newProbeFixtureHost())
+	binding, ok := r.bindings.Lookup("a")
+	if !ok {
+		t.Fatal("binding missing")
+	}
+	oldReset := now.Add(2 * time.Hour)
+	newReset := now.Add(5 * time.Hour)
+	r.probeController.SetWindow(binding.Instance, ProbeWindowFiveHour, ProbeWindow{
+		State:    ProbeConfirmed,
+		Baseline: ResetProbeBaseline(oldReset, 1, 5*time.Hour),
+	})
+	if err := r.persistProbeWindows(); err != nil {
+		t.Fatal(err)
+	}
+	used := 25.0
+	seconds := int64(5 * time.Hour / time.Second)
+	quota := ParsedQuota{FiveHour: &QuotaWindow{Kind: WindowFiveHour, UsedPercent: &used, LimitWindowSeconds: &seconds, ResetAt: newReset}}
+
+	if err := r.reconcileObservedProbeWindows(binding.Instance, quota); err != nil {
+		t.Fatal(err)
+	}
+	window, ok := r.probeController.Window(binding.Instance, ProbeWindowFiveHour)
+	if !ok || window.State != ProbeWaitingReset || window.Baseline.SuspectedLazy || window.Baseline.Usage != used || !window.Baseline.ResetAt.Equal(newReset) || window.Baseline.WindowLength != 5*time.Hour || !window.Deadline.Equal(now.Add(30*time.Minute)) {
+		t.Fatalf("re-armed ordinary window = %#v, ok=%v", window, ok)
+	}
+	persisted, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := persisted.ProbeWindows[binding.Instance][ProbeWindowFiveHour]; !reflect.DeepEqual(got, window) {
+		t.Fatalf("persisted window = %#v, want %#v", got, window)
+	}
+}
+
+func TestReconcileConfirmedStrictLazyObservationRearmsPending(t *testing.T) {
+	now := time.Date(2026, 8, 1, 14, 0, 0, 0, time.UTC)
+	r := newDueProbeRuntime(t, now, newProbeFixtureHost())
+	binding, ok := r.bindings.Lookup("a")
+	if !ok {
+		t.Fatal("binding missing")
+	}
+	oldReset := now.Add(2 * time.Hour)
+	newReset := now.Add(5 * time.Hour)
+	r.probeController.SetWindow(binding.Instance, ProbeWindowFiveHour, ProbeWindow{
+		State:    ProbeConfirmed,
+		Baseline: ResetProbeBaseline(oldReset, 1, 5*time.Hour),
+	})
+	if err := r.persistProbeWindows(); err != nil {
+		t.Fatal(err)
+	}
+	zero := 0.0
+	seconds := int64(5 * time.Hour / time.Second)
+	quota := ParsedQuota{FiveHour: &QuotaWindow{Kind: WindowFiveHour, UsedPercent: &zero, LimitWindowSeconds: &seconds, ResetAt: newReset}}
+	r.state.UpsertQuota(AccountState{
+		AuthID:        "a",
+		AuthIndex:     "idx",
+		Provider:      "codex",
+		LastSuccessAt: now,
+		Quota:         quota,
+	})
+
+	if err := r.bootstrapProbeWindows(); err != nil {
+		t.Fatal(err)
+	}
+	window, ok := r.probeController.Window(binding.Instance, ProbeWindowFiveHour)
+	if !ok || window.State != ProbePendingCheck || !window.Baseline.SuspectedLazy || !window.Deadline.IsZero() {
+		t.Fatalf("re-armed strict lazy window = %#v, ok=%v", window, ok)
+	}
+}
+
+func TestReconcileConfirmedInvalidOrMissingEvidenceRemainsConfirmed(t *testing.T) {
+	now := time.Date(2026, 8, 1, 14, 0, 0, 0, time.UTC)
+	for _, tt := range []struct {
+		name  string
+		quota ParsedQuota
+	}{
+		{
+			name: "invalid usage",
+			quota: ParsedQuota{FiveHour: &QuotaWindow{
+				Kind: WindowFiveHour, LimitWindowSeconds: func() *int64 { value := int64(5 * time.Hour / time.Second); return &value }(), ResetAt: now.Add(5 * time.Hour),
+			}},
+		},
+		{name: "missing window", quota: ParsedQuota{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newDueProbeRuntime(t, now, newProbeFixtureHost())
+			binding, ok := r.bindings.Lookup("a")
+			if !ok {
+				t.Fatal("binding missing")
+			}
+			confirmed := ProbeWindow{State: ProbeConfirmed, Baseline: ResetProbeBaseline(now.Add(2*time.Hour), 1, 5*time.Hour)}
+			r.probeController.SetWindow(binding.Instance, ProbeWindowFiveHour, confirmed)
+			if err := r.persistProbeWindows(); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := r.reconcileObservedProbeWindows(binding.Instance, tt.quota); err != nil {
+				t.Fatal(err)
+			}
+			window, ok := r.probeController.Window(binding.Instance, ProbeWindowFiveHour)
+			if !ok || !reflect.DeepEqual(window, confirmed) {
+				t.Fatalf("window = %#v, ok=%v; want unchanged Confirmed %#v", window, ok, confirmed)
+			}
+		})
+	}
+}
+
+func TestProbeBootstrapDoesNotResurrectConcurrentReconciliation(t *testing.T) {
+	now := time.Date(2026, 8, 1, 14, 30, 0, 0, time.UTC)
+	r := newDueProbeRuntime(t, now, newProbeFixtureHost())
+	binding, ok := r.bindings.Lookup("a")
+	if !ok {
+		t.Fatal("binding missing")
+	}
+	r.probeController.RemoveWindow(binding.Instance, ProbeWindowFiveHour)
+	reset := now.Add(5 * time.Hour)
+	r.probeController.SetWindow(binding.Instance, ProbeWindowLong, ProbeWindow{
+		State:    ProbeWaitingReset,
+		Baseline: ResetProbeBaseline(reset, 20, 5*time.Hour),
+		Deadline: reset.Add(probeRefreshAfterResetDelay),
+	})
+	if err := r.persistProbeWindows(); err != nil {
+		t.Fatal(err)
+	}
+
+	originalReplace := r.runtimeStore.hooks.Replace
+	reconcileWriteStarted := make(chan struct{})
+	releaseReconcileWrite := make(chan struct{})
+	var replaceCalls atomic.Int32
+	r.runtimeStore.hooks.Replace = func(src, dst string) error {
+		if replaceCalls.Add(1) == 1 {
+			close(reconcileWriteStarted)
+			<-releaseReconcileWrite
+		}
+		return originalReplace(src, dst)
+	}
+
+	reconcileDone := make(chan error, 1)
+	go func() { reconcileDone <- r.reconcileObservedProbeWindows(binding.Instance, ParsedQuota{}) }()
+	<-reconcileWriteStarted
+	bootstrapDone := make(chan error, 1)
+	go func() { bootstrapDone <- r.bootstrapProbeWindows() }()
+	// Without the controller/persistence linearization boundary, bootstrap
+	// shortens the deadline and captures a stale snapshot during this hold.
+	// With it, bootstrap waits until reconciliation also removes the controller
+	// entry, then observes no window to persist.
+	time.Sleep(10 * time.Millisecond)
+	close(releaseReconcileWrite)
+	if err := <-reconcileDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-bootstrapDone; err != nil {
+		t.Fatal(err)
+	}
+
+	persisted, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := persisted.ProbeWindows[binding.Instance][ProbeWindowLong]; exists {
+		t.Fatalf("stale bootstrap resurrected reconciled window: %#v", persisted.ProbeWindows[binding.Instance][ProbeWindowLong])
+	}
+	if _, exists := r.probeController.Window(binding.Instance, ProbeWindowLong); exists {
+		t.Fatal("controller retained reconciled window")
 	}
 }
 
@@ -986,7 +1286,12 @@ func TestProbeRefreshDuringActiveRunCoalescesRerunAndPersistsSecondInstance(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
+	bBinding, _, err := r.BootstrapBinding(context.Background(), "b")
+	if err != nil {
+		t.Fatal(err)
+	}
 	r.probeController.SetWindow(aBinding.Instance, ProbeWindowFiveHour, ProbeWindow{State: ProbePendingCheck, Baseline: ResetProbeBaseline(aLazyReset, 80, 5*time.Hour)})
+	r.probeController.SetWindow(bBinding.Instance, ProbeWindowLong, ProbeWindow{State: ProbeConfirmed, Baseline: ResetProbeBaseline(now.Add(6*24*time.Hour), 1, 7*24*time.Hour)})
 	if err = r.persistProbeWindows(); err != nil {
 		t.Fatal(err)
 	}
@@ -998,6 +1303,9 @@ func TestProbeRefreshDuringActiveRunCoalescesRerunAndPersistsSecondInstance(t *t
 
 	propagationStarted := make(chan struct{})
 	releasePropagation := make(chan struct{})
+	var releasePropagationOnce sync.Once
+	releaseA := func() { releasePropagationOnce.Do(func() { close(releasePropagation) }) }
+	t.Cleanup(releaseA)
 	var propagationCalls atomic.Int32
 	r.coordinator.opts.PropagationWait = func(context.Context, time.Duration) error {
 		if propagationCalls.Add(1) == 1 {
@@ -1009,10 +1317,13 @@ func TestProbeRefreshDuringActiveRunCoalescesRerunAndPersistsSecondInstance(t *t
 	aDone := make(chan error, 1)
 	go func() { aDone <- r.RunProbeDueOnce(context.Background()) }()
 	<-propagationStarted
-
-	bBinding, _, err := r.BootstrapBinding(context.Background(), "b")
+	beforeRearm, err := r.runtimeStore.PersistentSnapshot()
 	if err != nil {
 		t.Fatal(err)
+	}
+	aAttempt, ok := beforeRearm.ProbeAttempts[aBinding.Instance]
+	if !ok || aAttempt.AttemptID == "" || aAttempt.SendFenceSeq == 0 || (aAttempt.Phase != ProbeAttemptSending && aAttempt.Phase != ProbeAttemptSent) {
+		t.Fatalf("A durable attempt before B re-arm = %#v", aAttempt)
 	}
 	if err = r.RefreshOneAuthID("b"); err != nil {
 		t.Fatal(err)
@@ -1021,8 +1332,15 @@ func TestProbeRefreshDuringActiveRunCoalescesRerunAndPersistsSecondInstance(t *t
 	if !ok || bPending.State != ProbePendingCheck || !bPending.Deadline.IsZero() {
 		t.Fatalf("refresh did not bootstrap B PendingCheck: window=%#v ok=%v", bPending, ok)
 	}
+	afterRearm, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := afterRearm.ProbeAttempts[aBinding.Instance]; !reflect.DeepEqual(got, aAttempt) {
+		t.Fatalf("B re-arm changed A attempt/fence: got=%#v want=%#v", got, aAttempt)
+	}
 	r.wg.Wait() // B's production launch must observe A active before A is released.
-	close(releasePropagation)
+	releaseA()
 	if err = <-aDone; err != nil {
 		t.Fatal(err)
 	}
@@ -1044,6 +1362,9 @@ func TestProbeRefreshDuringActiveRunCoalescesRerunAndPersistsSecondInstance(t *t
 	}
 	if window, ok := persisted.ProbeWindows[bBinding.Instance][ProbeWindowLong]; !ok || window.State != ProbeConfirmed {
 		t.Fatalf("persisted B window = %#v, ok=%v; want Confirmed; runtime_windows=%#v file_windows=%#v attempts=%#v", window, ok, runtimePersisted.ProbeWindows, persisted.ProbeWindows, persisted.ProbeAttempts)
+	}
+	if len(persisted.ProbeAttempts) != 0 || persisted.ProbeAttemptSeq != 2 {
+		t.Fatalf("terminal attempts/sequence = %#v/%d, want none/2", persisted.ProbeAttempts, persisted.ProbeAttemptSeq)
 	}
 
 	restartAdapter := &rosterCredentialHost{host: host, roster: roster}
@@ -1804,6 +2125,45 @@ func TestProductionProvisionalRecoveryRiskStartRunsVerifiedProbe(t *testing.T) {
 		if got := req.Headers.Get(rosterLifecycleRequestHeader); got != rosterLifecycleProvisional {
 			t.Fatalf("request %d marker=%q", i, got)
 		}
+	}
+}
+
+func TestProductionProbeDetectsExternalResetWhileNormalRefreshDormant(t *testing.T) {
+	now := time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC)
+	oldReset := now.Add(2 * time.Hour)
+	newReset := now.Add(5 * time.Hour)
+	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, newReset.Format(time.RFC3339)))
+	active := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":1,"limit_window_seconds":18000,"reset_at":%q}}}`, newReset.Format(time.RFC3339)))
+	host := newProbeFixtureHost()
+	host.quota = [][]byte{lazy, active}
+	r := newDueProbeRuntime(t, now, host)
+	binding, ok := r.bindings.Lookup("a")
+	if !ok {
+		t.Fatal("binding missing")
+	}
+	r.probeController.SetWindow(binding.Instance, ProbeWindowFiveHour, ProbeWindow{
+		State:    ProbePendingCheck,
+		Baseline: ResetProbeBaseline(oldReset, 20, 5*time.Hour),
+	})
+	if err := r.persistProbeWindows(); err != nil {
+		t.Fatal(err)
+	}
+	if r.refreshController.Mode(now) != RefreshModeDormant {
+		t.Fatal("normal refresh not dormant")
+	}
+
+	if err := r.RunProbeDueOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if posts, urls := probePOSTCount(host); posts != 1 {
+		t.Fatalf("external reset sent %d Probe POSTs, want 1; urls=%v", posts, urls)
+	}
+	window, ok := r.probeController.Window(binding.Instance, ProbeWindowFiveHour)
+	if !ok || window.State != ProbeConfirmed {
+		t.Fatalf("window = %#v, ok=%v; want Confirmed", window, ok)
+	}
+	if r.refreshController.Mode(now) != RefreshModeDormant {
+		t.Fatal("Probe changed normal refresh out of Dormant")
 	}
 }
 
