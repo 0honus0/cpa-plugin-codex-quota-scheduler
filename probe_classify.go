@@ -169,4 +169,11 @@ func ClassifyProbeWindow(base ProbeBaseline, snap QuotaSnapshot, now time.Time) 
 	}
 	return ProbeClassification{Kind: ProbeAmbiguous, Baseline: base}
 }
-func usageActivated(_, new float64) bool { return new == 0 }
+func looksLikeStrictLazyObservation(observedAt time.Time, window QuotaWindow, length time.Duration) bool {
+	if window.UsedPercent == nil || *window.UsedPercent != 0 || observedAt.IsZero() || window.ResetAt.IsZero() || length <= 0 {
+		return false
+	}
+	return absDuration(window.ResetAt.Sub(observedAt.Add(length))) <= resetProbeCloseThreshold
+}
+
+func usageActivated(old, new float64) bool { return old > 0 && new == 0 }

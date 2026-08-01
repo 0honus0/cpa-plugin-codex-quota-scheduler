@@ -44,6 +44,47 @@ func TestUsageOnlyNeverEntersResetRules(t *testing.T) {
 	}
 }
 
+func TestUsageActivationRequiresConsumedToZero(t *testing.T) {
+	for _, tc := range []struct {
+		old, new float64
+		want     bool
+	}{
+		{80, 0, true}, {0, 0, false}, {80, 1, false},
+	} {
+		if got := usageActivated(tc.old, tc.new); got != tc.want {
+			t.Fatalf("usageActivated(%v,%v)=%v want %v", tc.old, tc.new, got, tc.want)
+		}
+	}
+}
+
+func TestStrictLazyObservation(t *testing.T) {
+	observedAt := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	zero, used := 0.0, 1.0
+	monthSeconds := int64(30 * 24 * time.Hour / time.Second)
+	cases := []struct {
+		name   string
+		window QuotaWindow
+		want   bool
+	}{
+		{"five-hour", QuotaWindow{Kind: WindowFiveHour, UsedPercent: &zero, ResetAt: observedAt.Add(5 * time.Hour)}, true},
+		{"weekly", QuotaWindow{Kind: WindowWeekly, UsedPercent: &zero, ResetAt: observedAt.Add(7 * 24 * time.Hour)}, true},
+		{"monthly-explicit-duration", QuotaWindow{Kind: WindowMonthly, UsedPercent: &zero, LimitWindowSeconds: &monthSeconds, ResetAt: observedAt.Add(30 * 24 * time.Hour)}, true},
+		{"missing-usage", QuotaWindow{Kind: WindowWeekly, ResetAt: observedAt.Add(7 * 24 * time.Hour)}, false},
+		{"non-zero-usage", QuotaWindow{Kind: WindowWeekly, UsedPercent: &used, ResetAt: observedAt.Add(7 * 24 * time.Hour)}, false},
+		{"monthly-missing-duration", QuotaWindow{Kind: WindowMonthly, UsedPercent: &zero, ResetAt: observedAt.Add(30 * 24 * time.Hour)}, false},
+		{"reset-outside-three-minutes", QuotaWindow{Kind: WindowWeekly, UsedPercent: &zero, ResetAt: observedAt.Add(7*24*time.Hour + resetProbeCloseThreshold + time.Second)}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			length, known := probeWindowDuration(tc.window)
+			got := known && looksLikeStrictLazyObservation(observedAt, tc.window, length)
+			if got != tc.want {
+				t.Fatalf("strict lazy observation = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestClassifySuspectedFirstObservationLazyWindow(t *testing.T) {
 	now := time.Date(2026, 7, 18, 23, 0, 0, 0, time.UTC)
 	reset := now.Add(7 * 24 * time.Hour)

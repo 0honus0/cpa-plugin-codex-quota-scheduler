@@ -462,6 +462,81 @@ func TestSuspectedLazyProbeBaselinePersistsAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestProbeBootstrapMigratesV020LazyBaselineImmediately(t *testing.T) {
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	r := newDueProbeRuntime(t, now, newProbeFixtureHost())
+	binding, ok := r.bindings.Lookup("a")
+	if !ok {
+		t.Fatal("binding missing")
+	}
+	reset := now.Add(7 * 24 * time.Hour)
+	r.probeController.SetWindow(binding.Instance, ProbeWindowLong, ProbeWindow{
+		State:    ProbeWaitingReset,
+		Baseline: ResetProbeBaseline(reset, 0, 0),
+		Deadline: reset.Add(probeRefreshAfterResetDelay),
+	})
+	if err := r.persistProbeWindows(); err != nil {
+		t.Fatal(err)
+	}
+	zero := 0.0
+	seconds := int64(7 * 24 * time.Hour / time.Second)
+	r.state.UpsertQuota(AccountState{
+		AuthID:        "a",
+		AuthIndex:     "idx",
+		Provider:      "codex",
+		Family:        AccountFamilyWeekly,
+		LastSuccessAt: now,
+		Quota: ParsedQuota{Family: AccountFamilyWeekly, LongWindow: &QuotaWindow{
+			Kind: WindowWeekly, UsedPercent: &zero, LimitWindowSeconds: &seconds, ResetAt: reset,
+		}},
+	})
+
+	if err := r.bootstrapProbeWindows(); err != nil {
+		t.Fatal(err)
+	}
+	window, ok := r.probeController.Window(binding.Instance, ProbeWindowLong)
+	if !ok || window.Baseline.WindowLength != 7*24*time.Hour || !window.Baseline.SuspectedLazy || window.State != ProbePendingCheck || !window.Deadline.IsZero() {
+		t.Fatalf("migrated window = %#v, ok=%v", window, ok)
+	}
+	persisted, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := persisted.ProbeWindows[binding.Instance][ProbeWindowLong]; got.Baseline.WindowLength != 7*24*time.Hour || !got.Baseline.SuspectedLazy || got.State != ProbePendingCheck || !got.Deadline.IsZero() {
+		t.Fatalf("persisted migrated window = %#v", got)
+	}
+}
+
+func TestProbeBootstrapLoadsKnownLengthBaselineWithoutQuotaCache(t *testing.T) {
+	legacyPath := filepath.Join(t.TempDir(), "state.json")
+	store := NewStateStore(semanticStatePaths(legacyPath).Runtime, OSFileHooks(), nil)
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	baseline := ResetProbeBaseline(now.Add(7*24*time.Hour), 0, 7*24*time.Hour)
+	if _, err := store.Update(func(state *PersistentState) error {
+		state.Bindings["a"] = RuntimeBinding{AuthID: "a", AuthIndex: "idx", Instance: 1}
+		state.ProbeWindows[1] = map[ProbeWindowKind]ProbeWindow{
+			ProbeWindowLong: {State: ProbeWaitingReset, Baseline: baseline, Deadline: baseline.ResetAt.Add(probeRefreshAfterResetDelay)},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig()
+	cfg.EnableResetProbe = true
+	state := NewPluginState(cfg)
+	roster := HostRosterSnapshot{Capability: CapabilityA, Entries: []RosterEntry{{ID: "a", AuthIndex: "idx", Provider: "codex", Priority: intPtr(9)}}}
+	adapter := &rosterCredentialHost{host: newProbeFixtureHost(), roster: roster}
+	restarted, err := NewProductionQuotaRefresher(adapter.host, state, adapter, roster, legacyPath, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.bindings = restarted.bindings
+	window, ok := restarted.probeController.Window(1, ProbeWindowLong)
+	if !ok || window.State != ProbeWaitingReset || window.Baseline.WindowLength != 7*24*time.Hour || !window.Baseline.ResetAt.Equal(baseline.ResetAt) {
+		t.Fatalf("restarted window = %#v, ok=%v", window, ok)
+	}
+}
+
 func newFirstObservedWeeklyLazyRuntime(t *testing.T, now time.Time) (*QuotaRefresher, *sequenceProbeHost, RuntimeBinding) {
 	t.Helper()
 	reset := now.Add(7 * 24 * time.Hour)

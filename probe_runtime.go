@@ -62,7 +62,20 @@ func (r *QuotaRefresher) bootstrapProbeWindows() error {
 			if pair.w == nil {
 				continue
 			}
-			if _, ok := r.probeController.Window(b.Instance, pair.k); ok {
+			if existing, ok := r.probeController.Window(b.Instance, pair.k); ok {
+				if existing.Baseline.Kind == ProbeBaselineReset && existing.Baseline.WindowLength == 0 {
+					if duration, durationKnown := probeWindowDuration(*pair.w); durationKnown {
+						existing.Baseline.WindowLength = duration
+						if looksLikeStrictLazyObservation(observedAt, *pair.w, duration) {
+							existing.Baseline.ResetAt = pair.w.ResetAt
+							existing.Baseline.Usage = *pair.w.UsedPercent
+							existing.Baseline.SuspectedLazy = true
+							existing.State = ProbePendingCheck
+							existing.Deadline = time.Time{}
+						}
+						r.probeController.SetWindow(b.Instance, pair.k, existing)
+					}
+				}
 				continue
 			}
 			usage := 0.0
