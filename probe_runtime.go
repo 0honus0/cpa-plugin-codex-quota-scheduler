@@ -506,6 +506,10 @@ func (r *QuotaRefresher) runProbeDueOnce(ctx context.Context) (bool, error) {
 		if firstErr == nil {
 			firstErr = err
 		}
+		if err != nil {
+			r.finishProbeOwnerError(true)
+			return true, firstErr
+		}
 		r.probeRunStateMu.Lock()
 		if r.probeRerunPending {
 			r.probeRerunPending = false
@@ -631,12 +635,18 @@ func (r *QuotaRefresher) runProbeDuePass(ctx context.Context) error {
 	return firstErr
 }
 
-func (r *QuotaRefresher) RunProbeRecoveryOnce(ctx context.Context) error {
+func (r *QuotaRefresher) RunProbeRecoveryOnce(ctx context.Context) (runErr error) {
 	if !r.resetProbeEnabled() {
 		return nil
 	}
 	r.probeRunMu.Lock()
-	defer r.probeRunMu.Unlock()
+	defer func() {
+		if runErr != nil {
+			r.finishProbeOwnerError(true)
+			return
+		}
+		runErr = r.finishProbeRecoveryOwner(ctx)
+	}()
 	if err := r.retryProbeRosterHold(); err != nil {
 		return err
 	}
@@ -732,6 +742,40 @@ func (r *QuotaRefresher) RunProbeRecoveryOnce(ctx context.Context) error {
 		}
 	}
 	return firstErr
+}
+
+func (r *QuotaRefresher) finishProbeRecoveryOwner(ctx context.Context) error {
+	for {
+		r.probeRunStateMu.Lock()
+		if !r.probeRerunPending {
+			r.probeRunMu.Unlock()
+			r.probeRunStateMu.Unlock()
+			return nil
+		}
+		r.probeRerunPending = false
+		r.probeRunStateMu.Unlock()
+		if err := r.runProbeDuePass(ctx); err != nil {
+			r.finishProbeOwnerError(true)
+			return err
+		}
+	}
+}
+
+func (r *QuotaRefresher) finishProbeOwnerError(recoverFirst bool) {
+	now := time.Now()
+	if r.now != nil {
+		now = r.now()
+	}
+	r.probeRunStateMu.Lock()
+	if recoverFirst {
+		r.probeRecoveryPending = true
+	}
+	r.probeRetryAt = now.Add(probeBackoff(1))
+	r.probeOwnerRetryPending = true
+	r.probeRerunPending = false
+	r.probeRunMu.Unlock()
+	r.probeRunStateMu.Unlock()
+	r.wakeRefreshLoop()
 }
 
 func (r *QuotaRefresher) recoverPreparedProbeAttempts() error {

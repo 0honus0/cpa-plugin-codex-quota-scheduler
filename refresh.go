@@ -220,42 +220,43 @@ type QuotaRefresher struct {
 	lifecycleOwner    *QuotaRefresher
 	lifecycleGate     func(time.Time) ActiveRoster
 
-	mu                   sync.Mutex
-	running              bool
-	startRequested       bool
-	refreshing           bool
-	stopping             bool
-	stop                 chan struct{}
-	done                 chan struct{}
-	wake                 chan struct{}
-	pendingDue           func() error
-	pendingDueVersion    uint64
-	wg                   sync.WaitGroup
-	coordinator          *Coordinator
-	legacyTxn            *LegacyRefreshTxn
-	refreshController    *RefreshController
-	probeController      *ProbeController
-	probeWAL             *ProbeWAL
-	probeFence           *FenceAllocator
-	probeRunMu           sync.Mutex
-	probeRunStateMu      sync.Mutex
-	probeRerunPending    bool
-	probeLaunchActive    bool
-	probeRetryAt         time.Time
-	probeRecoveryPending bool
-	probeHoldMu          sync.Mutex
-	probePersistPending  map[AuthInstanceID]struct{}
-	probeHoldPending     bool
-	probeHoldErr         error
-	provisionalMu        sync.Mutex
-	provisionalPermit    bool
-	fenceMu              sync.Mutex
-	nextFence            uint64
-	txnIntent            *Intent
-	txnContext           context.Context
-	txnLease             *HeldLease
-	txnPermit            func() bool
-	finalPublicationHook func()
+	mu                     sync.Mutex
+	running                bool
+	startRequested         bool
+	refreshing             bool
+	stopping               bool
+	stop                   chan struct{}
+	done                   chan struct{}
+	wake                   chan struct{}
+	pendingDue             func() error
+	pendingDueVersion      uint64
+	wg                     sync.WaitGroup
+	coordinator            *Coordinator
+	legacyTxn              *LegacyRefreshTxn
+	refreshController      *RefreshController
+	probeController        *ProbeController
+	probeWAL               *ProbeWAL
+	probeFence             *FenceAllocator
+	probeRunMu             sync.Mutex
+	probeRunStateMu        sync.Mutex
+	probeRerunPending      bool
+	probeLaunchActive      bool
+	probeRetryAt           time.Time
+	probeRecoveryPending   bool
+	probeOwnerRetryPending bool
+	probeHoldMu            sync.Mutex
+	probePersistPending    map[AuthInstanceID]struct{}
+	probeHoldPending       bool
+	probeHoldErr           error
+	provisionalMu          sync.Mutex
+	provisionalPermit      bool
+	fenceMu                sync.Mutex
+	nextFence              uint64
+	txnIntent              *Intent
+	txnContext             context.Context
+	txnLease               *HeldLease
+	txnPermit              func() bool
+	finalPublicationHook   func()
 }
 
 // NewProductionQuotaRefresher wires S2 persistence/identity primitives into
@@ -1229,7 +1230,7 @@ func (r *QuotaRefresher) Start() {
 				r.refreshController.OnDeadline(r.now())
 				r.RefreshDueSoon()
 				if r.probeController != nil {
-					r.launchProbe(false)
+					r.launchProbeFromTimer(false)
 				}
 			case <-wake:
 				if timer != nil && !timer.Stop() {
@@ -1263,9 +1264,18 @@ func hasPendingProbeWindows(windows map[AuthInstanceID]map[ProbeWindowKind]Probe
 }
 
 func (r *QuotaRefresher) launchProbe(recoverFirst bool) {
+	r.launchProbeWithAdmission(recoverFirst, false)
+}
+
+func (r *QuotaRefresher) launchProbeFromTimer(recoverFirst bool) {
+	r.launchProbeWithAdmission(recoverFirst, true)
+}
+
+func (r *QuotaRefresher) launchProbeWithAdmission(recoverFirst, timerAdmission bool) {
 	if !r.resetProbeEnabled() {
 		return
 	}
+	now := r.now()
 	r.mu.Lock()
 	if r.stopping {
 		r.mu.Unlock()
@@ -1280,6 +1290,18 @@ func (r *QuotaRefresher) launchProbe(recoverFirst bool) {
 		r.probeRunStateMu.Unlock()
 		r.mu.Unlock()
 		return
+	}
+	retryDue := !r.probeRetryAt.IsZero() && !now.Before(r.probeRetryAt)
+	if !r.probeRetryAt.IsZero() && (!timerAdmission || !retryDue) {
+		if recoverFirst {
+			r.probeRecoveryPending = true
+		}
+		r.probeRunStateMu.Unlock()
+		r.mu.Unlock()
+		return
+	}
+	if timerAdmission && retryDue {
+		r.probeOwnerRetryPending = false
 	}
 	recoverFirst = recoverFirst || r.probeRecoveryPending
 	if recoverFirst {
@@ -1302,11 +1324,23 @@ func (r *QuotaRefresher) launchProbe(recoverFirst bool) {
 				recoveryErr = r.RunProbeRecoveryOnce(context.Background())
 				firstErr = recoveryErr
 			}
-			dueOwned, err := r.runProbeDueOnce(context.Background())
-			if firstErr == nil {
-				firstErr = err
+			var dueErr error
+			if recoveryErr == nil {
+				dueOwned, dueErr = r.runProbeDueOnce(context.Background())
+				if firstErr == nil {
+					firstErr = dueErr
+				}
 			}
-			rerun, recoverNext := r.finishProbeLaunch(firstErr, recoverFirst, recoveryErr, dueOwned)
+			recoveryRequired := dueErr != nil
+			if firstErr == nil && dueOwned {
+				var checkErr error
+				recoveryRequired, checkErr = r.hasDurableNonterminalProbeAttempts()
+				if checkErr != nil {
+					firstErr = checkErr
+					recoveryRequired = true
+				}
+			}
+			rerun, recoverNext := r.finishProbeLaunch(firstErr, recoverFirst, recoveryErr, dueOwned, recoveryRequired)
 			if !rerun {
 				return
 			}
@@ -1315,14 +1349,36 @@ func (r *QuotaRefresher) launchProbe(recoverFirst bool) {
 	}()
 }
 
-func (r *QuotaRefresher) finishProbeLaunch(runErr error, recoveryAttempted bool, recoveryErr error, dueOwned bool) (bool, bool) {
+func (r *QuotaRefresher) hasDurableNonterminalProbeAttempts() (bool, error) {
+	if r.runtimeStore == nil {
+		return false, nil
+	}
+	state, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		return false, err
+	}
+	for _, attempt := range state.ProbeAttempts {
+		if nonterminalProbeAttempt(attempt) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (r *QuotaRefresher) finishProbeLaunch(runErr error, recoveryAttempted bool, recoveryErr error, dueOwned bool, recoveryRequired bool) (bool, bool) {
 	now := r.now()
 	r.probeRunStateMu.Lock()
-	if recoveryAttempted && recoveryErr != nil {
+	if (recoveryAttempted && recoveryErr != nil) || recoveryRequired {
 		r.probeRecoveryPending = true
 	}
-	if runErr != nil {
-		r.probeRetryAt = now.Add(probeBackoff(1))
+	if runErr != nil || recoveryRequired || r.probeOwnerRetryPending {
+		if runErr != nil || recoveryRequired {
+			r.probeRetryAt = now.Add(probeBackoff(1))
+		}
+		r.probeRerunPending = false
+		r.probeLaunchActive = false
+		r.probeRunStateMu.Unlock()
+		return false, false
 	} else {
 		r.probeRetryAt = time.Time{}
 	}
