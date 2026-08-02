@@ -135,7 +135,10 @@ func (h *HeldLease) DoHTTP(ctx context.Context, call func(context.Context) error
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return call(ctx)
+	if err := call(ctx); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 func (h *HeldLease) MarkProbeSent(suppressUntil time.Time) {

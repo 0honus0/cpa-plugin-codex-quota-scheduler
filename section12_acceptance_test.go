@@ -269,7 +269,7 @@ func runSection12C04AllProbePathsAtEveryKPoint(t *testing.T) {
 					err = wal.ExecuteSend(func() error { return nil })
 				}
 				if err == nil {
-					err = wal.PersistSent(1, now.Add(time.Second))
+					err = wal.PersistSent(1, attempt.AttemptID, now.Add(time.Second))
 				}
 				if !errors.Is(err, testsupport.ErrInjectedCrash) {
 					t.Fatalf("crash=%s err=%v", point, err)
@@ -309,7 +309,7 @@ func runSection12C04AllProbePathsAtEveryKPoint(t *testing.T) {
 				if !ok || window.State != ProbeConfirmed {
 					t.Fatalf("path=%s verify terminal window=%#v ok=%v", path.name, window, ok)
 				}
-				if err := restart.Complete(1); err != nil {
+				if err := restart.Complete(1, path.name, ProbeAttemptSending, ProbeAttemptSent, ProbeAttemptSentUnknown); err != nil {
 					t.Fatal(err)
 				}
 				if err := runtime.persistProbeWindows(); err != nil {

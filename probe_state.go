@@ -116,6 +116,19 @@ func (c *ProbeController) SetWindow(i AuthInstanceID, k ProbeWindowKind, w Probe
 	}
 	c.windows[i][k] = w
 }
+func (c *ProbeController) ReplaceInstance(i AuthInstanceID, windows map[ProbeWindowKind]ProbeWindow) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(windows) == 0 {
+		delete(c.windows, i)
+		return
+	}
+	next := make(map[ProbeWindowKind]ProbeWindow, len(windows))
+	for kind, window := range windows {
+		next[kind] = window
+	}
+	c.windows[i] = next
+}
 func (c *ProbeController) Window(i AuthInstanceID, k ProbeWindowKind) (ProbeWindow, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

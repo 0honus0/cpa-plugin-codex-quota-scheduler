@@ -1,6 +1,10 @@
 package main
 
-import "time"
+import (
+	"errors"
+	"fmt"
+	"time"
+)
 
 const (
 	OperationProbeSend OperationClass = "probe_send"
@@ -9,6 +13,34 @@ const (
 type ProbeWAL struct {
 	store *StateStore
 	crash CrashHitter
+}
+
+var ErrProbeAttemptChanged = errors.New("probe attempt changed")
+
+func exactProbeAttempt(state *PersistentState, instance AuthInstanceID, attemptID string, phases ...ProbeAttemptPhase) (ProbeAttempt, error) {
+	attempt, ok := state.ProbeAttempts[instance]
+	if !ok || attemptID == "" || attempt.AttemptID != attemptID {
+		return ProbeAttempt{}, fmt.Errorf("%w for instance %d", ErrProbeAttemptChanged, instance)
+	}
+	for _, phase := range phases {
+		if attempt.Phase == phase {
+			return attempt, nil
+		}
+	}
+	return ProbeAttempt{}, fmt.Errorf("%w for instance %d: phase %q", ErrProbeAttemptChanged, instance, attempt.Phase)
+}
+
+func persistProbeSentUnknown(state *PersistentState, instance AuthInstanceID, attemptID string, suppress time.Time) error {
+	attempt, err := exactProbeAttempt(state, instance, attemptID, ProbeAttemptSending, ProbeAttemptSent, ProbeAttemptSentUnknown)
+	if err != nil {
+		return err
+	}
+	attempt.Phase = ProbeAttemptSentUnknown
+	if suppress.After(attempt.SuppressUntil) {
+		attempt.SuppressUntil = suppress
+	}
+	state.ProbeAttempts[instance] = attempt
+	return nil
 }
 
 func NewProbeWAL(s *StateStore, crash ...CrashHitter) *ProbeWAL {
@@ -33,7 +65,13 @@ func (w *ProbeWAL) PersistSending(a ProbeAttempt) error {
 	if err := w.hit("K_PROBE_SENDING_WRITE"); err != nil {
 		return err
 	}
-	_, err := w.store.Update(func(s *PersistentState) error { s.ProbeAttempts[a.Instance] = a; return nil })
+	_, err := w.store.Update(func(s *PersistentState) error {
+		if _, err := exactProbeAttempt(s, a.Instance, a.AttemptID, ProbeAttemptPrepared); err != nil {
+			return err
+		}
+		s.ProbeAttempts[a.Instance] = a
+		return nil
+	})
 	//kpoint:K_PROBE_AFTER_SENDING
 	if err == nil {
 		err = w.hit("K_PROBE_AFTER_SENDING")
@@ -50,13 +88,16 @@ func (w *ProbeWAL) ExecuteSend(send func() error) error { //kpoint:K_PROBE_BEFOR
 	} //kpoint:K_PROBE_AFTER_HTTP
 	return w.hit("K_PROBE_AFTER_HTTP")
 }
-func (w *ProbeWAL) PersistSent(i AuthInstanceID, at time.Time) error {
+func (w *ProbeWAL) PersistSent(i AuthInstanceID, attemptID string, at time.Time) error {
 	//kpoint:K_PROBE_SENT_WRITE
 	if err := w.hit("K_PROBE_SENT_WRITE"); err != nil {
 		return err
 	}
 	_, err := w.store.Update(func(s *PersistentState) error {
-		a := s.ProbeAttempts[i]
+		a, err := exactProbeAttempt(s, i, attemptID, ProbeAttemptSending)
+		if err != nil {
+			return err
+		}
 		a.Phase = ProbeAttemptSent
 		a.SentAt = &at
 		s.ProbeAttempts[i] = a
@@ -64,20 +105,20 @@ func (w *ProbeWAL) PersistSent(i AuthInstanceID, at time.Time) error {
 	})
 	return err
 }
-func (w *ProbeWAL) PersistSentUnknown(i AuthInstanceID, suppress time.Time) error {
+func (w *ProbeWAL) PersistSentUnknown(i AuthInstanceID, attemptID string, suppress time.Time) error {
 	_, err := w.store.Update(func(s *PersistentState) error {
-		a := s.ProbeAttempts[i]
-		a.Phase = ProbeAttemptSentUnknown
-		if suppress.After(a.SuppressUntil) {
-			a.SuppressUntil = suppress
-		}
-		s.ProbeAttempts[i] = a
-		return nil
+		return persistProbeSentUnknown(s, i, attemptID, suppress)
 	})
 	return err
 }
-func (w *ProbeWAL) Complete(i AuthInstanceID) error {
-	_, err := w.store.Update(func(s *PersistentState) error { delete(s.ProbeAttempts, i); return nil })
+func (w *ProbeWAL) Complete(i AuthInstanceID, attemptID string, phases ...ProbeAttemptPhase) error {
+	_, err := w.store.Update(func(s *PersistentState) error {
+		if _, err := exactProbeAttempt(s, i, attemptID, phases...); err != nil {
+			return err
+		}
+		delete(s.ProbeAttempts, i)
+		return nil
+	})
 	return err
 }
 func (w *ProbeWAL) Recover(now time.Time) []Intent {
@@ -98,10 +139,16 @@ func (w *ProbeWAL) RecoverChecked(now time.Time) ([]Intent, error) {
 			continue
 		}
 		if a.Phase == ProbeAttemptSending {
-			a.Phase = ProbeAttemptSentUnknown
-			if _, err := w.store.Update(func(s *PersistentState) error { s.ProbeAttempts[i] = a; return nil }); err != nil {
-				return nil, err
+			committed, transitionErr := w.store.Update(func(s *PersistentState) error {
+				return persistProbeSentUnknown(s, i, a.AttemptID, a.SuppressUntil)
+			})
+			if transitionErr != nil {
+				if errors.Is(transitionErr, ErrProbeAttemptChanged) {
+					continue
+				}
+				return nil, transitionErr
 			}
+			a = committed.ProbeAttempts[i]
 		}
 		out = append(out, Intent{Instance: i, Class: OperationProbeVerify, Source: SourceProbeVerify, StartedAfter: a.SendFenceSeq, AttemptID: a.AttemptID, Payload: a.Windows})
 	}

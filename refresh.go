@@ -864,7 +864,16 @@ func NewQuotaRefresher(host HostClient, state *PluginState, now func() time.Time
 		},
 		InheritSentUnknown: func(intent Intent, suppressUntil time.Time) error {
 			if (intent.Class == OperationProbeSend || intent.Class == OperationProbeSequence) && r.probeWAL != nil {
-				return r.probeWAL.PersistSentUnknown(intent.Instance, suppressUntil)
+				r.probeHoldMu.Lock()
+				defer r.probeHoldMu.Unlock()
+				if err := r.probeWAL.PersistSentUnknown(intent.Instance, intent.AttemptID, suppressUntil); err != nil {
+					return err
+				}
+				persisted, err := r.runtimeStore.PersistentSnapshot()
+				if err == nil {
+					r.syncProbeControllerInstance(intent.Instance, persisted)
+				}
+				return err
 			}
 			return r.persistLegacySentUnknown(intent, suppressUntil)
 		},

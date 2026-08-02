@@ -15,7 +15,10 @@ func TestProbeWALSendingRecoversVerifyFirstAndSuppresses(t *testing.T) {
 	now := time.Unix(3000, 0).UTC()
 	store := NewStateStore(filepath.Join(t.TempDir(), "state.json"), OSFileHooks(), nil)
 	wal := NewProbeWAL(store)
-	a := ProbeAttempt{Instance: 1, AttemptID: "a", Windows: []ProbeWindowKind{ProbeWindowFiveHour}, Phase: ProbeAttemptSending, SendFenceSeq: 7, CreatedAt: now, VerifyNotBefore: now.Add(3 * time.Second)}
+	a := ProbeAttempt{Instance: 1, AttemptID: "a", Windows: []ProbeWindowKind{ProbeWindowFiveHour}, Phase: ProbeAttemptPrepared, SendFenceSeq: 7, CreatedAt: now, VerifyNotBefore: now.Add(3 * time.Second)}
+	if _, err := store.Update(func(state *PersistentState) error { state.ProbeAttempts[a.Instance] = a; return nil }); err != nil {
+		t.Fatal(err)
+	}
 	if err := wal.PersistSending(a); err != nil {
 		t.Fatal(err)
 	}
@@ -26,6 +29,56 @@ func TestProbeWALSendingRecoversVerifyFirstAndSuppresses(t *testing.T) {
 	state, _ := store.PersistentSnapshot()
 	if state.ProbeAttempts[1].Phase != ProbeAttemptSentUnknown || !state.ProbeAttempts[1].SuppressUntil.Equal(now.Add(10*time.Minute)) {
 		t.Fatalf("attempt=%#v", state.ProbeAttempts[1])
+	}
+}
+
+func TestProbeWALTransitionsRequireExactAttemptAndPhase(t *testing.T) {
+	now := time.Unix(3500, 0).UTC()
+	store := NewStateStore(filepath.Join(t.TempDir(), "state.json"), OSFileHooks(), nil)
+	wal := NewProbeWAL(store)
+	attempt := ProbeAttempt{Instance: 1, AttemptID: "current", Windows: []ProbeWindowKind{ProbeWindowFiveHour}, Phase: ProbeAttemptPrepared, CreatedAt: now}
+	if _, err := store.Update(func(state *PersistentState) error { state.ProbeAttempts[attempt.Instance] = attempt; return nil }); err != nil {
+		t.Fatal(err)
+	}
+
+	stale := attempt
+	stale.AttemptID = "stale"
+	if err := wal.PersistSending(stale); !errors.Is(err, ErrProbeAttemptChanged) {
+		t.Fatalf("mismatched Prepared->Sending err=%v", err)
+	}
+	if err := wal.PersistSending(attempt); err != nil {
+		t.Fatal(err)
+	}
+	if err := wal.PersistSent(attempt.Instance, stale.AttemptID, now.Add(time.Second)); !errors.Is(err, ErrProbeAttemptChanged) {
+		t.Fatalf("mismatched Sending->Sent err=%v", err)
+	}
+	if err := wal.PersistSent(attempt.Instance, attempt.AttemptID, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := wal.PersistSentUnknown(attempt.Instance, stale.AttemptID, now.Add(10*time.Minute)); !errors.Is(err, ErrProbeAttemptChanged) {
+		t.Fatalf("mismatched Sent->SentUnknown err=%v", err)
+	}
+	if err := wal.PersistSentUnknown(attempt.Instance, attempt.AttemptID, now.Add(10*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := wal.Complete(attempt.Instance, stale.AttemptID, ProbeAttemptSentUnknown); !errors.Is(err, ErrProbeAttemptChanged) {
+		t.Fatalf("mismatched completion err=%v", err)
+	}
+	if err := wal.Complete(attempt.Instance, attempt.AttemptID, ProbeAttemptPrepared); !errors.Is(err, ErrProbeAttemptChanged) {
+		t.Fatalf("wrong-phase completion err=%v", err)
+	}
+	if err := wal.Complete(attempt.Instance, attempt.AttemptID, ProbeAttemptSentUnknown); err != nil {
+		t.Fatal(err)
+	}
+	if err := wal.PersistSentUnknown(attempt.Instance, attempt.AttemptID, now.Add(20*time.Minute)); !errors.Is(err, ErrProbeAttemptChanged) {
+		t.Fatalf("absent transition err=%v", err)
+	}
+	persisted, err := store.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := persisted.ProbeAttempts[attempt.Instance]; ok {
+		t.Fatalf("rejected transition recreated attempt: %#v", persisted.ProbeAttempts[attempt.Instance])
 	}
 }
 
@@ -62,7 +115,10 @@ func TestProbeKPointsReachableAndRegistered(t *testing.T) {
 			crash := testsupport.NewCrashController(registry, point)
 			store := NewStateStore(filepath.Join(t.TempDir(), "state.json"), OSFileHooks(), nil)
 			wal := NewProbeWAL(store, crash)
-			a := ProbeAttempt{Instance: 1, AttemptID: "k", Windows: []ProbeWindowKind{ProbeWindowFiveHour}, CreatedAt: now, VerifyNotBefore: now}
+			a := ProbeAttempt{Instance: 1, AttemptID: "k", Windows: []ProbeWindowKind{ProbeWindowFiveHour}, Phase: ProbeAttemptPrepared, CreatedAt: now, VerifyNotBefore: now}
+			if _, seedErr := store.Update(func(state *PersistentState) error { state.ProbeAttempts[a.Instance] = a; return nil }); seedErr != nil {
+				t.Fatal(seedErr)
+			}
 			var err error
 			switch point {
 			case "K_PROBE_SENDING_WRITE", "K_PROBE_AFTER_SENDING":
@@ -71,7 +127,7 @@ func TestProbeKPointsReachableAndRegistered(t *testing.T) {
 				err = wal.ExecuteSend(func() error { return nil })
 			case "K_PROBE_SENT_WRITE":
 				_ = NewProbeWAL(store).PersistSending(a)
-				err = wal.PersistSent(1, now)
+				err = wal.PersistSent(1, a.AttemptID, now)
 			}
 			if !errors.Is(err, testsupport.ErrInjectedCrash) {
 				t.Fatalf("err=%v", err)
@@ -110,7 +166,10 @@ func TestProbeRecoveryWaitsForGraceAndNeverResendsDuringSuppression(t *testing.T
 	now := time.Unix(4000, 0).UTC()
 	store := NewStateStore(filepath.Join(t.TempDir(), "state.json"), OSFileHooks(), nil)
 	wal := NewProbeWAL(store)
-	a := ProbeAttempt{Instance: 3, AttemptID: "jump", Windows: []ProbeWindowKind{ProbeWindowLong}, Phase: ProbeAttemptSent, SendFenceSeq: 11, CreatedAt: now, VerifyNotBefore: now.Add(3 * time.Second), SuppressUntil: now.Add(10 * time.Minute)}
+	a := ProbeAttempt{Instance: 3, AttemptID: "jump", Windows: []ProbeWindowKind{ProbeWindowLong}, Phase: ProbeAttemptPrepared, SendFenceSeq: 11, CreatedAt: now, VerifyNotBefore: now.Add(3 * time.Second), SuppressUntil: now.Add(10 * time.Minute)}
+	if _, err := store.Update(func(state *PersistentState) error { state.ProbeAttempts[a.Instance] = a; return nil }); err != nil {
+		t.Fatal(err)
+	}
 	if err := wal.PersistSending(a); err != nil {
 		t.Fatal(err)
 	}

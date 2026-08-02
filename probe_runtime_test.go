@@ -1830,7 +1830,7 @@ func TestProbeTerminalCompletionMergesOnlyCompletingInstance(t *testing.T) {
 	r := &QuotaRefresher{runtimeStore: store, probeController: controller}
 	quota := ParsedQuota{FiveHour: &QuotaWindow{Kind: WindowFiveHour, ResetAt: now.Add(5 * time.Hour)}}
 
-	if err := r.persistTerminalProbeCompletion(1, attempt.AttemptID, quota); err != nil {
+	if err := r.persistTerminalProbeCompletion(1, attempt.AttemptID, quota, ProbeAttemptSent); err != nil {
 		t.Fatal(err)
 	}
 	persisted, err := NewStateStore(r.runtimeStore.path, OSFileHooks(), nil).PersistentSnapshot()
@@ -1843,6 +1843,123 @@ func TestProbeTerminalCompletionMergesOnlyCompletingInstance(t *testing.T) {
 	if _, ok := persisted.ProbeAttempts[1]; ok {
 		t.Fatalf("instance A attempt survived completion: %#v", persisted.ProbeAttempts[1])
 	}
+}
+
+func TestProbeTerminalCompletionAndRosterHoldShareLinearizationBoundary(t *testing.T) {
+	now := time.Date(2026, 8, 2, 10, 0, 0, 0, time.UTC)
+	type fixture struct {
+		r       *QuotaRefresher
+		attempt ProbeAttempt
+		quota   ParsedQuota
+		other   ProbeWindow
+	}
+	newFixture := func(t *testing.T) fixture {
+		t.Helper()
+		store := NewStateStore(filepath.Join(t.TempDir(), "state.json"), OSFileHooks(), nil)
+		attempt := ProbeAttempt{Instance: 1, AttemptID: "terminal-vs-hold", Windows: []ProbeWindowKind{ProbeWindowFiveHour}, Phase: ProbeAttemptSentUnknown, SendFenceSeq: 9, CreatedAt: now.Add(-time.Minute), VerifyNotBefore: now}
+		window := ProbeWindow{State: ProbeSentUnknown, AttemptID: attempt.AttemptID, Baseline: ResetProbeBaseline(now.Add(5*time.Hour), 0, 5*time.Hour)}
+		other := ProbeWindow{State: ProbePendingCheck, Baseline: ResetProbeBaseline(now.Add(7*24*time.Hour), 0, 7*24*time.Hour)}
+		if _, err := store.Update(func(state *PersistentState) error {
+			state.ProbeAttempts[attempt.Instance] = attempt
+			state.ProbeWindows[attempt.Instance] = map[ProbeWindowKind]ProbeWindow{ProbeWindowFiveHour: window}
+			state.ProbeWindows[2] = map[ProbeWindowKind]ProbeWindow{ProbeWindowLong: other}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		controller := NewProbeController(now)
+		controller.SetWindow(attempt.Instance, ProbeWindowFiveHour, window)
+		return fixture{
+			r:       &QuotaRefresher{runtimeStore: store, probeController: controller, now: func() time.Time { return now }},
+			attempt: attempt,
+			quota:   ParsedQuota{FiveHour: &QuotaWindow{Kind: WindowFiveHour, ResetAt: now.Add(5 * time.Hour), UsedPercent: ptrFloat(1)}},
+			other:   other,
+		}
+	}
+	markConfirmed := func(f fixture) {
+		window, _ := f.r.probeController.Window(f.attempt.Instance, ProbeWindowFiveHour)
+		window.State = ProbeConfirmed
+		window.Deadline = time.Time{}
+		f.r.probeController.SetWindow(f.attempt.Instance, ProbeWindowFiveHour, window)
+	}
+	assertTerminal := func(t *testing.T, f fixture) {
+		t.Helper()
+		persisted, err := f.r.runtimeStore.PersistentSnapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if attempt, ok := persisted.ProbeAttempts[f.attempt.Instance]; ok {
+			t.Errorf("terminal/hold ordering retained attempt: %#v", attempt)
+		}
+		if got := persisted.ProbeWindows[f.attempt.Instance][ProbeWindowFiveHour]; got.State != ProbeConfirmed {
+			t.Errorf("durable terminal/hold window=%#v, want Confirmed", got)
+		}
+		if got, ok := f.r.probeController.Window(f.attempt.Instance, ProbeWindowFiveHour); !ok || got.State != ProbeConfirmed {
+			t.Errorf("controller terminal/hold window=%#v ok=%v, want Confirmed", got, ok)
+		}
+		if got, ok := persisted.ProbeWindows[2][ProbeWindowLong]; !ok || !reflect.DeepEqual(got, f.other) {
+			t.Errorf("roster hold replaced unrelated instance: got=%#v ok=%v want=%#v", got, ok, f.other)
+		}
+	}
+
+	t.Run("terminal persistence blocks behind roster hold", func(t *testing.T) {
+		f := newFixture(t)
+		markConfirmed(f)
+		writeStarted := make(chan struct{})
+		var writeOnce sync.Once
+		previousObserve := f.r.runtimeStore.hooks.Observe
+		f.r.runtimeStore.hooks.Observe = func(op string) {
+			if previousObserve != nil {
+				previousObserve(op)
+			}
+			if op == "backup-write" {
+				writeOnce.Do(func() { close(writeStarted) })
+			}
+		}
+		f.r.probeHoldMu.Lock()
+		done := make(chan error, 1)
+		go func() {
+			done <- f.r.persistTerminalProbeCompletion(f.attempt.Instance, f.attempt.AttemptID, f.quota, ProbeAttemptSentUnknown)
+		}()
+		select {
+		case <-writeStarted:
+			t.Error("terminal completion reached durable write while roster-hold boundary was locked")
+		case <-time.After(100 * time.Millisecond):
+		}
+		f.r.probeHoldMu.Unlock()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("terminal completion did not resume after roster-hold boundary")
+		}
+	})
+
+	t.Run("terminal commits before roster hold", func(t *testing.T) {
+		f := newFixture(t)
+		markConfirmed(f)
+		if err := f.r.persistTerminalProbeCompletion(f.attempt.Instance, f.attempt.AttemptID, f.quota, ProbeAttemptSentUnknown); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.r.persistProbeRosterHold(); err != nil {
+			t.Fatal(err)
+		}
+		assertTerminal(t, f)
+	})
+
+	t.Run("roster hold commits before terminal", func(t *testing.T) {
+		f := newFixture(t)
+		if err := f.r.persistProbeRosterHold(); err != nil {
+			t.Fatal(err)
+		}
+		markConfirmed(f)
+		if err := f.r.persistTerminalProbeCompletion(f.attempt.Instance, f.attempt.AttemptID, f.quota, ProbeAttemptSentUnknown); err != nil {
+			t.Fatal(err)
+		}
+		assertTerminal(t, f)
+	})
 }
 
 func newTwoAccountProbeRuntime(t *testing.T, now time.Time, host *sequenceProbeHost) (*QuotaRefresher, RuntimeBinding, RuntimeBinding, string, HostRosterSnapshot) {
@@ -4765,6 +4882,142 @@ func TestProductionProbeKPointCrashRestartVerifyFirst(t *testing.T) {
 				t.Fatalf("probe resent after crash: urls=%v", host.urls)
 			}
 		})
+	}
+}
+
+func TestProductionProbeExpiredCallbackCannotResurrectCompletedAttempt(t *testing.T) {
+	now := time.Date(2026, 8, 2, 9, 0, 0, 0, time.UTC)
+	clock := newCoordinatorTestClock(now)
+	idToken := makeUnsignedJWT(t, map[string]any{"chatgpt_account_id": "acct"})
+	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(5*time.Hour).Format(time.RFC3339)))
+	active := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":1,"limit_window_seconds":18000,"reset_at":%q}}}`, now.Add(5*time.Hour).Format(time.RFC3339)))
+	postStarted := make(chan struct{})
+	releasePost := make(chan struct{})
+	postReturned := make(chan struct{})
+	var returnOnce sync.Once
+	host := &sequenceProbeHost{
+		auth:      pluginapi.HostAuthGetResponse{AuthIndex: "idx", Name: "a.json", JSON: json.RawMessage(`{"access_token":"access","id_token":"` + idToken + `"}`)},
+		quota:     [][]byte{lazy, active},
+		doStarted: postStarted,
+		releaseDo: releasePost,
+	}
+	host.afterDo = func(req pluginapi.HTTPRequest) {
+		if req.Method == http.MethodPost && req.URL == codexResetProbeEndpoint {
+			returnOnce.Do(func() { close(postReturned) })
+		}
+	}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releasePost) }) }
+	t.Cleanup(release)
+
+	cfg := DefaultConfig()
+	cfg.EnableResetProbe = true
+	cfg.MaxRefreshConcurrency = 2
+	pluginState := NewPluginState(cfg)
+	pluginState.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 9, AuthIDs: map[string]struct{}{"a": {}}})
+	roster := HostRosterSnapshot{Capability: CapabilityA, Entries: []RosterEntry{{ID: "a", AuthIndex: "idx", Provider: "codex", Priority: intPtr(9)}}}
+	path := filepath.Join(t.TempDir(), "state.json")
+	adapter := &rosterCredentialHost{host: host, roster: roster}
+	r, err := NewProductionQuotaRefresher(host, pluginState, adapter, roster, path, clock.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.bindings = r.bindings
+	binding, _, err := r.BootstrapBinding(context.Background(), "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	setPendingSuspectedProbe(t, r, binding.Instance, ProbeWindowFiveHour, now.Add(5*time.Hour), 5*time.Hour)
+	r.coordinator.opts.AfterFunc = clock.AfterFunc
+
+	dueDone := make(chan error, 1)
+	go func() { dueDone <- r.RunProbeDueOnce(context.Background()) }()
+	select {
+	case <-postStarted:
+	case <-time.After(time.Second):
+		t.Fatal("compact POST did not start")
+	}
+	clock.Advance(legacyLeaseDuration)
+	if err = <-dueDone; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expired Probe err=%v, want deadline exceeded", err)
+	}
+	expired, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, ok := expired.ProbeAttempts[binding.Instance]
+	if !ok || attempt.AttemptID == "" || attempt.Phase != ProbeAttemptSentUnknown {
+		t.Fatalf("expired Probe attempt=%#v ok=%v, want exact SentUnknown", attempt, ok)
+	}
+
+	recoveryDone := make(chan error, 1)
+	go func() { recoveryDone <- r.RunProbeRecoveryOnce(context.Background()) }()
+	terminalDeadline := time.Now().Add(time.Second)
+	for {
+		recovered, snapshotErr := r.runtimeStore.PersistentSnapshot()
+		if snapshotErr != nil {
+			t.Fatal(snapshotErr)
+		}
+		_, hasAttempt := recovered.ProbeAttempts[binding.Instance]
+		window := recovered.ProbeWindows[binding.Instance][ProbeWindowFiveHour]
+		if !hasAttempt && window.State == ProbeConfirmed {
+			break
+		}
+		if time.Now().After(terminalDeadline) {
+			t.Fatalf("second-slot recovery did not reach terminal commit: attempt=%#v window=%#v", recovered.ProbeAttempts[binding.Instance], window)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	release()
+	select {
+	case <-postReturned:
+	case <-time.After(time.Second):
+		t.Fatal("expired compact POST did not return")
+	}
+	if err = <-recoveryDone; err != nil {
+		t.Fatalf("second-slot recovery failed after terminal commit: %v", err)
+	}
+	lateDeadline := time.Now().Add(time.Second)
+	for {
+		found := false
+		for _, entry := range pluginState.Snapshot(clock.Now()).Logs {
+			if entry.Event == "probe.failed" {
+				found = true
+				break
+			}
+		}
+		if found {
+			break
+		}
+		if time.Now().After(lateDeadline) {
+			t.Fatal("late expired callback did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	late, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resurrected, ok := late.ProbeAttempts[binding.Instance]; ok {
+		t.Errorf("late callback resurrected completed attempt: %#v", resurrected)
+	}
+	if got := late.ProbeWindows[binding.Instance][ProbeWindowFiveHour]; got.State != ProbeConfirmed {
+		t.Errorf("late callback replaced terminal window: %#v", got)
+	}
+
+	restartAdapter := &rosterCredentialHost{host: host, roster: roster}
+	restart, err := NewProductionQuotaRefresher(host, pluginState, restartAdapter, roster, path, clock.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restartAdapter.bindings = restart.bindings
+	if err = restart.RunProbeRecoveryOnce(context.Background()); err != nil {
+		t.Errorf("restart recovery entered a missing-fence loop: %v", err)
+	}
+	if posts, urls := probePOSTCount(host); posts != 1 {
+		t.Errorf("compact POST count=%d, want exactly 1; urls=%v", posts, urls)
 	}
 }
 
