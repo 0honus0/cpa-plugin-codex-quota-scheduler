@@ -1962,6 +1962,269 @@ func TestProbeTerminalCompletionAndRosterHoldShareLinearizationBoundary(t *testi
 	})
 }
 
+type productionVerifyRosterBarrierFixture struct {
+	r          *QuotaRefresher
+	host       *sequenceProbeHost
+	a          RuntimeBinding
+	b          RuntimeBinding
+	attempt    ProbeAttempt
+	bWindow    ProbeWindow
+	legacyPath string
+	roster     HostRosterSnapshot
+	now        time.Time
+}
+
+func newProductionVerifyRosterBarrierFixture(t *testing.T) productionVerifyRosterBarrierFixture {
+	t.Helper()
+	now := time.Date(2026, 8, 2, 11, 0, 0, 0, time.UTC)
+	reset := now.Add(5 * time.Hour)
+	active := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":1,"limit_window_seconds":18000,"reset_at":%q}}}`, reset.Format(time.RFC3339)))
+	host := newProbeFixtureHost()
+	host.quota = [][]byte{active}
+	r, a, b, legacyPath, roster := newTwoAccountProbeRuntime(t, now, host)
+	t.Cleanup(r.coordinator.Close)
+	sendFence, err := r.probeFence.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt := ProbeAttempt{Instance: a.Instance, AttemptID: "production-terminal-vs-hold", Windows: []ProbeWindowKind{ProbeWindowFiveHour}, Phase: ProbeAttemptSentUnknown, SendFenceSeq: sendFence, CreatedAt: now.Add(-time.Minute), VerifyNotBefore: now, SuppressUntil: now.Add(10 * time.Minute)}
+	aBaseline := ResetProbeBaseline(reset, 0, 5*time.Hour)
+	aBaseline.WindowKind = WindowFiveHour
+	aBaseline.SuspectedLazy = true
+	aWindow := ProbeWindow{State: ProbeSentUnknown, AttemptID: attempt.AttemptID, Baseline: aBaseline}
+	bBaseline := ResetProbeBaseline(now.Add(7*24*time.Hour), 20, 7*24*time.Hour)
+	bBaseline.WindowKind = WindowWeekly
+	bWindow := ProbeWindow{State: ProbeConfirmed, Baseline: bBaseline}
+	r.probeController.SetWindow(a.Instance, ProbeWindowFiveHour, aWindow)
+	r.probeController.SetWindow(b.Instance, ProbeWindowLong, bWindow)
+	if _, err = r.runtimeStore.Update(func(state *PersistentState) error {
+		state.ProbeAttempts[a.Instance] = attempt
+		state.ProbeWindows[a.Instance] = map[ProbeWindowKind]ProbeWindow{ProbeWindowFiveHour: aWindow}
+		state.ProbeWindows[b.Instance] = map[ProbeWindowKind]ProbeWindow{ProbeWindowLong: bWindow}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return productionVerifyRosterBarrierFixture{r: r, host: host, a: a, b: b, attempt: attempt, bWindow: bWindow, legacyPath: legacyPath, roster: roster, now: now}
+}
+
+func (f productionVerifyRosterBarrierFixture) lifecycle(health RosterHealth, revision uint64) ActiveRoster {
+	background := health == RosterHealthy || health == RosterDegraded
+	return ActiveRoster{
+		Capability:        CapabilityA,
+		Confirmed:         true,
+		BackgroundAllowed: background,
+		Health:            health,
+		Generation:        f.r.runtimeRoster().Generation,
+		LifecycleRevision: revision,
+		ConfirmedAt:       f.now,
+		HighestPriority:   9,
+		Instances:         []string{"a", "b"},
+		Entries:           append([]RosterEntry(nil), f.roster.Entries...),
+	}
+}
+
+func armNextProbeStateWriteBarrier(t *testing.T, r *QuotaRefresher) (<-chan struct{}, func()) {
+	t.Helper()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enterOnce sync.Once
+	var releaseOnce sync.Once
+	previousObserve := r.runtimeStore.hooks.Observe
+	r.runtimeStore.hooks.Observe = func(op string) {
+		if previousObserve != nil {
+			previousObserve(op)
+		}
+		if op == "backup-write" {
+			enterOnce.Do(func() {
+				close(entered)
+				<-release
+			})
+		}
+	}
+	releaseFn := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseFn)
+	return entered, releaseFn
+}
+
+func waitForProductionBarrier(t *testing.T, barrier <-chan struct{}, message string) {
+	t.Helper()
+	select {
+	case <-barrier:
+	case <-time.After(2 * time.Second):
+		t.Fatal(message)
+	}
+}
+
+func assertProductionVerifyRosterBarrierResult(t *testing.T, f productionVerifyRosterBarrierFixture) {
+	t.Helper()
+	persisted, err := f.r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	durableA, ok := persisted.ProbeWindows[f.a.Instance][ProbeWindowFiveHour]
+	if !ok || durableA.State != ProbeConfirmed {
+		t.Fatalf("durable target window=%#v ok=%v, want Confirmed", durableA, ok)
+	}
+	controllerA, ok := f.r.probeController.Window(f.a.Instance, ProbeWindowFiveHour)
+	if !ok || !reflect.DeepEqual(controllerA, durableA) {
+		t.Fatalf("target controller/durable mismatch: controller=%#v ok=%v durable=%#v", controllerA, ok, durableA)
+	}
+	if attempt, ok := persisted.ProbeAttempts[f.a.Instance]; ok {
+		t.Fatalf("terminal target retained attempt: %#v", attempt)
+	}
+	durableB, ok := persisted.ProbeWindows[f.b.Instance][ProbeWindowLong]
+	if !ok || !reflect.DeepEqual(durableB, f.bWindow) {
+		t.Fatalf("unrelated durable window changed: got=%#v ok=%v want=%#v", durableB, ok, f.bWindow)
+	}
+	controllerB, ok := f.r.probeController.Window(f.b.Instance, ProbeWindowLong)
+	if !ok || !reflect.DeepEqual(controllerB, durableB) {
+		t.Fatalf("unrelated controller/durable mismatch: controller=%#v ok=%v durable=%#v", controllerB, ok, durableB)
+	}
+	f.host.mu.Lock()
+	requestsBeforeRestart := len(f.host.requests)
+	f.host.mu.Unlock()
+	if requestsBeforeRestart != 1 {
+		t.Fatalf("production verify requests=%d, want one GET", requestsBeforeRestart)
+	}
+
+	restartAdapter := &rosterCredentialHost{host: f.host, roster: f.roster}
+	restart, err := NewProductionQuotaRefresher(f.host, f.r.state, restartAdapter, f.roster, f.legacyPath, func() time.Time { return f.now.Add(time.Minute) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(restart.coordinator.Close)
+	restartAdapter.bindings = restart.bindings
+	if err = restart.RunProbeRecoveryOnce(context.Background()); err != nil {
+		t.Fatalf("restart recovery failed or looped: %v", err)
+	}
+	restarted, err := restart.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt, ok := restarted.ProbeAttempts[f.a.Instance]; ok {
+		t.Fatalf("restart retained target attempt: %#v", attempt)
+	}
+	f.host.mu.Lock()
+	requestsAfterRestart := len(f.host.requests)
+	f.host.mu.Unlock()
+	if requestsAfterRestart != requestsBeforeRestart {
+		t.Fatalf("restart recovery issued requests: before=%d after=%d", requestsBeforeRestart, requestsAfterRestart)
+	}
+}
+
+func TestProductionVerifyTerminalAndFailClosedLifecycleLinearizeBothOrders(t *testing.T) {
+	t.Run("verify terminal owns boundary before FailClosed", func(t *testing.T) {
+		f := newProductionVerifyRosterBarrierFixture(t)
+		seeded, err := f.r.runtimeStore.PersistentSnapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := seeded.ProbeAttempts[f.a.Instance]; got.AttemptID != f.attempt.AttemptID || got.SendFenceSeq != f.attempt.SendFenceSeq || got.Phase != ProbeAttemptSentUnknown {
+			t.Fatalf("seeded attempt lost exact identity/fence: %#v", got)
+		}
+		writeEntered, releaseWrite := armNextProbeStateWriteBarrier(t, f.r)
+		recoveryDone := make(chan error, 1)
+		go func() { recoveryDone <- f.r.RunProbeRecoveryOnce(context.Background()) }()
+		waitForProductionBarrier(t, writeEntered, "production terminal did not reach durable barrier")
+		window, ok := f.r.probeController.Window(f.a.Instance, ProbeWindowFiveHour)
+		if !ok || window.State != ProbeConfirmed {
+			t.Fatalf("real verify classification=%#v ok=%v, want Confirmed", window, ok)
+		}
+		if f.r.probeHoldMu.TryLock() {
+			f.r.probeHoldMu.Unlock()
+			t.Error("production verify terminal did not own the roster-hold boundary")
+		}
+
+		baseRevision := f.r.runtimeRoster().LifecycleRevision
+		failClosedDone := make(chan struct{})
+		go func() {
+			f.r.ObserveRosterLifecycle(f.lifecycle(RosterFailClosed, baseRevision+1))
+			close(failClosedDone)
+		}()
+		deadline := time.Now().Add(time.Second)
+		for f.r.runtimeRoster().Health != RosterFailClosed {
+			if time.Now().After(deadline) {
+				t.Fatal("actual FailClosed lifecycle was not published")
+			}
+			time.Sleep(time.Millisecond)
+		}
+		select {
+		case <-failClosedDone:
+			t.Fatal("FailClosed hold bypassed in-flight terminal boundary")
+		default:
+		}
+		releaseWrite()
+		if err = <-recoveryDone; err != nil {
+			t.Fatal(err)
+		}
+		waitForProductionBarrier(t, failClosedDone, "FailClosed lifecycle did not finish after terminal commit")
+		assertProductionVerifyRosterBarrierResult(t, f)
+	})
+
+	t.Run("FailClosed owns boundary before verify terminal", func(t *testing.T) {
+		f := newProductionVerifyRosterBarrierFixture(t)
+		seeded, err := f.r.runtimeStore.PersistentSnapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := seeded.ProbeAttempts[f.a.Instance]; got.AttemptID != f.attempt.AttemptID || got.SendFenceSeq != f.attempt.SendFenceSeq || got.Phase != ProbeAttemptSentUnknown {
+			t.Fatalf("seeded attempt lost exact identity/fence: %#v", got)
+		}
+		f.host.gateAuthIndex = f.a.AuthIndex
+		f.host.getStarted = make(chan struct{})
+		f.host.releaseGet = make(chan struct{})
+		quotaReturned := make(chan struct{})
+		var quotaOnce sync.Once
+		f.host.afterDo = func(req pluginapi.HTTPRequest) {
+			if req.URL == f.r.state.Config().QuotaEndpoint {
+				quotaOnce.Do(func() { close(quotaReturned) })
+			}
+		}
+		var releaseGetOnce sync.Once
+		releaseGet := func() { releaseGetOnce.Do(func() { close(f.host.releaseGet) }) }
+		t.Cleanup(releaseGet)
+		writeEntered, releaseWrite := armNextProbeStateWriteBarrier(t, f.r)
+		recoveryDone := make(chan error, 1)
+		go func() { recoveryDone <- f.r.RunProbeRecoveryOnce(context.Background()) }()
+		waitForProductionBarrier(t, f.host.getStarted, "production recovery did not reach GetAuth barrier")
+
+		baseRevision := f.r.runtimeRoster().LifecycleRevision
+		failClosedDone := make(chan struct{})
+		go func() {
+			f.r.ObserveRosterLifecycle(f.lifecycle(RosterFailClosed, baseRevision+1))
+			close(failClosedDone)
+		}()
+		waitForProductionBarrier(t, writeEntered, "actual FailClosed hold did not reach durable barrier")
+		if f.r.runtimeRoster().Health != RosterFailClosed {
+			t.Fatal("FailClosed hold reached storage before lifecycle publication")
+		}
+		// Let the already-admitted recovery cross the production HTTP gate while
+		// the earlier FailClosed hold still owns the Probe linearization boundary.
+		f.r.ObserveRosterLifecycle(f.lifecycle(RosterHealthy, baseRevision+2))
+		releaseGet()
+		waitForProductionBarrier(t, quotaReturned, "admitted production verify did not finish its quota GET")
+		classificationDeadline := time.Now().Add(200 * time.Millisecond)
+		for time.Now().Before(classificationDeadline) {
+			window, ok := f.r.probeController.Window(f.a.Instance, ProbeWindowFiveHour)
+			if !ok || window.AttemptID != f.attempt.AttemptID {
+				t.Fatalf("blocked target lost exact attempt: %#v ok=%v", window, ok)
+			}
+			if window.State == ProbeConfirmed {
+				t.Error("verify classification escaped while FailClosed owned the common boundary")
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		releaseWrite()
+		waitForProductionBarrier(t, failClosedDone, "FailClosed hold did not commit after release")
+		if err = <-recoveryDone; err != nil {
+			t.Fatal(err)
+		}
+		assertProductionVerifyRosterBarrierResult(t, f)
+	})
+}
+
 func newTwoAccountProbeRuntime(t *testing.T, now time.Time, host *sequenceProbeHost) (*QuotaRefresher, RuntimeBinding, RuntimeBinding, string, HostRosterSnapshot) {
 	t.Helper()
 	host.authByIndex = map[string]pluginapi.HostAuthGetResponse{
