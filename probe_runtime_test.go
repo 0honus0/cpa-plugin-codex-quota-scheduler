@@ -1963,15 +1963,26 @@ func TestProbeTerminalCompletionAndRosterHoldShareLinearizationBoundary(t *testi
 }
 
 type productionVerifyRosterBarrierFixture struct {
-	r          *QuotaRefresher
-	host       *sequenceProbeHost
-	a          RuntimeBinding
-	b          RuntimeBinding
-	attempt    ProbeAttempt
-	bWindow    ProbeWindow
-	legacyPath string
-	roster     HostRosterSnapshot
-	now        time.Time
+	r                  *QuotaRefresher
+	host               *sequenceProbeHost
+	a                  RuntimeBinding
+	b                  RuntimeBinding
+	attempt            ProbeAttempt
+	bDurableWindows    map[ProbeWindowKind]ProbeWindow
+	bControllerWindows map[ProbeWindowKind]ProbeWindow
+	bAttempt           ProbeAttempt
+	bAttemptPresent    bool
+	legacyPath         string
+	roster             HostRosterSnapshot
+	now                time.Time
+}
+
+func cloneProbeWindowInstance(windows map[ProbeWindowKind]ProbeWindow) map[ProbeWindowKind]ProbeWindow {
+	out := make(map[ProbeWindowKind]ProbeWindow, len(windows))
+	for kind, window := range windows {
+		out[kind] = window
+	}
+	return out
 }
 
 func newProductionVerifyRosterBarrierFixture(t *testing.T) productionVerifyRosterBarrierFixture {
@@ -1987,25 +1998,57 @@ func newProductionVerifyRosterBarrierFixture(t *testing.T) productionVerifyRoste
 	if err != nil {
 		t.Fatal(err)
 	}
+	bSendFence, err := r.probeFence.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
 	attempt := ProbeAttempt{Instance: a.Instance, AttemptID: "production-terminal-vs-hold", Windows: []ProbeWindowKind{ProbeWindowFiveHour}, Phase: ProbeAttemptSentUnknown, SendFenceSeq: sendFence, CreatedAt: now.Add(-time.Minute), VerifyNotBefore: now, SuppressUntil: now.Add(10 * time.Minute)}
 	aBaseline := ResetProbeBaseline(reset, 0, 5*time.Hour)
 	aBaseline.WindowKind = WindowFiveHour
 	aBaseline.SuspectedLazy = true
 	aWindow := ProbeWindow{State: ProbeSentUnknown, AttemptID: attempt.AttemptID, Baseline: aBaseline}
-	bBaseline := ResetProbeBaseline(now.Add(7*24*time.Hour), 20, 7*24*time.Hour)
-	bBaseline.WindowKind = WindowWeekly
-	bWindow := ProbeWindow{State: ProbeConfirmed, Baseline: bBaseline}
+	bFiveBaseline := ResetProbeBaseline(now.Add(5*time.Hour), 30, 5*time.Hour)
+	bFiveBaseline.WindowKind = WindowFiveHour
+	bLongBaseline := ResetProbeBaseline(now.Add(7*24*time.Hour), 20, 7*24*time.Hour)
+	bLongBaseline.WindowKind = WindowWeekly
+	bAttempt := ProbeAttempt{Instance: b.Instance, AttemptID: "unrelated-future-verify", Windows: []ProbeWindowKind{ProbeWindowFiveHour, ProbeWindowLong}, Phase: ProbeAttemptSentUnknown, SendFenceSeq: bSendFence, CreatedAt: now, VerifyNotBefore: now.Add(time.Hour), SuppressUntil: now.Add(10 * time.Minute)}
+	bWindows := map[ProbeWindowKind]ProbeWindow{
+		ProbeWindowFiveHour: {State: ProbeSentUnknown, Baseline: bFiveBaseline, RetryCount: 2, AttemptID: bAttempt.AttemptID},
+		ProbeWindowLong:     {State: ProbeSentUnknown, Baseline: bLongBaseline, RetryCount: 3, AttemptID: bAttempt.AttemptID},
+	}
 	r.probeController.SetWindow(a.Instance, ProbeWindowFiveHour, aWindow)
-	r.probeController.SetWindow(b.Instance, ProbeWindowLong, bWindow)
+	for kind, window := range bWindows {
+		r.probeController.SetWindow(b.Instance, kind, window)
+	}
 	if _, err = r.runtimeStore.Update(func(state *PersistentState) error {
 		state.ProbeAttempts[a.Instance] = attempt
+		state.ProbeAttempts[b.Instance] = bAttempt
 		state.ProbeWindows[a.Instance] = map[ProbeWindowKind]ProbeWindow{ProbeWindowFiveHour: aWindow}
-		state.ProbeWindows[b.Instance] = map[ProbeWindowKind]ProbeWindow{ProbeWindowLong: bWindow}
+		state.ProbeWindows[b.Instance] = cloneProbeWindowInstance(bWindows)
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	return productionVerifyRosterBarrierFixture{r: r, host: host, a: a, b: b, attempt: attempt, bWindow: bWindow, legacyPath: legacyPath, roster: roster, now: now}
+	persisted, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	controllerWindows := r.probeController.Snapshot()
+	persistedBAttempt, bAttemptPresent := persisted.ProbeAttempts[b.Instance]
+	return productionVerifyRosterBarrierFixture{
+		r:                  r,
+		host:               host,
+		a:                  a,
+		b:                  b,
+		attempt:            attempt,
+		bDurableWindows:    cloneProbeWindowInstance(persisted.ProbeWindows[b.Instance]),
+		bControllerWindows: cloneProbeWindowInstance(controllerWindows[b.Instance]),
+		bAttempt:           persistedBAttempt,
+		bAttemptPresent:    bAttemptPresent,
+		legacyPath:         legacyPath,
+		roster:             roster,
+		now:                now,
+	}
 }
 
 func (f productionVerifyRosterBarrierFixture) lifecycle(health RosterHealth, revision uint64) ActiveRoster {
@@ -2056,6 +2099,22 @@ func waitForProductionBarrier(t *testing.T, barrier <-chan struct{}, message str
 	}
 }
 
+func assertUnrelatedProductionProbeState(t *testing.T, f productionVerifyRosterBarrierFixture, persisted PersistentState, controller *ProbeController) {
+	t.Helper()
+	durableWindows, durablePresent := persisted.ProbeWindows[f.b.Instance]
+	if !durablePresent || !reflect.DeepEqual(durableWindows, f.bDurableWindows) {
+		t.Fatalf("unrelated durable windows changed: got=%#v present=%v want=%#v", durableWindows, durablePresent, f.bDurableWindows)
+	}
+	controllerWindows, controllerPresent := controller.Snapshot()[f.b.Instance]
+	if !controllerPresent || !reflect.DeepEqual(controllerWindows, f.bControllerWindows) {
+		t.Fatalf("unrelated controller windows changed: got=%#v present=%v want=%#v", controllerWindows, controllerPresent, f.bControllerWindows)
+	}
+	durableAttempt, attemptPresent := persisted.ProbeAttempts[f.b.Instance]
+	if attemptPresent != f.bAttemptPresent || !reflect.DeepEqual(durableAttempt, f.bAttempt) {
+		t.Fatalf("unrelated attempt changed: got=%#v present=%v want=%#v present=%v", durableAttempt, attemptPresent, f.bAttempt, f.bAttemptPresent)
+	}
+}
+
 func assertProductionVerifyRosterBarrierResult(t *testing.T, f productionVerifyRosterBarrierFixture) {
 	t.Helper()
 	persisted, err := f.r.runtimeStore.PersistentSnapshot()
@@ -2073,14 +2132,7 @@ func assertProductionVerifyRosterBarrierResult(t *testing.T, f productionVerifyR
 	if attempt, ok := persisted.ProbeAttempts[f.a.Instance]; ok {
 		t.Fatalf("terminal target retained attempt: %#v", attempt)
 	}
-	durableB, ok := persisted.ProbeWindows[f.b.Instance][ProbeWindowLong]
-	if !ok || !reflect.DeepEqual(durableB, f.bWindow) {
-		t.Fatalf("unrelated durable window changed: got=%#v ok=%v want=%#v", durableB, ok, f.bWindow)
-	}
-	controllerB, ok := f.r.probeController.Window(f.b.Instance, ProbeWindowLong)
-	if !ok || !reflect.DeepEqual(controllerB, durableB) {
-		t.Fatalf("unrelated controller/durable mismatch: controller=%#v ok=%v durable=%#v", controllerB, ok, durableB)
-	}
+	assertUnrelatedProductionProbeState(t, f, persisted, f.r.probeController)
 	f.host.mu.Lock()
 	requestsBeforeRestart := len(f.host.requests)
 	f.host.mu.Unlock()
@@ -2105,6 +2157,7 @@ func assertProductionVerifyRosterBarrierResult(t *testing.T, f productionVerifyR
 	if attempt, ok := restarted.ProbeAttempts[f.a.Instance]; ok {
 		t.Fatalf("restart retained target attempt: %#v", attempt)
 	}
+	assertUnrelatedProductionProbeState(t, f, restarted, restart.probeController)
 	f.host.mu.Lock()
 	requestsAfterRestart := len(f.host.requests)
 	f.host.mu.Unlock()
@@ -2114,6 +2167,7 @@ func assertProductionVerifyRosterBarrierResult(t *testing.T, f productionVerifyR
 }
 
 func TestProductionVerifyTerminalAndFailClosedLifecycleLinearizeBothOrders(t *testing.T) {
+	var missingVerifyBoundary atomic.Bool
 	t.Run("verify terminal owns boundary before FailClosed", func(t *testing.T) {
 		f := newProductionVerifyRosterBarrierFixture(t)
 		seeded, err := f.r.runtimeStore.PersistentSnapshot()
@@ -2132,8 +2186,8 @@ func TestProductionVerifyTerminalAndFailClosedLifecycleLinearizeBothOrders(t *te
 			t.Fatalf("real verify classification=%#v ok=%v, want Confirmed", window, ok)
 		}
 		if f.r.probeHoldMu.TryLock() {
+			missingVerifyBoundary.Store(true)
 			f.r.probeHoldMu.Unlock()
-			t.Error("production verify terminal did not own the roster-hold boundary")
 		}
 
 		baseRevision := f.r.runtimeRoster().LifecycleRevision
@@ -2164,6 +2218,8 @@ func TestProductionVerifyTerminalAndFailClosedLifecycleLinearizeBothOrders(t *te
 
 	t.Run("FailClosed owns boundary before verify terminal", func(t *testing.T) {
 		f := newProductionVerifyRosterBarrierFixture(t)
+		clock := &probeNthCaptureClock{now: f.now}
+		f.r.now = clock.Now
 		seeded, err := f.r.runtimeStore.PersistentSnapshot()
 		if err != nil {
 			t.Fatal(err)
@@ -2175,12 +2231,19 @@ func TestProductionVerifyTerminalAndFailClosedLifecycleLinearizeBothOrders(t *te
 		f.host.getStarted = make(chan struct{})
 		f.host.releaseGet = make(chan struct{})
 		quotaReturned := make(chan struct{})
+		releaseQuota := make(chan struct{})
 		var quotaOnce sync.Once
 		f.host.afterDo = func(req pluginapi.HTTPRequest) {
 			if req.URL == f.r.state.Config().QuotaEndpoint {
-				quotaOnce.Do(func() { close(quotaReturned) })
+				quotaOnce.Do(func() {
+					close(quotaReturned)
+					<-releaseQuota
+				})
 			}
 		}
+		var releaseQuotaOnce sync.Once
+		releaseQuotaFn := func() { releaseQuotaOnce.Do(func() { close(releaseQuota) }) }
+		t.Cleanup(releaseQuotaFn)
 		var releaseGetOnce sync.Once
 		releaseGet := func() { releaseGetOnce.Do(func() { close(f.host.releaseGet) }) }
 		t.Cleanup(releaseGet)
@@ -2204,17 +2267,30 @@ func TestProductionVerifyTerminalAndFailClosedLifecycleLinearizeBothOrders(t *te
 		f.r.ObserveRosterLifecycle(f.lifecycle(RosterHealthy, baseRevision+2))
 		releaseGet()
 		waitForProductionBarrier(t, quotaReturned, "admitted production verify did not finish its quota GET")
-		classificationDeadline := time.Now().Add(200 * time.Millisecond)
-		for time.Now().Before(classificationDeadline) {
-			window, ok := f.r.probeController.Window(f.a.Instance, ProbeWindowFiveHour)
-			if !ok || window.AttemptID != f.attempt.AttemptID {
-				t.Fatalf("blocked target lost exact attempt: %#v ok=%v", window, ok)
+		if missingVerifyBoundary.Load() {
+			classificationReached, releaseClassification := clock.ArmNthCall(2)
+			var releaseClassificationOnce sync.Once
+			releaseClassificationFn := func() { releaseClassificationOnce.Do(func() { close(releaseClassification) }) }
+			t.Cleanup(releaseClassificationFn)
+			releaseQuotaFn()
+			waitForProductionBarrier(t, classificationReached, "missing-lock verify did not reach the classification boundary")
+			releaseClassificationFn()
+			deadline := time.Now().Add(2 * time.Second)
+			for {
+				window, ok := f.r.probeController.Window(f.a.Instance, ProbeWindowFiveHour)
+				if !ok || window.AttemptID != f.attempt.AttemptID {
+					t.Fatalf("blocked target lost exact attempt: %#v ok=%v", window, ok)
+				}
+				if window.State == ProbeConfirmed {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("missing-lock verify did not publish stale classification before FailClosed release")
+				}
+				time.Sleep(time.Millisecond)
 			}
-			if window.State == ProbeConfirmed {
-				t.Error("verify classification escaped while FailClosed owned the common boundary")
-				break
-			}
-			time.Sleep(time.Millisecond)
+		} else {
+			releaseQuotaFn()
 		}
 		releaseWrite()
 		waitForProductionBarrier(t, failClosedDone, "FailClosed hold did not commit after release")
