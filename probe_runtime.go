@@ -61,6 +61,9 @@ func (r *QuotaRefresher) bootstrapProbeWindows() error {
 	now := r.now()
 	observationInterval := r.probeObservationInterval()
 	touched := map[AuthInstanceID]struct{}{}
+	for instance := range r.probePersistPending {
+		touched[instance] = struct{}{}
+	}
 	for instance, windows := range r.probeController.Snapshot() {
 		for kind, window := range windows {
 			if window.State != ProbeWaitingReset || window.Baseline.Kind != ProbeBaselineReset || window.Baseline.WindowLength <= 0 {
@@ -167,6 +170,18 @@ func (r *QuotaRefresher) bootstrapProbeWindows() error {
 		}
 	}
 	err := r.persistProbeInstances(touched)
+	if err != nil {
+		if r.probePersistPending == nil {
+			r.probePersistPending = map[AuthInstanceID]struct{}{}
+		}
+		for instance := range touched {
+			r.probePersistPending[instance] = struct{}{}
+		}
+	} else {
+		for instance := range touched {
+			delete(r.probePersistPending, instance)
+		}
+	}
 	if err == nil && len(touched) > 0 {
 		r.wakeRefreshLoop()
 	}
@@ -469,14 +484,19 @@ func activeProbeBindings(roster HostRosterSnapshot, bindings map[string]RuntimeB
 }
 
 func (r *QuotaRefresher) RunProbeDueOnce(ctx context.Context) error {
+	_, err := r.runProbeDueOnce(ctx)
+	return err
+}
+
+func (r *QuotaRefresher) runProbeDueOnce(ctx context.Context) (bool, error) {
 	if !r.resetProbeEnabled() {
-		return nil
+		return false, nil
 	}
 	r.probeRunStateMu.Lock()
 	if !r.probeRunMu.TryLock() {
 		r.probeRerunPending = true
 		r.probeRunStateMu.Unlock()
-		return nil
+		return false, nil
 	}
 	r.probeRerunPending = false
 	r.probeRunStateMu.Unlock()
@@ -494,7 +514,7 @@ func (r *QuotaRefresher) RunProbeDueOnce(ctx context.Context) error {
 		}
 		r.probeRunMu.Unlock()
 		r.probeRunStateMu.Unlock()
-		return firstErr
+		return true, firstErr
 	}
 }
 

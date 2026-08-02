@@ -169,14 +169,14 @@ func (c *ProbeController) Advance(i AuthInstanceID, e ProbeEvent) []Intent {
 				migrated := baseline.SuspectedLazy
 				shifted := snap.ResetAt.After(baseline.ResetAt.Add(probeSkewTolerance))
 				shiftedZeroCandidate = shifted && *snap.Usage == 0
-				kindMatches := baseline.WindowKind == "" || (snap.WindowKind != "" && snap.WindowKind == baseline.WindowKind)
+				if baseline.WindowKind == "" && compatibleLegacyProbeWindowKind(k, baseline, snap) {
+					baseline.WindowKind = snap.WindowKind
+				}
+				kindMatches := baseline.WindowKind != "" && snap.WindowKind == baseline.WindowKind
 				strictWindow := QuotaWindow{Kind: snap.WindowKind, UsedPercent: snap.Usage, ResetAt: *snap.ResetAt}
 				if (shifted || migrated) && kindMatches && snap.WindowLengthKnown && looksLikeStrictLazyObservation(e.Now, strictWindow, snap.WindowLength) {
 					baseline.ResetAt = *snap.ResetAt
 					baseline.Usage = *snap.Usage
-					if baseline.WindowKind == "" {
-						baseline.WindowKind = snap.WindowKind
-					}
 					baseline.SuspectedLazy = true
 					strictAuthorized = true
 				}
@@ -245,6 +245,21 @@ func (c *ProbeController) Advance(i AuthInstanceID, e ProbeEvent) []Intent {
 	}
 	return out
 }
+
+func compatibleLegacyProbeWindowKind(slot ProbeWindowKind, baseline ProbeBaseline, snap QuotaSnapshot) bool {
+	if baseline.WindowLength <= 0 || snap.WindowKind == "" || !snap.WindowLengthKnown || snap.WindowLength <= 0 || absDuration(snap.WindowLength-baseline.WindowLength) > probeSkewTolerance {
+		return false
+	}
+	switch slot {
+	case ProbeWindowFiveHour:
+		return snap.WindowKind == WindowFiveHour
+	case ProbeWindowLong:
+		return snap.WindowKind == WindowWeekly || snap.WindowKind == WindowMonthly
+	default:
+		return false
+	}
+}
+
 func deadlineFor(b ProbeBaseline, now time.Time, observationInterval time.Duration) time.Time {
 	if b.Kind == ProbeBaselineUsageOnly {
 		return b.NextRecheckAt

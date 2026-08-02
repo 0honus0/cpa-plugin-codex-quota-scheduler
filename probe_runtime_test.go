@@ -42,6 +42,39 @@ type sequenceProbeHost struct {
 	gateDoURL     string
 }
 
+type probeHandoffClock struct {
+	mu      sync.Mutex
+	now     time.Time
+	armed   bool
+	reached chan struct{}
+	release chan struct{}
+}
+
+func (c *probeHandoffClock) Now() time.Time {
+	c.mu.Lock()
+	now := c.now
+	if !c.armed {
+		c.mu.Unlock()
+		return now
+	}
+	c.armed = false
+	reached := c.reached
+	release := c.release
+	c.mu.Unlock()
+	close(reached)
+	<-release
+	return now
+}
+
+func (c *probeHandoffClock) ArmNextCall() (<-chan struct{}, chan<- struct{}) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.armed = true
+	c.reached = make(chan struct{})
+	c.release = make(chan struct{})
+	return c.reached, c.release
+}
+
 func newProbeFixtureHost() *sequenceProbeHost {
 	return &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{
 		AuthIndex: "idx",
@@ -3001,6 +3034,94 @@ func TestProductionProbeStrictAuthorizationUsesCurrentWindowEvidence(t *testing.
 	}
 }
 
+func TestProductionLegacyEmptyKindBaselineMigratesOnlyFromCompatibleCurrentEvidence(t *testing.T) {
+	now := time.Date(2026, 8, 1, 17, 20, 0, 0, time.UTC)
+	tests := []struct {
+		name     string
+		payloads [][]byte
+		wantKind WindowKind
+		wantPOST int
+	}{
+		{
+			name: "weekly baseline rejects strict monthly payload",
+			payloads: [][]byte{
+				[]byte(fmt.Sprintf(`{"rate_limit":{"secondary_window":{"used_percent":0,"limit_window_seconds":2592000,"reset_at":%q}}}`, now.Add(30*24*time.Hour).Format(time.RFC3339))),
+				[]byte(fmt.Sprintf(`{"rate_limit":{"secondary_window":{"used_percent":1,"limit_window_seconds":2592000,"reset_at":%q}}}`, now.Add(30*24*time.Hour).Format(time.RFC3339))),
+			},
+			wantPOST: 0,
+		},
+		{
+			name: "weekly baseline migrates from strict weekly payload",
+			payloads: [][]byte{
+				[]byte(fmt.Sprintf(`{"rate_limit":{"secondary_window":{"used_percent":0,"limit_window_seconds":604800,"reset_at":%q}}}`, now.Add(7*24*time.Hour).Format(time.RFC3339))),
+				[]byte(fmt.Sprintf(`{"rate_limit":{"secondary_window":{"used_percent":1,"limit_window_seconds":604800,"reset_at":%q}}}`, now.Add(7*24*time.Hour).Format(time.RFC3339))),
+			},
+			wantKind: WindowWeekly,
+			wantPOST: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			legacyPath := filepath.Join(t.TempDir(), "state.json")
+			cfg := DefaultConfig()
+			cfg.EnableResetProbe = true
+			roster := HostRosterSnapshot{Capability: CapabilityA, Confirmed: true, BackgroundAllowed: true, Health: RosterHealthy, Entries: []RosterEntry{{ID: "a", AuthIndex: "idx", Provider: "codex", Priority: intPtr(9)}}}
+
+			seedState := NewPluginState(cfg)
+			seedState.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 9, AuthIDs: map[string]struct{}{"a": {}}})
+			seedHost := newProbeFixtureHost()
+			seedAdapter := &rosterCredentialHost{host: seedHost, roster: roster}
+			seed, err := NewProductionQuotaRefresher(seedHost, seedState, seedAdapter, roster, legacyPath, func() time.Time { return now })
+			if err != nil {
+				t.Fatal(err)
+			}
+			seedAdapter.bindings = seed.bindings
+			binding, _, err := seed.BootstrapBinding(context.Background(), "a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			legacy := ResetProbeBaseline(now.Add(-7*24*time.Hour), 0, 7*24*time.Hour)
+			legacy.SuspectedLazy = true
+			seed.probeController.SetWindow(binding.Instance, ProbeWindowLong, ProbeWindow{State: ProbePendingCheck, Baseline: legacy})
+			if err = seed.persistProbeInstances(map[AuthInstanceID]struct{}{binding.Instance: {}}); err != nil {
+				t.Fatal(err)
+			}
+			if persisted, err := NewStateStore(seed.runtimeStore.path, OSFileHooks(), nil).PersistentSnapshot(); err != nil {
+				t.Fatal(err)
+			} else if got := persisted.ProbeWindows[binding.Instance][ProbeWindowLong].Baseline; got.WindowKind != "" || got.WindowLength != 7*24*time.Hour || !got.SuspectedLazy {
+				t.Fatalf("serialized legacy baseline = %#v", got)
+			}
+
+			restartState := NewPluginState(cfg) // deliberately has no quota cache
+			restartState.ReplaceCPAAdmission(CPAAdmissionState{Observed: true, Priority: 9, AuthIDs: map[string]struct{}{"a": {}}})
+			restartHost := newProbeFixtureHost()
+			restartHost.quota = tt.payloads
+			restartAdapter := &rosterCredentialHost{host: restartHost, roster: roster}
+			restart, err := NewProductionQuotaRefresher(restartHost, restartState, restartAdapter, roster, legacyPath, func() time.Time { return now })
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(restart.Stop)
+			restartAdapter.bindings = restart.bindings
+			restart.coordinator.opts.PropagationWait = func(context.Context, time.Duration) error { return nil }
+
+			if err = restart.RunProbeDueOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if posts, urls := probePOSTCount(restartHost); posts != tt.wantPOST {
+				t.Fatalf("legacy empty-kind baseline sent %d compact POSTs, want %d; urls=%v", posts, tt.wantPOST, urls)
+			}
+			window, ok := restart.probeController.Window(binding.Instance, ProbeWindowLong)
+			if !ok || window.Deadline.IsZero() && tt.wantPOST == 0 {
+				t.Fatalf("legacy rejection did not retain a bounded schedule: %#v, ok=%v", window, ok)
+			}
+			if tt.wantKind != "" && window.Baseline.WindowKind != tt.wantKind {
+				t.Fatalf("migrated baseline kind = %q, want %q", window.Baseline.WindowKind, tt.wantKind)
+			}
+		})
+	}
+}
+
 func TestProductionProbeTimerWakesDormantLoopForRearmAndRepeatedObservation(t *testing.T) {
 	baseNow := time.Date(2026, 8, 1, 17, 30, 0, 0, time.UTC)
 	realStart := time.Now()
@@ -3100,6 +3221,291 @@ func TestProductionProbeTimerWakesDormantLoopForRearmAndRepeatedObservation(t *t
 	}
 	if mode := r.refreshController.Mode(r.now()); mode != RefreshModeDormant {
 		t.Fatalf("Probe timer changed normal refresh mode to %q", mode)
+	}
+}
+
+func TestProductionProbeEarlyErrorsRetryOnlyAtBoundedDeadline(t *testing.T) {
+	baseNow := time.Date(2026, 8, 1, 18, 0, 0, 0, time.UTC)
+	for _, boundary := range []string{"roster_hold", "bootstrap", "state_read"} {
+		t.Run(boundary, func(t *testing.T) {
+			clock := &s7TestClock{now: baseNow}
+			host := newProbeFixtureHost()
+			host.quota = [][]byte{[]byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":1,"limit_window_seconds":18000,"reset_at":%q}}}`, baseNow.Add(-time.Hour).Format(time.RFC3339)))}
+			r := newProductionLazyRefreshRuntime(t, baseNow, host)
+			r.now = clock.Now
+			var stopOnce sync.Once
+			stop := func() { stopOnce.Do(r.Stop) }
+			t.Cleanup(stop)
+			binding, ok := r.bindings.Lookup("a")
+			if !ok {
+				t.Fatal("binding missing")
+			}
+			r.probeController.RemoveWindow(binding.Instance, ProbeWindowLong)
+			baseline := ResetProbeBaseline(baseNow.Add(-time.Hour), 0, 5*time.Hour)
+			baseline.WindowKind = WindowFiveHour
+			if boundary == "bootstrap" {
+				baseline = ResetProbeBaseline(baseNow.Add(5*time.Hour), 20, 0)
+				used := 20.0
+				seconds := int64(5 * time.Hour / time.Second)
+				r.state.UpsertQuota(AccountState{AuthID: "a", AuthIndex: "idx", Provider: "codex", LastSuccessAt: baseNow, Quota: ParsedQuota{FiveHour: &QuotaWindow{Kind: WindowFiveHour, UsedPercent: &used, LimitWindowSeconds: &seconds, ResetAt: baseline.ResetAt}}})
+			}
+			seedWindow := ProbeWindow{State: ProbeWaitingReset, Baseline: baseline, Deadline: baseNow.Add(-time.Minute)}
+			r.probeController.SetWindow(binding.Instance, ProbeWindowFiveHour, seedWindow)
+			if err := r.persistProbeInstances(map[AuthInstanceID]struct{}{binding.Instance: {}}); err != nil {
+				t.Fatal(err)
+			}
+			var recoveryEvidence *ProbeAttempt
+			var recoveryCeiling uint64
+			if boundary == "state_read" {
+				host.quota = append(host.quota, append([]byte(nil), host.quota[0]...))
+				sendFence, fenceErr := r.probeFence.Next()
+				if fenceErr != nil {
+					t.Fatal(fenceErr)
+				}
+				fenceState, snapshotErr := r.runtimeStore.PersistentSnapshot()
+				if snapshotErr != nil {
+					t.Fatal(snapshotErr)
+				}
+				recoveryCeiling = fenceState.ReservedCeiling
+				attempt := ProbeAttempt{Instance: binding.Instance, AttemptID: "durable-sent-before-read-error", Windows: []ProbeWindowKind{ProbeWindowLong}, Phase: ProbeAttemptSentUnknown, SendFenceSeq: sendFence, CreatedAt: baseNow.Add(-time.Minute), VerifyNotBefore: baseNow, SuppressUntil: baseNow.Add(10 * time.Minute)}
+				recoveryEvidence = &attempt
+				longBaseline := ResetProbeBaseline(baseNow.Add(7*24*time.Hour), 0, 7*24*time.Hour)
+				longBaseline.WindowKind = WindowWeekly
+				r.probeController.SetWindow(binding.Instance, ProbeWindowLong, ProbeWindow{State: ProbeSentUnknown, Baseline: longBaseline, AttemptID: attempt.AttemptID})
+				if _, err := r.runtimeStore.Update(func(state *PersistentState) error {
+					state.ProbeAttempts[binding.Instance] = attempt
+					state.ProbeWindows[binding.Instance] = r.probeController.Snapshot()[binding.Instance]
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			var boundaryCalls atomic.Int32
+			var failBoundary atomic.Bool
+			failBoundary.Store(true)
+			expectedInitialCalls := int32(1)
+			switch boundary {
+			case "roster_hold":
+				expectedInitialCalls = 2 // recovery and due both retry the durable roster hold
+				r.probeHoldMu.Lock()
+				r.probeHoldPending = true
+				r.probeHoldErr = errors.New("injected roster hold failure")
+				r.probeHoldMu.Unlock()
+				r.runtimeStore.hooks.Fail = func(op string) error {
+					if op == "backup-write" {
+						boundaryCalls.Add(1)
+						if failBoundary.Load() {
+							return errors.New("injected roster hold persistence failure")
+						}
+					}
+					return nil
+				}
+			case "bootstrap":
+				r.runtimeStore.hooks.Fail = func(op string) error {
+					if op == "backup-write" {
+						boundaryCalls.Add(1)
+						if failBoundary.Load() {
+							return errors.New("injected bootstrap persistence failure")
+						}
+					}
+					return nil
+				}
+			case "state_read":
+				expectedInitialCalls = 2 // recovery and due each encounter the same unreadable store
+				originalRead := r.runtimeStore.hooks.ReadFile
+				r.runtimeStore.loaded = false
+				r.runtimeStore.hooks.ReadFile = func(name string) ([]byte, error) {
+					if name == r.runtimeStore.path {
+						boundaryCalls.Add(1)
+						if failBoundary.Load() {
+							return nil, os.ErrPermission
+						}
+					}
+					return originalRead(name)
+				}
+			}
+
+			r.Start()
+			deadline := time.Now().Add(2 * time.Second)
+			for boundaryCalls.Load() < expectedInitialCalls && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if got := boundaryCalls.Load(); got != expectedInitialCalls {
+				t.Fatalf("initial %s boundary calls = %d, want %d", boundary, got, expectedInitialCalls)
+			}
+			time.Sleep(40 * time.Millisecond)
+			if got := boundaryCalls.Load(); got != expectedInitialCalls {
+				t.Fatalf("%s self-excited before retry deadline: boundary calls=%d, want %d", boundary, got, expectedInitialCalls)
+			}
+			if delay, scheduled := r.nextRefreshLoopDelay(); !scheduled || delay != time.Minute {
+				t.Fatalf("%s retry schedule = (%s, %v), want exactly +1m", boundary, delay, scheduled)
+			}
+			persisted, err := NewStateStore(r.runtimeStore.path, OSFileHooks(), nil).PersistentSnapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := persisted.ProbeWindows[binding.Instance][ProbeWindowFiveHour]; !reflect.DeepEqual(got, seedWindow) {
+				t.Fatalf("%s early error changed durable window before retry: got %#v want %#v", boundary, got, seedWindow)
+			}
+			if recoveryEvidence != nil {
+				if got := persisted.ProbeAttempts[binding.Instance]; !reflect.DeepEqual(got, *recoveryEvidence) || persisted.ReservedCeiling != recoveryCeiling {
+					t.Fatalf("state-read error changed durable attempt/fence: attempt=%#v ceiling=%d", got, persisted.ReservedCeiling)
+				}
+			}
+
+			failBoundary.Store(false)
+			clock.Set(baseNow.Add(time.Minute))
+			r.wakeRefreshLoop()
+			deadline = time.Now().Add(2 * time.Second)
+			for boundaryCalls.Load() == expectedInitialCalls && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if got := boundaryCalls.Load(); got <= expectedInitialCalls {
+				t.Fatalf("%s did not retry at bounded deadline; boundary calls=%d", boundary, got)
+			}
+			if recoveryEvidence != nil {
+				deadline = time.Now().Add(2 * time.Second)
+				for time.Now().Before(deadline) {
+					state, snapshotErr := r.runtimeStore.PersistentSnapshot()
+					if snapshotErr == nil {
+						if _, retained := state.ProbeAttempts[binding.Instance]; !retained {
+							break
+						}
+					}
+					time.Sleep(time.Millisecond)
+				}
+				state, snapshotErr := r.runtimeStore.PersistentSnapshot()
+				if snapshotErr != nil {
+					t.Fatal(snapshotErr)
+				}
+				if _, retained := state.ProbeAttempts[binding.Instance]; retained {
+					t.Fatalf("bounded retry did not consume durable recovery attempt: %#v", state.ProbeAttempts[binding.Instance])
+				}
+				if state.ReservedCeiling < recoveryCeiling {
+					t.Fatalf("bounded retry regressed durable fence ceiling to %d", state.ReservedCeiling)
+				}
+			}
+			if posts, urls := probePOSTCount(host); posts != 0 {
+				t.Fatalf("%s bounded retry sent %d compact POSTs; urls=%v", boundary, posts, urls)
+			}
+
+			stopped := make(chan struct{})
+			go func() {
+				stop()
+				close(stopped)
+			}()
+			select {
+			case <-stopped:
+			case <-time.After(2 * time.Second):
+				t.Fatal("production Stop found accumulated Probe goroutines")
+			}
+		})
+	}
+}
+
+func TestProductionProbeLaunchHandoffConsumesExactBoundaryRearm(t *testing.T) {
+	baseNow := time.Date(2026, 8, 1, 18, 30, 0, 0, time.UTC)
+	clock := &probeHandoffClock{now: baseNow}
+	oldReset := baseNow.Add(-time.Hour)
+	newReset := baseNow.Add(5 * time.Hour)
+	firstActive := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":1,"limit_window_seconds":18000,"reset_at":%q}}}`, oldReset.Format(time.RFC3339)))
+	rearmedLazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, newReset.Format(time.RFC3339)))
+	rearmedActive := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":1,"limit_window_seconds":18000,"reset_at":%q}}}`, newReset.Format(time.RFC3339)))
+	host := newProbeFixtureHost()
+	host.quota = [][]byte{firstActive, rearmedLazy, rearmedActive}
+	r := newProductionLazyRefreshRuntime(t, baseNow, host)
+	r.now = clock.Now
+	var stopOnce sync.Once
+	stop := func() { stopOnce.Do(r.Stop) }
+	t.Cleanup(stop)
+	binding, ok := r.bindings.Lookup("a")
+	if !ok {
+		t.Fatal("binding missing")
+	}
+	baseline := ResetProbeBaseline(oldReset, 0, 5*time.Hour)
+	baseline.WindowKind = WindowFiveHour
+	baseline.SuspectedLazy = true
+	r.probeController.SetWindow(binding.Instance, ProbeWindowFiveHour, ProbeWindow{State: ProbePendingCheck, Baseline: baseline})
+	if err := r.persistProbeInstances(map[AuthInstanceID]struct{}{binding.Instance: {}}); err != nil {
+		t.Fatal(err)
+	}
+
+	host.gateDoURL = r.state.Config().QuotaEndpoint
+	host.doStarted = make(chan struct{})
+	host.releaseDo = make(chan struct{})
+	r.Start()
+	select {
+	case <-host.doStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("initial production precheck did not start")
+	}
+	r.probeRunStateMu.Lock()
+	close(host.releaseDo)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		window, exists := r.probeController.Window(binding.Instance, ProbeWindowFiveHour)
+		persisted, err := r.runtimeStore.PersistentSnapshot()
+		if err == nil && exists && window.State == ProbeConfirmed {
+			if _, hasAttempt := persisted.ProbeAttempts[binding.Instance]; !hasAttempt {
+				break
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	window, exists := r.probeController.Window(binding.Instance, ProbeWindowFiveHour)
+	persisted, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		r.probeRunStateMu.Unlock()
+		t.Fatal(err)
+	}
+	if !exists || window.State != ProbeConfirmed {
+		r.probeRunStateMu.Unlock()
+		t.Fatalf("initial pass did not reach durable Confirmed before handoff: %#v, ok=%v", window, exists)
+	}
+	if _, hasAttempt := persisted.ProbeAttempts[binding.Instance]; hasAttempt {
+		r.probeRunStateMu.Unlock()
+		t.Fatalf("initial pass retained attempt before handoff: %#v", persisted.ProbeAttempts[binding.Instance])
+	}
+	handoffReached, releaseHandoff := clock.ArmNextCall()
+	r.probeRunStateMu.Unlock()
+	select {
+	case <-handoffReached:
+	case <-time.After(2 * time.Second):
+		t.Fatal("launch did not reach post-RunProbeDueOnce handoff barrier")
+	}
+
+	zero := 0.0
+	seconds := int64(5 * time.Hour / time.Second)
+	observation := ParsedQuota{FiveHour: &QuotaWindow{Kind: WindowFiveHour, UsedPercent: &zero, LimitWindowSeconds: &seconds, ResetAt: newReset}}
+	if err = r.reconcileObservedProbeWindows(binding.Instance, observation); err != nil {
+		close(releaseHandoff)
+		t.Fatal(err)
+	}
+	r.Start() // running production Start routes the zero-deadline re-arm through launchProbe
+	r.probeRunStateMu.Lock()
+	active, pending := r.probeLaunchActive, r.probeRerunPending
+	r.probeRunStateMu.Unlock()
+	if !active || !pending {
+		close(releaseHandoff)
+		t.Fatalf("exact-boundary re-arm did not coalesce onto active launch: active=%v pending=%v", active, pending)
+	}
+	close(releaseHandoff)
+	r.wg.Wait()
+	time.Sleep(40 * time.Millisecond)
+
+	window, exists = r.probeController.Window(binding.Instance, ProbeWindowFiveHour)
+	if !exists || window.State != ProbeConfirmed {
+		t.Fatalf("exact-boundary PendingCheck was not consumed: %#v, ok=%v", window, exists)
+	}
+	if posts, urls := probePOSTCount(host); posts != 1 {
+		t.Fatalf("exact-boundary re-arm sent %d compact POSTs, want exactly 1; urls=%v", posts, urls)
+	}
+	r.probeRunStateMu.Lock()
+	active, pending = r.probeLaunchActive, r.probeRerunPending
+	r.probeRunStateMu.Unlock()
+	if active || pending {
+		t.Fatalf("launch handoff did not become idle: active=%v pending=%v", active, pending)
 	}
 }
 

@@ -241,7 +241,10 @@ type QuotaRefresher struct {
 	probeRunStateMu      sync.Mutex
 	probeRerunPending    bool
 	probeLaunchActive    bool
+	probeRetryAt         time.Time
+	probeRecoveryPending bool
 	probeHoldMu          sync.Mutex
+	probePersistPending  map[AuthInstanceID]struct{}
 	probeHoldPending     bool
 	probeHoldErr         error
 	provisionalMu        sync.Mutex
@@ -1271,9 +1274,16 @@ func (r *QuotaRefresher) launchProbe(recoverFirst bool) {
 	r.probeRunStateMu.Lock()
 	if r.probeLaunchActive {
 		r.probeRerunPending = true
+		if recoverFirst {
+			r.probeRecoveryPending = true
+		}
 		r.probeRunStateMu.Unlock()
 		r.mu.Unlock()
 		return
+	}
+	recoverFirst = recoverFirst || r.probeRecoveryPending
+	if recoverFirst {
+		r.probeRecoveryPending = false
 	}
 	r.probeLaunchActive = true
 	r.probeRunStateMu.Unlock()
@@ -1281,24 +1291,76 @@ func (r *QuotaRefresher) launchProbe(recoverFirst bool) {
 	r.mu.Unlock()
 	go func() {
 		defer func() {
-			r.probeRunStateMu.Lock()
-			r.probeLaunchActive = false
-			r.probeRunStateMu.Unlock()
 			r.wakeRefreshLoop()
 			r.wg.Done()
 		}()
-		if recoverFirst {
-			_ = r.RunProbeRecoveryOnce(context.Background())
+		for {
+			var firstErr error
+			var recoveryErr error
+			var dueOwned bool
+			if recoverFirst {
+				recoveryErr = r.RunProbeRecoveryOnce(context.Background())
+				firstErr = recoveryErr
+			}
+			dueOwned, err := r.runProbeDueOnce(context.Background())
+			if firstErr == nil {
+				firstErr = err
+			}
+			rerun, recoverNext := r.finishProbeLaunch(firstErr, recoverFirst, recoveryErr, dueOwned)
+			if !rerun {
+				return
+			}
+			recoverFirst = recoverNext
 		}
-		_ = r.RunProbeDueOnce(context.Background())
 	}()
+}
+
+func (r *QuotaRefresher) finishProbeLaunch(runErr error, recoveryAttempted bool, recoveryErr error, dueOwned bool) (bool, bool) {
+	now := r.now()
+	r.probeRunStateMu.Lock()
+	if recoveryAttempted && recoveryErr != nil {
+		r.probeRecoveryPending = true
+	}
+	if runErr != nil {
+		r.probeRetryAt = now.Add(probeBackoff(1))
+	} else {
+		r.probeRetryAt = time.Time{}
+	}
+	if !dueOwned && (!r.probeRerunPending || !r.probeRunMu.TryLock()) {
+		r.probeLaunchActive = false
+		r.probeRunStateMu.Unlock()
+		return false, false
+	}
+	if !dueOwned {
+		r.probeRunMu.Unlock()
+	}
+	if r.probeRerunPending {
+		r.probeRerunPending = false
+		recoverNext := r.probeRecoveryPending
+		r.probeRecoveryPending = false
+		r.probeRunStateMu.Unlock()
+		return true, recoverNext
+	}
+	r.probeLaunchActive = false
+	r.probeRunStateMu.Unlock()
+	return false, false
 }
 
 func (r *QuotaRefresher) nextRefreshLoopDelay() (time.Duration, bool) {
 	now := r.now()
 	deadline := r.refreshController.NextDeadline(now)
 	if r.probeController != nil && r.resetProbeEnabled() {
-		if probe := r.probeController.NextDeadline(); !probe.IsZero() && (deadline.IsZero() || probe.Before(deadline)) {
+		r.probeRunStateMu.Lock()
+		launchActive := r.probeLaunchActive
+		probeRetryAt := r.probeRetryAt
+		r.probeRunStateMu.Unlock()
+		probe := time.Time{}
+		if !launchActive && !probeRetryAt.IsZero() {
+			probe = probeRetryAt
+		} else if !launchActive {
+			probe = r.probeController.NextDeadline()
+		}
+		if !probe.IsZero() && (deadline.IsZero() || probe.Before(deadline)) {
 			deadline = probe
 		}
 	}
