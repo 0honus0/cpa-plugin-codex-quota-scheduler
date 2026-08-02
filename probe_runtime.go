@@ -489,12 +489,25 @@ func (r *QuotaRefresher) RunProbeDueOnce(ctx context.Context) error {
 }
 
 func (r *QuotaRefresher) runProbeDueOnce(ctx context.Context) (bool, error) {
+	return r.runProbeDueOnceWithAdmission(ctx, nil)
+}
+
+func (r *QuotaRefresher) runProbeDueOnceAdmitted(ctx context.Context, generation uint64) (bool, error) {
+	return r.runProbeDueOnceWithAdmission(ctx, &generation)
+}
+
+func (r *QuotaRefresher) runProbeDueOnceWithAdmission(ctx context.Context, generation *uint64) (bool, error) {
 	if !r.resetProbeEnabled() {
 		return false, nil
 	}
 	r.probeRunStateMu.Lock()
 	if !r.probeRunMu.TryLock() {
 		r.probeRerunPending = true
+		r.probeRunStateMu.Unlock()
+		return false, nil
+	}
+	if generation != nil && !r.probeLaunchAdmissionCurrentLocked(*generation) {
+		r.probeRunMu.Unlock()
 		r.probeRunStateMu.Unlock()
 		return false, nil
 	}
@@ -635,11 +648,30 @@ func (r *QuotaRefresher) runProbeDuePass(ctx context.Context) error {
 	return firstErr
 }
 
-func (r *QuotaRefresher) RunProbeRecoveryOnce(ctx context.Context) (runErr error) {
+func (r *QuotaRefresher) RunProbeRecoveryOnce(ctx context.Context) error {
 	if !r.resetProbeEnabled() {
 		return nil
 	}
 	r.probeRunMu.Lock()
+	return r.runProbeRecoveryOwned(ctx)
+}
+
+func (r *QuotaRefresher) runProbeRecoveryOnceAdmitted(ctx context.Context, generation uint64) (bool, error) {
+	if !r.resetProbeEnabled() {
+		return false, nil
+	}
+	r.probeRunMu.Lock()
+	r.probeRunStateMu.Lock()
+	if !r.probeLaunchAdmissionCurrentLocked(generation) {
+		r.probeRunMu.Unlock()
+		r.probeRunStateMu.Unlock()
+		return false, nil
+	}
+	r.probeRunStateMu.Unlock()
+	return true, r.runProbeRecoveryOwned(ctx)
+}
+
+func (r *QuotaRefresher) runProbeRecoveryOwned(ctx context.Context) (runErr error) {
 	defer func() {
 		if runErr != nil {
 			r.finishProbeOwnerError(true)
@@ -770,8 +802,7 @@ func (r *QuotaRefresher) finishProbeOwnerError(recoverFirst bool) {
 	if recoverFirst {
 		r.probeRecoveryPending = true
 	}
-	r.probeRetryAt = now.Add(probeBackoff(1))
-	r.probeOwnerRetryPending = true
+	r.publishProbeRetryLocked(now, true)
 	r.probeRerunPending = false
 	r.probeRunMu.Unlock()
 	r.probeRunStateMu.Unlock()

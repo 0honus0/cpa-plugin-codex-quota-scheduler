@@ -242,6 +242,7 @@ type QuotaRefresher struct {
 	probeRerunPending      bool
 	probeLaunchActive      bool
 	probeRetryAt           time.Time
+	probeRetryGeneration   uint64
 	probeRecoveryPending   bool
 	probeOwnerRetryPending bool
 	probeHoldMu            sync.Mutex
@@ -1303,6 +1304,7 @@ func (r *QuotaRefresher) launchProbeWithAdmission(recoverFirst, timerAdmission b
 	if timerAdmission && retryDue {
 		r.probeOwnerRetryPending = false
 	}
+	launchGeneration := r.probeRetryGeneration
 	recoverFirst = recoverFirst || r.probeRecoveryPending
 	if recoverFirst {
 		r.probeRecoveryPending = false
@@ -1319,14 +1321,15 @@ func (r *QuotaRefresher) launchProbeWithAdmission(recoverFirst, timerAdmission b
 		for {
 			var firstErr error
 			var recoveryErr error
+			recoveryOwned := true
 			var dueOwned bool
 			if recoverFirst {
-				recoveryErr = r.RunProbeRecoveryOnce(context.Background())
+				recoveryOwned, recoveryErr = r.runProbeRecoveryOnceAdmitted(context.Background(), launchGeneration)
 				firstErr = recoveryErr
 			}
 			var dueErr error
-			if recoveryErr == nil {
-				dueOwned, dueErr = r.runProbeDueOnce(context.Background())
+			if recoveryErr == nil && recoveryOwned {
+				dueOwned, dueErr = r.runProbeDueOnceAdmitted(context.Background(), launchGeneration)
 				if firstErr == nil {
 					firstErr = dueErr
 				}
@@ -1340,7 +1343,7 @@ func (r *QuotaRefresher) launchProbeWithAdmission(recoverFirst, timerAdmission b
 					recoveryRequired = true
 				}
 			}
-			rerun, recoverNext := r.finishProbeLaunch(firstErr, recoverFirst, recoveryErr, dueOwned, recoveryRequired)
+			rerun, recoverNext := r.finishProbeLaunch(firstErr, recoverFirst, recoveryErr, dueOwned, recoveryRequired, launchGeneration)
 			if !rerun {
 				return
 			}
@@ -1365,15 +1368,28 @@ func (r *QuotaRefresher) hasDurableNonterminalProbeAttempts() (bool, error) {
 	return false, nil
 }
 
-func (r *QuotaRefresher) finishProbeLaunch(runErr error, recoveryAttempted bool, recoveryErr error, dueOwned bool, recoveryRequired bool) (bool, bool) {
+func (r *QuotaRefresher) probeLaunchAdmissionCurrentLocked(generation uint64) bool {
+	return r.probeRetryGeneration == generation && !r.probeOwnerRetryPending
+}
+
+func (r *QuotaRefresher) publishProbeRetryLocked(now time.Time, owner bool) {
+	r.probeRetryGeneration++
+	r.probeRetryAt = now.Add(probeBackoff(1))
+	if owner {
+		r.probeOwnerRetryPending = true
+	}
+}
+
+func (r *QuotaRefresher) finishProbeLaunch(runErr error, recoveryAttempted bool, recoveryErr error, dueOwned bool, recoveryRequired bool, launchGeneration uint64) (bool, bool) {
 	now := r.now()
 	r.probeRunStateMu.Lock()
 	if (recoveryAttempted && recoveryErr != nil) || recoveryRequired {
 		r.probeRecoveryPending = true
 	}
-	if runErr != nil || recoveryRequired || r.probeOwnerRetryPending {
-		if runErr != nil || recoveryRequired {
-			r.probeRetryAt = now.Add(probeBackoff(1))
+	newerRetry := r.probeRetryGeneration != launchGeneration
+	if runErr != nil || recoveryRequired || r.probeOwnerRetryPending || newerRetry {
+		if (runErr != nil || recoveryRequired) && !r.probeOwnerRetryPending && !newerRetry {
+			r.publishProbeRetryLocked(now, false)
 		}
 		r.probeRerunPending = false
 		r.probeLaunchActive = false

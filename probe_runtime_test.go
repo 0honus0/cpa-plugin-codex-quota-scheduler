@@ -117,6 +117,49 @@ func (c *probeDeferredClock) Set(now time.Time) {
 	c.mu.Unlock()
 }
 
+type probeNthCaptureClock struct {
+	mu        sync.Mutex
+	now       time.Time
+	remaining int
+	reached   chan struct{}
+	release   chan struct{}
+}
+
+func (c *probeNthCaptureClock) Now() time.Time {
+	c.mu.Lock()
+	now := c.now
+	if c.remaining <= 0 {
+		c.mu.Unlock()
+		return now
+	}
+	c.remaining--
+	if c.remaining > 0 {
+		c.mu.Unlock()
+		return now
+	}
+	reached := c.reached
+	release := c.release
+	c.mu.Unlock()
+	close(reached)
+	<-release
+	return now
+}
+
+func (c *probeNthCaptureClock) ArmNthCall(n int) (<-chan struct{}, chan<- struct{}) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.remaining = n
+	c.reached = make(chan struct{})
+	c.release = make(chan struct{})
+	return c.reached, c.release
+}
+
+func (c *probeNthCaptureClock) Set(now time.Time) {
+	c.mu.Lock()
+	c.now = now
+	c.mu.Unlock()
+}
+
 func newProbeFixtureHost() *sequenceProbeHost {
 	return &sequenceProbeHost{auth: pluginapi.HostAuthGetResponse{
 		AuthIndex: "idx",
@@ -3574,6 +3617,274 @@ func TestProductionProbeEarlyErrorConcurrentStartHonorsRetryAdmission(t *testing
 				t.Fatal("concurrent early-error retry accumulated Probe goroutines")
 			}
 		})
+	}
+}
+
+func TestProductionProbeAdmittedRecoveryRevalidatesOwnerRetryBeforeBoundary(t *testing.T) {
+	baseNow := time.Date(2026, 8, 1, 18, 15, 0, 0, time.UTC)
+	clock := &s7TestClock{now: baseNow}
+	reset := baseNow.Add(7 * 24 * time.Hour)
+	active := []byte(fmt.Sprintf(`{"rate_limit":{"secondary_window":{"used_percent":1,"limit_window_seconds":604800,"reset_at":%q}}}`, reset.Format(time.RFC3339)))
+	host := newProbeFixtureHost()
+	host.quota = [][]byte{active}
+	r := newProductionLazyRefreshRuntime(t, baseNow, host)
+	r.now = clock.Now
+	var stopOnce sync.Once
+	stop := func() { stopOnce.Do(r.Stop) }
+	t.Cleanup(stop)
+	binding, ok := r.bindings.Lookup("a")
+	if !ok {
+		t.Fatal("binding missing")
+	}
+	r.probeController.RemoveWindow(binding.Instance, ProbeWindowFiveHour)
+	sendFence, err := r.probeFence.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt := ProbeAttempt{Instance: binding.Instance, AttemptID: "admitted-wrapper-owner-retry", Windows: []ProbeWindowKind{ProbeWindowLong}, Phase: ProbeAttemptSentUnknown, SendFenceSeq: sendFence, CreatedAt: baseNow.Add(-time.Minute), VerifyNotBefore: baseNow, SuppressUntil: baseNow.Add(10 * time.Minute)}
+	baseline := ResetProbeBaseline(reset, 0, 7*24*time.Hour)
+	baseline.WindowKind = WindowWeekly
+	r.probeController.SetWindow(binding.Instance, ProbeWindowLong, ProbeWindow{State: ProbeSentUnknown, Baseline: baseline, AttemptID: attempt.AttemptID})
+	if _, err = r.runtimeStore.Update(func(state *PersistentState) error {
+		state.ProbeAttempts[binding.Instance] = attempt
+		state.ProbeWindows[binding.Instance] = r.probeController.Snapshot()[binding.Instance]
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	originalRead := r.runtimeStore.hooks.ReadFile
+	r.runtimeStore.loaded = false
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var boundaryCalls atomic.Int32
+	var failBoundary atomic.Bool
+	failBoundary.Store(true)
+	r.runtimeStore.hooks.ReadFile = func(name string) ([]byte, error) {
+		if name == r.runtimeStore.path && !r.runtimeStore.loaded {
+			if boundaryCalls.Add(1) == 1 {
+				close(entered)
+				<-release
+			}
+			if failBoundary.Load() {
+				return nil, os.ErrPermission
+			}
+		}
+		return originalRead(name)
+	}
+
+	directDone := make(chan error, 1)
+	go func() { directDone <- r.RunProbeRecoveryOnce(context.Background()) }()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("direct recovery did not reach blocked state-read boundary")
+	}
+	r.Start() // admits a recover-first production wrapper while direct owner holds probeRunMu
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		r.probeRunStateMu.Lock()
+		launchActive := r.probeLaunchActive
+		r.probeRunStateMu.Unlock()
+		if launchActive {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	r.probeRunStateMu.Lock()
+	launchActive := r.probeLaunchActive
+	r.probeRunStateMu.Unlock()
+	if !launchActive {
+		close(release)
+		t.Fatal("production recover-first wrapper was not admitted")
+	}
+	close(release)
+	select {
+	case err = <-directDone:
+		if err == nil {
+			t.Fatal("direct recovery state-read error was not surfaced")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("direct recovery did not publish bounded retry")
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		r.probeRunStateMu.Lock()
+		launchActive = r.probeLaunchActive
+		r.probeRunStateMu.Unlock()
+		if !launchActive {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(40 * time.Millisecond)
+	if got := boundaryCalls.Load(); got != 1 {
+		t.Fatalf("already-admitted wrapper crossed owner backoff: boundary calls=%d want=1", got)
+	}
+	if delay, scheduled := r.nextRefreshLoopDelay(); !scheduled || delay != time.Minute {
+		t.Fatalf("owner retry schedule = (%s, %v), want exactly +1m", delay, scheduled)
+	}
+
+	failBoundary.Store(false)
+	clock.Set(baseNow.Add(time.Minute))
+	r.wakeRefreshLoop()
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		state, snapshotErr := r.runtimeStore.PersistentSnapshot()
+		if snapshotErr == nil {
+			if _, retained := state.ProbeAttempts[binding.Instance]; !retained && boundaryCalls.Load() >= 2 {
+				break
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := boundaryCalls.Load(); got != 2 {
+		t.Fatalf("bounded timer recovery boundary calls=%d want=2", got)
+	}
+	persisted, err := r.runtimeStore.PersistentSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retained := persisted.ProbeAttempts[binding.Instance]; retained.AttemptID != "" {
+		t.Fatalf("bounded timer recovery retained attempt: %#v", retained)
+	}
+	if got := persisted.ProbeWindows[binding.Instance][ProbeWindowLong]; got.State == ProbeSentUnknown {
+		t.Fatalf("bounded timer recovery left nonterminal window: %#v", got)
+	}
+	if posts, urls := probePOSTCount(host); posts != 0 {
+		t.Fatalf("bounded timer recovery resent compact: posts=%d urls=%v", posts, urls)
+	}
+}
+
+func TestProductionProbeWrapperErrorPreservesNewerOwnerRetryDeadline(t *testing.T) {
+	baseNow := time.Date(2026, 8, 1, 18, 17, 0, 0, time.UTC)
+	clock := &probeNthCaptureClock{now: baseNow}
+	reset := baseNow.Add(5 * time.Hour)
+	lazy := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":%q}}}`, reset.Format(time.RFC3339)))
+	active := []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":1,"limit_window_seconds":18000,"reset_at":%q}}}`, reset.Format(time.RFC3339)))
+	host := newProbeFixtureHost()
+	host.quota = [][]byte{lazy, active}
+	r := newProductionLazyRefreshRuntime(t, baseNow, host)
+	r.now = clock.Now
+	var stopOnce sync.Once
+	stop := func() { stopOnce.Do(r.Stop) }
+	t.Cleanup(stop)
+	binding, ok := r.bindings.Lookup("a")
+	if !ok {
+		t.Fatal("binding missing")
+	}
+	r.probeController.RemoveWindow(binding.Instance, ProbeWindowLong)
+	baseline := ResetProbeBaseline(reset, 0, 5*time.Hour)
+	baseline.WindowKind = WindowFiveHour
+	baseline.SuspectedLazy = true
+	r.probeController.SetWindow(binding.Instance, ProbeWindowFiveHour, ProbeWindow{State: ProbePendingCheck, Baseline: baseline})
+	if err := r.persistProbeInstances(map[AuthInstanceID]struct{}{binding.Instance: {}}); err != nil {
+		t.Fatal(err)
+	}
+
+	originalRead := r.runtimeStore.hooks.ReadFile
+	r.runtimeStore.loaded = false
+	wrapperEntered := make(chan struct{})
+	releaseWrapper := make(chan struct{})
+	var boundaryCalls atomic.Int32
+	var failBoundary atomic.Bool
+	failBoundary.Store(true)
+	r.runtimeStore.hooks.ReadFile = func(name string) ([]byte, error) {
+		if name == r.runtimeStore.path && !r.runtimeStore.loaded {
+			if boundaryCalls.Add(1) == 1 {
+				close(wrapperEntered)
+				<-releaseWrapper
+			}
+			if failBoundary.Load() {
+				return nil, os.ErrPermission
+			}
+		}
+		return originalRead(name)
+	}
+
+	r.launchProbe(false)
+	select {
+	case <-wrapperEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("production wrapper did not reach state-read error boundary")
+	}
+	finishReached, releaseFinish := clock.ArmNthCall(2) // owner-error clock, then finish clock
+	close(releaseWrapper)
+	select {
+	case <-finishReached:
+	case <-time.After(2 * time.Second):
+		t.Fatal("production wrapper did not capture finish clock")
+	}
+
+	clock.Set(baseNow.Add(30 * time.Second))
+	directDone := make(chan error, 1)
+	go func() { directDone <- r.RunProbeRecoveryOnce(context.Background()) }()
+	select {
+	case err := <-directDone:
+		if err == nil {
+			close(releaseFinish)
+			t.Fatal("newer direct-owner state-read error was not surfaced")
+		}
+	case <-time.After(2 * time.Second):
+		close(releaseFinish)
+		t.Fatal("newer direct owner did not publish retry")
+	}
+	wantRetryAt := baseNow.Add(90 * time.Second)
+	r.probeRunStateMu.Lock()
+	newerRetryAt := r.probeRetryAt
+	ownerPending := r.probeOwnerRetryPending
+	r.probeRunStateMu.Unlock()
+	if !newerRetryAt.Equal(wantRetryAt) || !ownerPending {
+		close(releaseFinish)
+		t.Fatalf("newer owner publication = retryAt %s ownerPending=%v, want %s/true", newerRetryAt, ownerPending, wantRetryAt)
+	}
+
+	close(releaseFinish)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		r.probeRunStateMu.Lock()
+		launchActive := r.probeLaunchActive
+		r.probeRunStateMu.Unlock()
+		if !launchActive {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	r.probeRunStateMu.Lock()
+	gotRetryAt := r.probeRetryAt
+	r.probeRunStateMu.Unlock()
+	if !gotRetryAt.Equal(wantRetryAt) {
+		t.Fatalf("older wrapper regressed newer owner retry: got %s want %s", gotRetryAt, wantRetryAt)
+	}
+	if delay, scheduled := r.nextRefreshLoopDelay(); !scheduled || delay != time.Minute {
+		t.Fatalf("newer owner retry schedule = (%s, %v), want exactly +1m", delay, scheduled)
+	}
+
+	failBoundary.Store(false)
+	r.Start()
+	time.Sleep(40 * time.Millisecond)
+	if got := boundaryCalls.Load(); got != 2 {
+		t.Fatalf("ordinary Start bypassed newer owner deadline: boundary calls=%d want=2", got)
+	}
+	clock.Set(wantRetryAt)
+	r.wakeRefreshLoop()
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		window, exists := r.probeController.Window(binding.Instance, ProbeWindowFiveHour)
+		if exists && window.State == ProbeConfirmed && boundaryCalls.Load() >= 3 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := boundaryCalls.Load(); got != 3 {
+		t.Fatalf("newer owner timer boundary calls=%d want=3", got)
+	}
+	window, exists := r.probeController.Window(binding.Instance, ProbeWindowFiveHour)
+	if !exists || window.State != ProbeConfirmed {
+		t.Fatalf("newer owner timer window = %#v, ok=%v, want Confirmed", window, exists)
+	}
+	if posts, urls := probePOSTCount(host); posts != 1 {
+		t.Fatalf("newer owner timer sent %d compact POSTs, want exactly 1; urls=%v", posts, urls)
 	}
 }
 
