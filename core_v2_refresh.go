@@ -196,6 +196,10 @@ func (e *CoreEngine) SyncRoster() error {
 	e.accounts = next
 	e.lastRosterSync = now
 	for id, account := range next {
+		// Rehydrate the next reset maintenance timer immediately from persisted
+		// quota data. A process restart must not leave a known reset without a
+		// probe_due_at until the next periodic network refresh.
+		e.updateProbeScheduleLocked(account, account.Quota, account.Quota, now)
 		e.persisted[id] = corePersistedFromAccount(*account)
 	}
 	err = e.persistLocked()

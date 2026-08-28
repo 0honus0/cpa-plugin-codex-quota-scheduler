@@ -268,6 +268,28 @@ func TestCoreBusiness429BanDoesNotBlockQuotaMaintenance(t *testing.T) {
 	}
 }
 
+func TestCoreRosterRehydratesProbeScheduleFromPersistedQuota(t *testing.T) {
+	now := time.Date(2026, 8, 28, 14, 50, 0, 0, time.UTC)
+	host := &coreTestHost{auths: []pluginapi.HostAuthFileEntry{{ID: "a", AuthIndex: "idx-a", Provider: "codex", Priority: 9}}}
+	engine := newCoreTestEngine(t, host, now)
+	quota := coreTestQuota(now, 10, 20)
+	engine.mu.Lock()
+	engine.persisted["a"] = corePersistedAccount{Quota: quota}
+	engine.mu.Unlock()
+
+	if err := engine.SyncRoster(); err != nil {
+		t.Fatal(err)
+	}
+	account, ok := engine.accountByID("a")
+	if !ok {
+		t.Fatal("account not restored")
+	}
+	want := quota.FiveHour.ResetAt.Add(5 * time.Minute)
+	if !account.ProbeDueAt.Equal(want) {
+		t.Fatalf("probe_due=%v, want %v", account.ProbeDueAt, want)
+	}
+}
+
 func TestCoreProbeRequestPreservesExistingRequestContentByteForByte(t *testing.T) {
 	credentials := CodexCredentials{AccessToken: "access", ChatGPTAccountID: "acct"}
 	req := coreProbeRequest(credentials)
