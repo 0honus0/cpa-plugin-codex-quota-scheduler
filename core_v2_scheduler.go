@@ -140,24 +140,14 @@ func coreRemainingQuota(quota ParsedQuota) float64 {
 	return remaining
 }
 
-func coreAccountUnavailableReason(account CoreAccount, cfg CoreConfig, now time.Time) string {
+func coreAccountUnavailableReason(account CoreAccount, _ CoreConfig, now time.Time) string {
 	if account.Disabled401 {
 		return "disabled_401"
 	}
 	if account.Banned(now) {
 		return "autoban_429"
 	}
-	if account.LastSuccessAt.IsZero() {
-		return "quota_unknown"
-	}
-	if cfg.QuotaStaleAfter > 0 && now.Sub(account.LastSuccessAt) > cfg.QuotaStaleAfter {
-		return "quota_stale"
-	}
-	if account.Quota.FiveHour != nil && coreWindowExhausted(account.Quota.FiveHour, now) {
-		return "five_hour_exhausted"
-	}
-	if account.Quota.LongWindow != nil && coreWindowExhausted(account.Quota.LongWindow, now) {
-		return "long_window_exhausted"
-	}
+	// Quota snapshots are ordering/observability data, not hard scheduler
+	// availability. Keep the management badge aligned with Selectable().
 	return ""
 }

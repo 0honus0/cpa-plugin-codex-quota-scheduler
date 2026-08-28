@@ -25,7 +25,20 @@ type lifecycleRequest struct {
 func handleMethod(method string, request []byte) ([]byte, error) {
 	engine := ensureCurrentCore()
 	switch method {
-	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
+	case pluginabi.MethodPluginRegister:
+		var req lifecycleRequest
+		if len(request) > 0 {
+			if err := json.Unmarshal(request, &req); err != nil {
+				return nil, err
+			}
+		}
+		if err := engine.ConfigureOnRegister(req.ConfigYAML); err != nil {
+			return nil, err
+		}
+		engine.Start()
+		engine.Wake()
+		return okEnvelope(PluginRegistration())
+	case pluginabi.MethodPluginReconfigure:
 		var req lifecycleRequest
 		if len(request) > 0 {
 			if err := json.Unmarshal(request, &req); err != nil {

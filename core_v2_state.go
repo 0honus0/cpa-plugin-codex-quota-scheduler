@@ -95,9 +95,10 @@ type corePersistedAccount struct {
 }
 
 type corePersistedState struct {
-	SchemaVersion int                             `json:"schema_version"`
-	Config        CoreConfig                      `json:"config"`
-	Accounts      map[string]corePersistedAccount `json:"accounts,omitempty"`
+	SchemaVersion  int                             `json:"schema_version"`
+	Config         CoreConfig                      `json:"config"`
+	ConfigYAMLHash string                          `json:"config_yaml_hash,omitempty"`
+	Accounts       map[string]corePersistedAccount `json:"accounts,omitempty"`
 }
 
 const corePersistedSchema = 1
@@ -115,6 +116,8 @@ type CoreEngine struct {
 	lastRosterSync time.Time
 	lastSelected   string
 	lastReason     string
+	configYAMLHash string
+	hasSavedConfig bool
 
 	workerMu sync.Mutex
 	started  bool
@@ -153,7 +156,7 @@ func defaultCoreStatePath() string {
 	if err != nil || dir == "" {
 		dir = "."
 	}
-	return filepath.Join(dir, "CLIProxyAPI", PluginID, "core-v2.json")
+	return filepath.Join(dir, "CLIProxyAPI", PluginID, "cron.json")
 }
 
 func (e *CoreEngine) loadPersisted() {
@@ -169,14 +172,16 @@ func (e *CoreEngine) loadPersisted() {
 	defer e.mu.Unlock()
 	if disk.Config.QuotaRefreshInterval > 0 {
 		e.cfg = NormalizeCoreConfig(disk.Config)
+		e.hasSavedConfig = true
 	}
+	e.configYAMLHash = disk.ConfigYAMLHash
 	if disk.Accounts != nil {
 		e.persisted = disk.Accounts
 	}
 }
 
 func (e *CoreEngine) persistLocked() error {
-	disk := corePersistedState{SchemaVersion: corePersistedSchema, Config: e.cfg, Accounts: make(map[string]corePersistedAccount, len(e.persisted)+len(e.accounts))}
+	disk := corePersistedState{SchemaVersion: corePersistedSchema, Config: e.cfg, ConfigYAMLHash: e.configYAMLHash, Accounts: make(map[string]corePersistedAccount, len(e.persisted)+len(e.accounts))}
 	for id, p := range e.persisted {
 		disk.Accounts[id] = p
 	}
@@ -294,13 +299,28 @@ func (e *CoreEngine) Config() CoreConfig {
 	return e.cfg
 }
 
+func (e *CoreEngine) ConfigureOnRegister(raw []byte) error {
+	return e.configureHostYAML(raw, false)
+}
+
 func (e *CoreEngine) Configure(raw []byte) error {
+	return e.configureHostYAML(raw, true)
+}
+
+func (e *CoreEngine) configureHostYAML(raw []byte, force bool) error {
 	cfg, err := DecodeCoreConfig(raw)
 	if err != nil {
 		return err
 	}
+	h := sha256.Sum256(raw)
+	hash := hex.EncodeToString(h[:])
 	e.mu.Lock()
-	e.cfg = cfg
+	preserveSaved := !force && e.hasSavedConfig && (e.configYAMLHash == "" || e.configYAMLHash == hash)
+	if !preserveSaved {
+		e.setConfigLocked(cfg)
+	}
+	e.configYAMLHash = hash
+	e.hasSavedConfig = true
 	err = e.persistLocked()
 	e.mu.Unlock()
 	if err == nil {
@@ -311,13 +331,76 @@ func (e *CoreEngine) Configure(raw []byte) error {
 
 func (e *CoreEngine) UpdateConfig(cfg CoreConfig) error {
 	e.mu.Lock()
-	e.cfg = NormalizeCoreConfig(cfg)
+	e.setConfigLocked(cfg)
+	e.hasSavedConfig = true
 	err := e.persistLocked()
 	e.mu.Unlock()
 	if err == nil {
 		e.Wake()
 	}
 	return err
+}
+
+func (e *CoreEngine) setConfigLocked(cfg CoreConfig) {
+	previous := e.cfg
+	next := NormalizeCoreConfig(cfg)
+	e.cfg = next
+	now := e.now()
+
+	// Reconcile persisted accounts too. During startup the live roster is still
+	// empty, so only touching e.accounts would leave cron.json on an old delay.
+	for id, persisted := range e.persisted {
+		account := &CoreAccount{
+			Disabled401:          persisted.Disabled401,
+			Quota:                cloneCoreQuota(persisted.Quota),
+			ProbeBaselineResetAt: persisted.ProbeBaselineResetAt,
+			ProbeDueAt:           persisted.ProbeDueAt,
+			ProbeStatus:          persisted.ProbeStatus,
+		}
+		coreReconcileProbeConfig(account, previous, next, now)
+		persisted.ProbeBaselineResetAt = account.ProbeBaselineResetAt
+		persisted.ProbeDueAt = account.ProbeDueAt
+		persisted.ProbeStatus = account.ProbeStatus
+		e.persisted[id] = persisted
+	}
+	for id, account := range e.accounts {
+		coreReconcileProbeConfig(account, previous, next, now)
+		e.persisted[id] = corePersistedFromAccount(*account)
+	}
+}
+
+func coreReconcileProbeConfig(account *CoreAccount, previous, next CoreConfig, now time.Time) {
+	if account == nil {
+		return
+	}
+	if !next.EnableResetProbe {
+		account.ProbeBaselineResetAt = time.Time{}
+		account.ProbeDueAt = time.Time{}
+		if !account.Disabled401 {
+			account.ProbeStatus = ""
+		}
+		return
+	}
+	if previous.EnableResetProbe && previous.ResetProbeAfterResetDelay == next.ResetProbeAfterResetDelay {
+		return
+	}
+	if account.Disabled401 || account.Quota.FiveHour == nil || account.Quota.FiveHour.ResetAt.IsZero() {
+		return
+	}
+	canonical := !previous.EnableResetProbe || account.ProbeDueAt.IsZero() || account.ProbeStatus == "" || account.ProbeStatus == "scheduled_after_reset" || account.ProbeStatus == "waiting_after_reset" || account.ProbeStatus == "natural_reset_confirmed"
+	if !canonical {
+		// Retry/in-flight due times have stronger semantics than the canonical
+		// reset+delay schedule, so settings changes must not shorten them.
+		return
+	}
+	resetAt := account.Quota.FiveHour.ResetAt
+	account.ProbeBaselineResetAt = resetAt
+	account.ProbeDueAt = resetAt.Add(next.ResetProbeAfterResetDelay)
+	if resetAt.After(now) {
+		account.ProbeStatus = "scheduled_after_reset"
+	} else {
+		account.ProbeStatus = "waiting_after_reset"
+	}
 }
 
 func (e *CoreEngine) Accounts() []CoreAccount {

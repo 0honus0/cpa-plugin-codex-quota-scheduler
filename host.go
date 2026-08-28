@@ -5,10 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
+
+var authMutationMu sync.Mutex
 
 const quotaUserAgent = "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal"
 
@@ -56,6 +59,9 @@ func (ABIHostClient) GetAuth(authIndex string) (pluginapi.HostAuthGetResponse, e
 // scheduler. It preserves all existing JSON fields and only changes the CPA
 // disabled flag, which is required for persistent 401 fail-closed behavior.
 func (c ABIHostClient) SetAuthDisabled(authIndex string, disabled bool) error {
+	authMutationMu.Lock()
+	defer authMutationMu.Unlock()
+
 	resp, err := c.GetAuth(authIndex)
 	if err != nil {
 		return err
@@ -70,6 +76,9 @@ func (c ABIHostClient) SetAuthDisabled(authIndex string, disabled bool) error {
 	}
 	if doc == nil {
 		return errors.New("auth JSON must be an object")
+	}
+	if current, ok := doc["disabled"].(bool); ok && current == disabled {
+		return nil
 	}
 	doc["disabled"] = disabled
 	raw, err := json.Marshal(doc)

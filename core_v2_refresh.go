@@ -109,29 +109,41 @@ func (e *CoreEngine) RunCycle() {
 	cfg := e.Config()
 	forceAll, forced := e.consumeForcedRefreshes()
 	for _, account := range e.Accounts() {
-		if !account.RefreshEnabled() {
-			continue
-		}
+		_, forceOne := forced[account.ID]
+		forcedRefresh := forceAll || forceOne
+
+		// 401 recovery is a credential-file check, not quota maintenance. Keep it
+		// alive even when automatic quota refresh is disabled, and let a manual
+		// refresh force an immediate credential recheck.
 		if account.Disabled401 {
-			if account.LastCredentialCheckAt.IsZero() || now.Sub(account.LastCredentialCheckAt) >= coreCredentialRecheck {
+			if forcedRefresh || account.LastCredentialCheckAt.IsZero() || now.Sub(account.LastCredentialCheckAt) >= coreCredentialRecheck {
 				e.recheckCredentialOnly(account)
 			}
+			updated, ok := e.accountByID(account.ID)
+			if !ok || updated.Disabled401 {
+				continue
+			}
+			account = updated
+		}
+
+		autoRefresh := account.RefreshEnabled()
+		if !autoRefresh && !forcedRefresh {
 			continue
 		}
+
 		// A business 429 ban is a scheduler-selection guard, not a maintenance
 		// lock. Quota reads and reset probes must keep running so a lazy 5h reset
 		// can be detected and activated at its configured reset+delay time.
-		_, forceOne := forced[account.ID]
-		dueRefresh := forceAll || forceOne || account.LastRefreshAt.IsZero() || now.Sub(account.LastRefreshAt) >= cfg.QuotaRefreshInterval
-		dueProbe := cfg.EnableResetProbe && !account.ProbeDueAt.IsZero() && !account.ProbeDueAt.After(now)
-		if dueRefresh || dueProbe {
-			_ = e.RefreshAccount(account.ID)
+		dueProbe := autoRefresh && cfg.EnableResetProbe && !account.ProbeDueAt.IsZero() && !account.ProbeDueAt.After(now)
+		if dueProbe {
+			// ProbeAccount performs the required read-only quota precheck itself and
+			// never POSTs when that precheck fails or already shows a new window.
+			_ = e.ProbeAccount(account.ID)
+			continue
 		}
-		if cfg.EnableResetProbe {
-			updated, ok := e.accountByID(account.ID)
-			if ok && updated.RefreshEnabled() && !updated.Disabled401 && !updated.ProbeDueAt.IsZero() && !updated.ProbeDueAt.After(e.now()) {
-				_ = e.ProbeAccount(account.ID)
-			}
+		dueRefresh := forcedRefresh || (autoRefresh && (account.LastRefreshAt.IsZero() || now.Sub(account.LastRefreshAt) >= cfg.QuotaRefreshInterval))
+		if dueRefresh {
+			_ = e.refreshAccount(account.ID, !forcedRefresh)
 		}
 	}
 }
@@ -211,11 +223,16 @@ func (e *CoreEngine) SyncRoster() error {
 }
 
 func (e *CoreEngine) RefreshAccount(authID string) error {
+	// Manual refresh bypasses the automatic-maintenance switch.
+	return e.refreshAccount(authID, false)
+}
+
+func (e *CoreEngine) refreshAccount(authID string, requireAutoEnabled bool) error {
 	account, ok := e.accountByID(authID)
 	if !ok {
 		return errors.New("account not found")
 	}
-	if !account.RefreshEnabled() {
+	if requireAutoEnabled && !account.RefreshEnabled() {
 		return nil
 	}
 	credentials, fingerprint, err := e.readCredentials(account)
@@ -352,7 +369,12 @@ func (e *CoreEngine) finishRefreshSuccess(authID string, quota ParsedQuota) {
 	a.LastRefreshAt = now
 	a.LastSuccessAt = now
 	a.LastError = ""
-	e.clearExpiredBanLocked(a, now)
+	if a.BanReason == "usage_429" && coreQuotaConfirmsAvailable(quota) {
+		a.BanUntil = time.Time{}
+		a.BanReason = ""
+	} else {
+		e.clearExpiredBanLocked(a, now)
+	}
 	e.updateProbeScheduleLocked(a, previous, quota, now)
 	e.persisted[authID] = corePersistedFromAccount(*a)
 	_ = e.persistLocked()
@@ -364,7 +386,15 @@ func (e *CoreEngine) updateProbeScheduleLocked(a *CoreAccount, previous, current
 		return
 	}
 	cfg := e.cfg
-	if !cfg.EnableResetProbe || current.FiveHour == nil || current.FiveHour.ResetAt.IsZero() {
+	if !cfg.EnableResetProbe {
+		a.ProbeBaselineResetAt = time.Time{}
+		a.ProbeDueAt = time.Time{}
+		if !a.Disabled401 {
+			a.ProbeStatus = ""
+		}
+		return
+	}
+	if current.FiveHour == nil || current.FiveHour.ResetAt.IsZero() {
 		return
 	}
 	currentReset := current.FiveHour.ResetAt
@@ -381,7 +411,10 @@ func (e *CoreEngine) updateProbeScheduleLocked(a *CoreAccount, previous, current
 		}
 	}
 	due := currentReset.Add(cfg.ResetProbeAfterResetDelay)
-	if a.ProbeBaselineResetAt.Equal(currentReset) && a.ProbeDueAt.Equal(due) {
+	// Preserve an existing due time for the same reset baseline. It may be a
+	// retry schedule; recomputing reset+delay here could collapse a configured
+	// retry back to an already-expired timestamp.
+	if coreSameReset(a.ProbeBaselineResetAt, currentReset) && !a.ProbeDueAt.IsZero() {
 		return
 	}
 	a.ProbeBaselineResetAt = currentReset
@@ -404,6 +437,46 @@ func (e *CoreEngine) ProbeAccount(authID string) error {
 		return nil
 	}
 	baselineReset := account.ProbeBaselineResetAt
+	if baselineReset.IsZero() {
+		e.retryProbe(authID, "missing_reset_baseline")
+		return errors.New("reset probe missing baseline reset")
+	}
+
+	// Safety invariant: always perform a read-only quota precheck first. A
+	// failed/ambiguous precheck must never fall through to the POST probe.
+	if err := e.refreshAccount(authID, false); err != nil {
+		e.retryProbe(authID, "precheck_failed")
+		return err
+	}
+	account, ok = e.accountByID(authID)
+	if !ok {
+		return nil
+	}
+	if account.Quota.FiveHour == nil || account.Quota.FiveHour.ResetAt.IsZero() {
+		e.retryProbe(authID, "precheck_missing_five_hour")
+		return errors.New("reset probe precheck returned no five-hour window")
+	}
+	if account.Quota.FiveHour.ResetAt.After(baselineReset.Add(coreResetAdvanceSlop)) {
+		// Natural reset already advanced the window; finishRefreshSuccess has
+		// scheduled the next reset, so no POST is needed.
+		return nil
+	}
+	if account.Quota.FiveHour.ResetAt.Before(baselineReset.Add(-coreResetAdvanceSlop)) {
+		e.retryProbe(authID, "precheck_reset_ambiguous")
+		return errors.New("reset probe precheck returned an unexpected earlier reset")
+	}
+	if !account.Quota.FiveHour.Exhausted {
+		e.retryProbe(authID, "precheck_five_hour_available")
+		return nil
+	}
+	if account.Quota.LongWindow != nil && account.Quota.LongWindow.Exhausted {
+		e.retryProbe(authID, "precheck_long_window_exhausted")
+		return nil
+	}
+	if account.Disabled401 || !account.RefreshEnabled() {
+		return nil
+	}
+
 	credentials, fingerprint, err := e.readCredentials(account)
 	if err != nil {
 		e.retryProbe(authID, "credential_read_failed")
@@ -416,8 +489,16 @@ func (e *CoreEngine) ProbeAccount(authID string) error {
 	}
 
 	// Security/compatibility invariant: probe request content is not rewritten by
-	// the v2 scheduler. It reuses the existing, reviewed payload byte-for-byte.
+	// the scheduler. It reuses the existing, reviewed payload byte-for-byte.
 	req := coreProbeRequest(credentials)
+	e.mu.Lock()
+	if a := e.accounts[authID]; a != nil {
+		a.LastProbeAt = now
+		a.ProbeStatus = "probe_sending"
+		e.persisted[authID] = corePersistedFromAccount(*a)
+		_ = e.persistLocked()
+	}
+	e.mu.Unlock()
 	resp, err := e.host.Do(req)
 	if err != nil {
 		e.retryProbe(authID, "transport_failed")
@@ -438,14 +519,14 @@ func (e *CoreEngine) ProbeAccount(authID string) error {
 
 	e.mu.Lock()
 	if a := e.accounts[authID]; a != nil {
-		a.LastProbeAt = now
 		a.ProbeStatus = "probe_sent"
 		e.persisted[authID] = corePersistedFromAccount(*a)
 		_ = e.persistLocked()
 	}
 	e.mu.Unlock()
 	time.Sleep(coreProbeVerifyDelay)
-	if err := e.RefreshAccount(authID); err != nil {
+	if err := e.refreshAccount(authID, false); err != nil {
+		e.retryProbe(authID, "verify_refresh_failed")
 		return err
 	}
 	updated, ok := e.accountByID(authID)
@@ -464,7 +545,6 @@ func (e *CoreEngine) retryProbe(authID, reason string) {
 	now := e.now()
 	e.mu.Lock()
 	if a := e.accounts[authID]; a != nil {
-		a.LastProbeAt = now
 		a.ProbeDueAt = now.Add(e.cfg.ResetProbeRetryDelay)
 		a.ProbeStatus = reason
 		e.persisted[authID] = corePersistedFromAccount(*a)
@@ -512,6 +592,9 @@ func (e *CoreEngine) autoban429(authID string, until time.Time, reason string) {
 	}
 	e.mu.Lock()
 	if a := e.accounts[authID]; a != nil {
+		if a.BanUntil.After(until) && a.Banned(now) {
+			until = a.BanUntil
+		}
 		a.BanUntil = until
 		a.BanReason = reason
 		a.LastError = reason
@@ -529,7 +612,12 @@ func (e *CoreEngine) HandleUsage(record pluginapi.UsageRecord) {
 	if !record.Failed {
 		e.mu.Lock()
 		if a := e.accounts[record.AuthID]; a != nil {
-			e.clearExpiredBanLocked(a, e.now())
+			if a.BanReason == "usage_429" {
+				a.BanUntil = time.Time{}
+				a.BanReason = ""
+			} else {
+				e.clearExpiredBanLocked(a, e.now())
+			}
 			e.persisted[record.AuthID] = corePersistedFromAccount(*a)
 			_ = e.persistLocked()
 		}
@@ -587,6 +675,27 @@ func nestedCoreMap(parent map[string]any, key string) map[string]any {
 	}
 	child, _ := parent[key].(map[string]any)
 	return child
+}
+
+func coreQuotaConfirmsAvailable(quota ParsedQuota) bool {
+	if quota.FiveHour == nil || quota.FiveHour.Exhausted {
+		return false
+	}
+	if quota.LongWindow != nil && quota.LongWindow.Exhausted {
+		return false
+	}
+	return true
+}
+
+func coreSameReset(left, right time.Time) bool {
+	if left.IsZero() || right.IsZero() {
+		return false
+	}
+	delta := left.Sub(right)
+	if delta < 0 {
+		delta = -delta
+	}
+	return delta <= coreResetAdvanceSlop
 }
 
 func sanitizeCoreError(err error) string {

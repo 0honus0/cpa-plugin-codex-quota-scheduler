@@ -50,3 +50,30 @@ func TestABIHostClientSetAuthDisabledPreservesCredentialFields(t *testing.T) {
 		t.Fatal("SetAuthDisabled changed credential fields other than disabled")
 	}
 }
+
+func TestABIHostClientSetAuthDisabledSkipsRedundantSave(t *testing.T) {
+	previous := callHostCallback
+	t.Cleanup(func() { callHostCallback = previous })
+
+	saves := 0
+	original := json.RawMessage(`{"type":"codex","disabled":true,"access_token":"access-secret","account_id":"acct-1"}`)
+	callHostCallback = func(method string, payload any) (json.RawMessage, error) {
+		switch method {
+		case pluginabi.MethodHostAuthGet:
+			return json.Marshal(pluginapi.HostAuthGetResponse{AuthIndex: "idx-a", Name: "codex-a.json", JSON: original})
+		case pluginabi.MethodHostAuthSave:
+			saves++
+			return json.Marshal(pluginapi.HostAuthSaveResponse{Name: "codex-a.json"})
+		default:
+			t.Fatalf("unexpected host callback method %q", method)
+			return nil, nil
+		}
+	}
+
+	if err := (ABIHostClient{}).SetAuthDisabled("idx-a", true); err != nil {
+		t.Fatal(err)
+	}
+	if saves != 0 {
+		t.Fatalf("redundant disabled update performed %d auth saves, want 0", saves)
+	}
+}

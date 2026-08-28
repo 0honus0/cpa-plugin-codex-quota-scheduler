@@ -6,7 +6,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
-// coreProbeRequest intentionally owns no payload definition. The v2 scheduler
+// coreProbeRequest intentionally owns no payload definition. The scheduler
 // reuses the existing probe request content byte-for-byte and changes only the
 // scheduling/refresh decision that determines when it is sent.
 func coreProbeRequest(credentials CodexCredentials) pluginapi.HTTPRequest {
