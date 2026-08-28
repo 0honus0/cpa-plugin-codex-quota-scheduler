@@ -1,4 +1,4 @@
-module github.com/jeffery/codex-quota-scheduler
+module github.com/0honus0/cpa-plugin-codex-quota-scheduler
 
 go 1.26.0
 
