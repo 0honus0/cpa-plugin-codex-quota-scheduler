@@ -37,3 +37,31 @@ func TestManagementUIHasNoExternalScriptOrStylesheetDependencies(t *testing.T) {
 		}
 	}
 }
+
+func TestManagementUIProvidesImmediateInteractionFeedback(t *testing.T) {
+	for _, required := range []string{
+		`classList.add('busy')`,
+		`successButton`,
+		`toastStack`,
+		`有未保存修改`,
+		`刷新排队`,
+		`syncBar`,
+		`prefers-reduced-motion`,
+	} {
+		if !strings.Contains(coreStatusHTML, required) {
+			t.Fatalf("management UI missing interaction feedback marker %q", required)
+		}
+	}
+}
+
+func TestManagementUIPreservesUnsavedDraftsDuringPolling(t *testing.T) {
+	for _, required := range []string{
+		`hasEditingDraft`,
+		`data-dirty`,
+		`settingsDirty`,
+	} {
+		if !strings.Contains(coreStatusHTML, required) {
+			t.Fatalf("management UI missing draft-preservation marker %q", required)
+		}
+	}
+}
