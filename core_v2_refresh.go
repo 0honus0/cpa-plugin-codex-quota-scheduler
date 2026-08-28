@@ -118,9 +118,9 @@ func (e *CoreEngine) RunCycle() {
 			}
 			continue
 		}
-		if account.Banned(now) {
-			continue
-		}
+		// A business 429 ban is a scheduler-selection guard, not a maintenance
+		// lock. Quota reads and reset probes must keep running so a lazy 5h reset
+		// can be detected and activated at its configured reset+delay time.
 		_, forceOne := forced[account.ID]
 		dueRefresh := forceAll || forceOne || account.LastRefreshAt.IsZero() || now.Sub(account.LastRefreshAt) >= cfg.QuotaRefreshInterval
 		dueProbe := cfg.EnableResetProbe && !account.ProbeDueAt.IsZero() && !account.ProbeDueAt.After(now)
@@ -360,26 +360,33 @@ func (e *CoreEngine) updateProbeScheduleLocked(a *CoreAccount, previous, current
 		return
 	}
 	cfg := e.cfg
-	if !cfg.EnableResetProbe || previous.FiveHour == nil || previous.FiveHour.ResetAt.IsZero() {
+	if !cfg.EnableResetProbe || current.FiveHour == nil || current.FiveHour.ResetAt.IsZero() {
 		return
 	}
-	oldReset := previous.FiveHour.ResetAt
-	if oldReset.After(now) {
+	currentReset := current.FiveHour.ResetAt
+	if previous.FiveHour != nil && !previous.FiveHour.ResetAt.IsZero() {
+		oldReset := previous.FiveHour.ResetAt
+		if !oldReset.After(now) && currentReset.After(oldReset.Add(coreResetAdvanceSlop)) {
+			// The window advanced naturally. Keep the confirmation status, but
+			// immediately schedule maintenance for the *next* known reset rather
+			// than clearing the timer and waiting for another post-reset refresh.
+			a.ProbeBaselineResetAt = currentReset
+			a.ProbeDueAt = currentReset.Add(cfg.ResetProbeAfterResetDelay)
+			a.ProbeStatus = "natural_reset_confirmed"
+			return
+		}
+	}
+	due := currentReset.Add(cfg.ResetProbeAfterResetDelay)
+	if a.ProbeBaselineResetAt.Equal(currentReset) && a.ProbeDueAt.Equal(due) {
 		return
 	}
-	if current.FiveHour != nil && current.FiveHour.ResetAt.After(oldReset.Add(coreResetAdvanceSlop)) {
-		a.ProbeBaselineResetAt = time.Time{}
-		a.ProbeDueAt = time.Time{}
-		a.ProbeStatus = "natural_reset_confirmed"
-		return
-	}
-	due := oldReset.Add(cfg.ResetProbeAfterResetDelay)
-	if a.ProbeBaselineResetAt.Equal(oldReset) && !a.ProbeDueAt.IsZero() {
-		return
-	}
-	a.ProbeBaselineResetAt = oldReset
+	a.ProbeBaselineResetAt = currentReset
 	a.ProbeDueAt = due
-	a.ProbeStatus = "waiting_after_reset"
+	if currentReset.After(now) {
+		a.ProbeStatus = "scheduled_after_reset"
+	} else {
+		a.ProbeStatus = "waiting_after_reset"
+	}
 }
 
 func (e *CoreEngine) ProbeAccount(authID string) error {
@@ -392,6 +399,7 @@ func (e *CoreEngine) ProbeAccount(authID string) error {
 	if !cfg.EnableResetProbe || account.ProbeDueAt.IsZero() || account.ProbeDueAt.After(now) {
 		return nil
 	}
+	baselineReset := account.ProbeBaselineResetAt
 	credentials, fingerprint, err := e.readCredentials(account)
 	if err != nil {
 		e.retryProbe(authID, "credential_read_failed")
@@ -440,7 +448,7 @@ func (e *CoreEngine) ProbeAccount(authID string) error {
 	if !ok {
 		return nil
 	}
-	if updated.ProbeDueAt.IsZero() {
+	if updated.Quota.FiveHour != nil && updated.Quota.FiveHour.ResetAt.After(baselineReset.Add(coreResetAdvanceSlop)) {
 		e.recordLog("info", "quota.reset_probe_verified", "reset probe activated a new five-hour window", map[string]any{"auth_id": authID})
 		return nil
 	}

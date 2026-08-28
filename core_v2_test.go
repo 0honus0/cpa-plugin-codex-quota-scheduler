@@ -219,6 +219,55 @@ func TestCoreFiveHourLazyResetProbeDefaultsToFiveMinutesAfterReset(t *testing.T)
 	}
 }
 
+func TestCoreFutureFiveHourResetIsScheduledImmediately(t *testing.T) {
+	now := time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC)
+	engine := newCoreTestEngine(t, &coreTestHost{}, now)
+	resetAt := now.Add(20 * time.Minute)
+	used := 73.0
+	current := ParsedQuota{FiveHour: &QuotaWindow{Kind: WindowFiveHour, UsedPercent: &used, ResetAt: resetAt}}
+	account := &CoreAccount{ID: "a"}
+	engine.mu.Lock()
+	engine.updateProbeScheduleLocked(account, ParsedQuota{}, current, now)
+	engine.mu.Unlock()
+	want := resetAt.Add(5 * time.Minute)
+	if !account.ProbeDueAt.Equal(want) {
+		t.Fatalf("probe_due=%v, want %v", account.ProbeDueAt, want)
+	}
+	if account.ProbeStatus != "scheduled_after_reset" {
+		t.Fatalf("probe_status=%q, want scheduled_after_reset", account.ProbeStatus)
+	}
+}
+
+func TestCoreBusiness429BanDoesNotBlockQuotaMaintenance(t *testing.T) {
+	now := time.Date(2026, 8, 28, 14, 5, 0, 0, time.UTC)
+	host := &coreTestHost{
+		auths: []pluginapi.HostAuthFileEntry{{ID: "a", AuthIndex: "idx-a", Provider: "codex", Priority: 9}},
+		authJSON: map[string]json.RawMessage{
+			"idx-a": json.RawMessage(`{"access_token":"access","account_id":"acct-a"}`),
+		},
+		quota: pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: coreTestQuotaJSON()},
+	}
+	engine := newCoreTestEngine(t, host, now)
+	if err := engine.SyncRoster(); err != nil {
+		t.Fatal(err)
+	}
+	engine.mu.Lock()
+	engine.accounts["a"].LastRefreshAt = now.Add(-31 * time.Minute)
+	engine.accounts["a"].BanUntil = now.Add(time.Hour)
+	engine.accounts["a"].BanReason = "usage_429"
+	engine.mu.Unlock()
+
+	engine.RunCycle()
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	if len(host.requests) == 0 {
+		t.Fatal("429 business ban suppressed quota maintenance")
+	}
+	if host.requests[0].Method != http.MethodGet || host.requests[0].URL != coreQuotaEndpoint {
+		t.Fatalf("maintenance request=%s %s, want GET %s", host.requests[0].Method, host.requests[0].URL, coreQuotaEndpoint)
+	}
+}
+
 func TestCoreProbeRequestPreservesExistingRequestContentByteForByte(t *testing.T) {
 	credentials := CodexCredentials{AccessToken: "access", ChatGPTAccountID: "acct"}
 	req := coreProbeRequest(credentials)
