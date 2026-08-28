@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "embed"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -217,22 +218,5 @@ func coreJSON(status int, payload any) pluginapi.ManagementResponse {
 	}
 }
 
-const coreStatusHTML = `<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Codex 调度器</title><style>
-body{font-family:system-ui,-apple-system,sans-serif;margin:24px;max-width:1180px;color:#111;background:#fafafa}h1{margin-bottom:4px}.muted{color:#666}.bar,.card{background:#fff;border:1px solid #ddd;border-radius:10px;padding:14px;margin:12px 0}.bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}button,input{font:inherit;padding:7px 10px}button{cursor:pointer}.account{display:grid;grid-template-columns:minmax(220px,2fr) 90px 100px 120px 140px 1fr;gap:10px;align-items:center;border-top:1px solid #eee;padding:12px 0}.account:first-child{border-top:0}.bad{font-weight:600}.ok{font-weight:600}.switch{display:flex;gap:6px;align-items:center}.small{font-size:12px}.quota{white-space:nowrap}@media(max-width:800px){.account{grid-template-columns:1fr 1fr}.wide{grid-column:1/-1}}
-</style></head><body><h1>Codex 调度器</h1><div class="muted">CPA priority 管跨层；插件只在同 priority 内调度。所有 CPA 启用的 Codex 账号都会显示，后台刷新默认开启。</div>
-<div class="bar"><button id="refreshAll">刷新全部</button><label class="switch"><input id="resetProbe" type="checkbox">Reset Probe</label><label>到期后 <input id="probeDelay" value="5m" size="6"></label><button id="saveSettings">保存设置</button><span id="msg" class="small muted"></span></div>
-<div id="accounts" class="card">加载中…</div>
-<script>
-const base='/v0/management/plugins/codex-quota-scheduler';
-const q=s=>document.querySelector(s); const node=(tag,text)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=text;return n};
-function pct(w){if(!w||w.UsedPercent===undefined&&w.used_percent===undefined)return '—';const v=w.used_percent??w.UsedPercent;return (100-v).toFixed(1)+'% 剩余'}
-function when(v){if(!v||v.startsWith('0001-'))return '—';return new Date(v).toLocaleString()}
-async function api(path,opt){const r=await fetch(base+path,{credentials:'same-origin',headers:{'Content-Type':'application/json'},...opt});if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}
-async function load(){try{const s=await api('/status');q('#resetProbe').checked=s.settings.enable_reset_probe;q('#probeDelay').value=s.settings.reset_probe_after_reset_delay;const root=q('#accounts');root.textContent='';for(const a of s.accounts){const row=node('div');row.className='account';const who=node('div');who.className='wide';who.append(node('div',a.alias||a.label||a.email||a.name||a.auth_id));who.append(node('div','ID '+a.auth_id+' · CPA priority '+a.cpa_priority));who.lastChild.className='small muted';row.append(who);const sp=document.createElement('input');sp.type='number';sp.value=a.scheduler_priority;sp.title='同 CPA priority 内的插件优先级';row.append(sp);const sw=node('label');sw.className='switch';const cb=document.createElement('input');cb.type='checkbox';cb.checked=a.refresh_enabled;sw.append(cb,node('span','刷新'));row.append(sw);const status=node('div',a.disabled_401?'401 禁用':a.banned?'429 Ban':a.available?'可用':a.unavailable_reason||'等待额度');status.className=a.available?'ok':'bad';row.append(status);const quota=node('div','5h '+pct(a.five_hour));quota.className='quota';row.append(quota);const detail=node('div','最后刷新 '+when(a.last_success_at)+' · Probe '+(a.probe_status||'—'));detail.className='small muted wide';row.append(detail);cb.addEventListener('change',()=>patch(a.auth_id,{refresh_enabled:cb.checked}));sp.addEventListener('change',()=>patch(a.auth_id,{scheduler_priority:Number(sp.value)||0}));root.append(row)}q('#msg').textContent='更新 '+new Date(s.generated_at).toLocaleTimeString()}catch(e){q('#msg').textContent='加载失败 '+e.message}}
-async function patch(id,extra){try{await api('/account',{method:'PATCH',body:JSON.stringify({auth_id:id,...extra})});await load()}catch(e){q('#msg').textContent='保存失败 '+e.message}}
-q('#refreshAll').onclick=async()=>{await api('/refresh',{method:'POST',body:'{}'});q('#msg').textContent='已请求刷新';setTimeout(load,1200)};
-q('#saveSettings').onclick=async()=>{try{const cur=await api('/settings');cur.enable_reset_probe=q('#resetProbe').checked;cur.reset_probe_after_reset_delay=q('#probeDelay').value;await api('/settings',{method:'PUT',body:JSON.stringify(cur)});await load()}catch(e){q('#msg').textContent='设置失败 '+e.message}};
-load();setInterval(load,30000);
-</script></body></html>`
+//go:embed ui.html
+var coreStatusHTML string
