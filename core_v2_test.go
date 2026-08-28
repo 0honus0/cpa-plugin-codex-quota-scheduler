@@ -503,13 +503,15 @@ func TestCoreProbePostsOnlyForLazyFiveHourReset(t *testing.T) {
 	now := time.Date(2026, 8, 28, 14, 5, 0, 0, time.UTC)
 	baseline := now.Add(-5 * time.Minute)
 	tests := []struct {
-		name     string
-		used5h   float64
-		usedLong float64
-		status   string
+		name         string
+		used5h       float64
+		usedLong     float64
+		status       string
+		wantPost     bool
+		wantRequests int
 	}{
-		{name: "five hour already available", used5h: 20, usedLong: 20, status: "precheck_five_hour_available"},
-		{name: "long window exhausted", used5h: 100, usedLong: 100, status: "precheck_long_window_exhausted"},
+		{name: "same lazy reset posts even when five hour is not exhausted", used5h: 20, usedLong: 20, status: "window_not_advanced", wantPost: true, wantRequests: 3},
+		{name: "long window exhausted", used5h: 100, usedLong: 100, status: "precheck_long_window_exhausted", wantRequests: 1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -539,9 +541,13 @@ func TestCoreProbePostsOnlyForLazyFiveHourReset(t *testing.T) {
 				t.Fatal(err)
 			}
 			host.mu.Lock()
-			if len(host.requests) != 1 || host.requests[0].Method != http.MethodGet {
+			if len(host.requests) != tc.wantRequests || host.requests[0].Method != http.MethodGet {
 				host.mu.Unlock()
-				t.Fatalf("probe requests=%v, want exactly one GET and no POST", host.requests)
+				t.Fatalf("probe requests=%v, want %d requests starting with GET", host.requests, tc.wantRequests)
+			}
+			if tc.wantPost && (len(host.requests) < 2 || host.requests[1].Method != http.MethodPost || host.requests[1].URL != codexResetProbeEndpoint) {
+				host.mu.Unlock()
+				t.Fatalf("probe requests=%v, want reset probe POST as second request", host.requests)
 			}
 			host.mu.Unlock()
 			account, _ := engine.accountByID("a")

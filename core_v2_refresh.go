@@ -136,6 +136,7 @@ func (e *CoreEngine) RunCycle() {
 		// can be detected and activated at its configured reset+delay time.
 		dueProbe := autoRefresh && cfg.EnableResetProbe && !account.ProbeDueAt.IsZero() && !account.ProbeDueAt.After(now)
 		if dueProbe {
+			e.recordLog("info", "quota.maintenance_triggered", "reset maintenance triggered", map[string]any{"auth_id": account.ID, "source": "probe_due", "probe_due_at": account.ProbeDueAt})
 			// ProbeAccount performs the required read-only quota precheck itself and
 			// never POSTs when that precheck fails or already shows a new window.
 			_ = e.ProbeAccount(account.ID)
@@ -143,6 +144,11 @@ func (e *CoreEngine) RunCycle() {
 		}
 		dueRefresh := forcedRefresh || (autoRefresh && (account.LastRefreshAt.IsZero() || now.Sub(account.LastRefreshAt) >= cfg.QuotaRefreshInterval))
 		if dueRefresh {
+			source := "periodic"
+			if forcedRefresh {
+				source = "manual"
+			}
+			e.recordLog("info", "quota.refresh_triggered", "quota refresh triggered", map[string]any{"auth_id": account.ID, "source": source})
 			_ = e.refreshAccount(account.ID, !forcedRefresh)
 		}
 	}
@@ -441,6 +447,7 @@ func (e *CoreEngine) ProbeAccount(authID string) error {
 		e.retryProbe(authID, "missing_reset_baseline")
 		return errors.New("reset probe missing baseline reset")
 	}
+	e.recordLog("info", "quota.reset_probe_precheck", "running read-only quota check before reset probe", map[string]any{"auth_id": authID, "baseline_reset_at": baselineReset})
 
 	// Safety invariant: always perform a read-only quota precheck first. A
 	// failed/ambiguous precheck must never fall through to the POST probe.
@@ -465,10 +472,6 @@ func (e *CoreEngine) ProbeAccount(authID string) error {
 		e.retryProbe(authID, "precheck_reset_ambiguous")
 		return errors.New("reset probe precheck returned an unexpected earlier reset")
 	}
-	if !account.Quota.FiveHour.Exhausted {
-		e.retryProbe(authID, "precheck_five_hour_available")
-		return nil
-	}
 	if account.Quota.LongWindow != nil && account.Quota.LongWindow.Exhausted {
 		e.retryProbe(authID, "precheck_long_window_exhausted")
 		return nil
@@ -491,6 +494,7 @@ func (e *CoreEngine) ProbeAccount(authID string) error {
 	// Security/compatibility invariant: probe request content is not rewritten by
 	// the scheduler. It reuses the existing, reviewed payload byte-for-byte.
 	req := coreProbeRequest(credentials)
+	e.recordLog("info", "quota.reset_probe_sending", "sending reset probe after lazy reset confirmation", map[string]any{"auth_id": authID, "baseline_reset_at": baselineReset})
 	e.mu.Lock()
 	if a := e.accounts[authID]; a != nil {
 		a.LastProbeAt = now
