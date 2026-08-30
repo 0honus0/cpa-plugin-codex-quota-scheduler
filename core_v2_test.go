@@ -254,6 +254,63 @@ func TestCoreFutureFiveHourResetIsScheduledImmediately(t *testing.T) {
 	}
 }
 
+func TestCoreCurrentStartFiveHourIsImmediatelyDue(t *testing.T) {
+	now := time.Date(2026, 8, 30, 19, 30, 0, 0, time.UTC)
+	engine := newCoreTestEngine(t, &coreTestHost{}, now)
+	used := 0.0
+	windowSeconds := int64(18000)
+	current := ParsedQuota{FiveHour: &QuotaWindow{
+		Kind:               WindowFiveHour,
+		UsedPercent:        &used,
+		LimitWindowSeconds: &windowSeconds,
+		ResetAt:            now.Add(5 * time.Hour),
+	}}
+	account := &CoreAccount{
+		ID:                   "a",
+		ProbeBaselineResetAt: now.Add(4 * time.Hour),
+		ProbeDueAt:           now.Add(4*time.Hour + 5*time.Minute),
+		ProbeStatus:          "scheduled_after_reset",
+	}
+
+	engine.mu.Lock()
+	engine.updateProbeScheduleLocked(account, ParsedQuota{}, current, now)
+	engine.mu.Unlock()
+
+	if !account.ProbeDueAt.Equal(now) {
+		t.Fatalf("current-start probe_due=%v, want immediate %v", account.ProbeDueAt, now)
+	}
+	if !account.ProbeBaselineResetAt.Equal(current.FiveHour.ResetAt) {
+		t.Fatalf("current-start baseline=%v, want %v", account.ProbeBaselineResetAt, current.FiveHour.ResetAt)
+	}
+	if account.ProbeStatus != "current_window_probe_due" {
+		t.Fatalf("probe_status=%q, want current_window_probe_due", account.ProbeStatus)
+	}
+}
+
+func TestCoreActiveFiveHourDoesNotBecomeImmediatelyDue(t *testing.T) {
+	now := time.Date(2026, 8, 30, 19, 30, 0, 0, time.UTC)
+	engine := newCoreTestEngine(t, &coreTestHost{}, now)
+	used := 0.0
+	windowSeconds := int64(18000)
+	baseline := now.Add(4*time.Hour + 30*time.Minute)
+	due := baseline.Add(5 * time.Minute)
+	current := ParsedQuota{FiveHour: &QuotaWindow{
+		Kind:               WindowFiveHour,
+		UsedPercent:        &used,
+		LimitWindowSeconds: &windowSeconds,
+		ResetAt:            now.Add(4*time.Hour + 59*time.Minute),
+	}}
+	account := &CoreAccount{ID: "a", ProbeBaselineResetAt: baseline, ProbeDueAt: due, ProbeStatus: "scheduled_after_reset"}
+
+	engine.mu.Lock()
+	engine.updateProbeScheduleLocked(account, ParsedQuota{}, current, now)
+	engine.mu.Unlock()
+
+	if !account.ProbeDueAt.Equal(due) {
+		t.Fatalf("active window changed pinned probe due: got %v want %v", account.ProbeDueAt, due)
+	}
+}
+
 func TestCoreQuotaRefreshDoesNotDriftScheduledProbe(t *testing.T) {
 	now := time.Date(2026, 8, 30, 10, 0, 0, 0, time.UTC)
 	engine := newCoreTestEngine(t, &coreTestHost{}, now)
@@ -277,6 +334,48 @@ func TestCoreQuotaRefreshDoesNotDriftScheduledProbe(t *testing.T) {
 	}
 	if !account.ProbeDueAt.Equal(due) {
 		t.Fatalf("quota refresh drifted probe due: got %v want %v", account.ProbeDueAt, due)
+	}
+}
+
+func TestCoreRefreshImmediatelyProbesCurrentStartFiveHour(t *testing.T) {
+	now := time.Date(2026, 8, 30, 19, 30, 0, 0, time.UTC)
+	lazyBody := []byte(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_after_seconds":18000},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":345600}}}`)
+	activeBody := []byte(`{"rate_limit":{"primary_window":{"used_percent":1,"limit_window_seconds":18000,"reset_after_seconds":17997},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":345597}}}`)
+	host := &coreTestHost{
+		auths:    []pluginapi.HostAuthFileEntry{{ID: "a", AuthIndex: "idx-a", Provider: "codex", Priority: 9}},
+		authJSON: map[string]json.RawMessage{"idx-a": json.RawMessage(`{"access_token":"access","account_id":"acct-a"}`)},
+		responses: []pluginapi.HTTPResponse{
+			{StatusCode: http.StatusOK, Body: lazyBody},
+			{StatusCode: http.StatusOK, Body: lazyBody},
+			{StatusCode: http.StatusOK},
+			{StatusCode: http.StatusOK, Body: activeBody},
+		},
+	}
+	engine := newCoreTestEngine(t, host, now)
+	if err := engine.SyncRoster(); err != nil {
+		t.Fatal(err)
+	}
+	engine.RequestRefreshOne("a")
+	engine.RunCycle()
+
+	host.mu.Lock()
+	requests := append([]pluginapi.HTTPRequest(nil), host.requests...)
+	host.mu.Unlock()
+	if len(requests) != 4 {
+		t.Fatalf("requests=%v, want refresh GET, precheck GET, probe POST, verify GET", requests)
+	}
+	wantMethods := []string{http.MethodGet, http.MethodGet, http.MethodPost, http.MethodGet}
+	for i, want := range wantMethods {
+		if requests[i].Method != want {
+			t.Fatalf("request %d method=%s, want %s", i, requests[i].Method, want)
+		}
+	}
+	account, _ := engine.accountByID("a")
+	if account.LastProbeAt.IsZero() {
+		t.Fatal("current-start refresh did not execute a probe")
+	}
+	if account.ProbeStatus != "scheduled_after_reset" {
+		t.Fatalf("probe_status=%q, want scheduled_after_reset after activation", account.ProbeStatus)
 	}
 }
 

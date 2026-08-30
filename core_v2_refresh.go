@@ -133,7 +133,7 @@ func (e *CoreEngine) RunCycle() {
 
 		// A business 429 ban is a scheduler-selection guard, not a maintenance
 		// lock. Quota reads and reset probes must keep running so a lazy 5h reset
-		// can be detected and activated at its configured reset+delay time.
+		// can be detected and activated.
 		dueProbe := autoRefresh && cfg.EnableResetProbe && !account.ProbeDueAt.IsZero() && !account.ProbeDueAt.After(now)
 		if dueProbe {
 			e.recordLog("info", "quota.maintenance_triggered", "reset maintenance triggered", map[string]any{"auth_id": account.ID, "source": "probe_due", "probe_due_at": account.ProbeDueAt})
@@ -150,6 +150,11 @@ func (e *CoreEngine) RunCycle() {
 			}
 			e.recordLog("info", "quota.refresh_triggered", "quota refresh triggered", map[string]any{"auth_id": account.ID, "source": source})
 			_ = e.refreshAccount(account.ID, !forcedRefresh)
+			updated, ok := e.accountByID(account.ID)
+			if ok && autoRefresh && cfg.EnableResetProbe && !updated.ProbeDueAt.IsZero() && !updated.ProbeDueAt.After(e.now()) {
+				e.recordLog("info", "quota.maintenance_triggered", "reset maintenance triggered", map[string]any{"auth_id": account.ID, "source": "current_window", "probe_due_at": updated.ProbeDueAt})
+				_ = e.ProbeAccount(account.ID)
+			}
 		}
 	}
 }
@@ -403,6 +408,15 @@ func (e *CoreEngine) updateProbeScheduleLocked(a *CoreAccount, _ ParsedQuota, cu
 	if current.FiveHour == nil || current.FiveHour.ResetAt.IsZero() {
 		return
 	}
+	if coreFiveHourStartsNow(current.FiveHour, now) {
+		if !a.LastProbeAt.IsZero() && now.Sub(a.LastProbeAt) < cfg.ResetProbeRetryDelay {
+			return
+		}
+		a.ProbeBaselineResetAt = current.FiveHour.ResetAt
+		a.ProbeDueAt = now
+		a.ProbeStatus = "current_window_probe_due"
+		return
+	}
 
 	// The first observed 5h reset owns the timer. Quota reads may report a
 	// different reset_at later, but they must not move an already scheduled
@@ -419,6 +433,22 @@ func (e *CoreEngine) updateProbeScheduleLocked(a *CoreAccount, _ ParsedQuota, cu
 	} else {
 		a.ProbeStatus = "waiting_after_reset"
 	}
+}
+
+func coreFiveHourStartsNow(window *QuotaWindow, now time.Time) bool {
+	if window == nil || window.Kind != WindowFiveHour || window.ResetAt.IsZero() || window.UsedPercent == nil || *window.UsedPercent != 0 {
+		return false
+	}
+	if window.LimitWindowSeconds == nil || *window.LimitWindowSeconds <= 0 {
+		return false
+	}
+	want := time.Duration(*window.LimitWindowSeconds) * time.Second
+	remaining := window.ResetAt.Sub(now)
+	delta := remaining - want
+	if delta < 0 {
+		delta = -delta
+	}
+	return delta <= 10*time.Second
 }
 
 func (e *CoreEngine) ProbeAccount(authID string) error {
