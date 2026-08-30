@@ -387,7 +387,7 @@ func (e *CoreEngine) finishRefreshSuccess(authID string, quota ParsedQuota) {
 	e.mu.Unlock()
 }
 
-func (e *CoreEngine) updateProbeScheduleLocked(a *CoreAccount, previous, current ParsedQuota, now time.Time) {
+func (e *CoreEngine) updateProbeScheduleLocked(a *CoreAccount, _ ParsedQuota, current ParsedQuota, now time.Time) {
 	if a == nil {
 		return
 	}
@@ -403,53 +403,22 @@ func (e *CoreEngine) updateProbeScheduleLocked(a *CoreAccount, previous, current
 	if current.FiveHour == nil || current.FiveHour.ResetAt.IsZero() {
 		return
 	}
-	currentReset := current.FiveHour.ResetAt
-	// An unused Codex 5h window is lazy: quota reads report used_percent=0 and
-	// reset_after_seconds equal to the full window length, which makes reset_at
-	// slide to roughly "now + 5h" on every read. Once a probe is scheduled for
-	// that lazy window, ordinary quota refreshes must not move its baseline or
-	// due time forward forever.
-	if coreFiveHourWindowIsLazy(current.FiveHour) && !a.ProbeBaselineResetAt.IsZero() && !a.ProbeDueAt.IsZero() {
+
+	// The first observed 5h reset owns the timer. Quota reads may report a
+	// different reset_at later, but they must not move an already scheduled
+	// probe. The schedule is replaced only after that probe is executed.
+	if !a.ProbeBaselineResetAt.IsZero() && !a.ProbeDueAt.IsZero() {
 		return
 	}
-	if previous.FiveHour != nil && !previous.FiveHour.ResetAt.IsZero() {
-		oldReset := previous.FiveHour.ResetAt
-		if !oldReset.After(now) && currentReset.After(oldReset.Add(coreResetAdvanceSlop)) {
-			// The window advanced naturally. Keep the confirmation status, but
-			// immediately schedule maintenance for the *next* known reset rather
-			// than clearing the timer and waiting for another post-reset refresh.
-			a.ProbeBaselineResetAt = currentReset
-			a.ProbeDueAt = currentReset.Add(cfg.ResetProbeAfterResetDelay)
-			a.ProbeStatus = "natural_reset_confirmed"
-			return
-		}
-	}
-	due := currentReset.Add(cfg.ResetProbeAfterResetDelay)
-	// Preserve an existing due time for the same reset baseline. It may be a
-	// retry schedule; recomputing reset+delay here could collapse a configured
-	// retry back to an already-expired timestamp.
-	if coreSameReset(a.ProbeBaselineResetAt, currentReset) && !a.ProbeDueAt.IsZero() {
-		return
-	}
-	a.ProbeBaselineResetAt = currentReset
-	a.ProbeDueAt = due
-	if currentReset.After(now) {
+
+	resetAt := current.FiveHour.ResetAt
+	a.ProbeBaselineResetAt = resetAt
+	a.ProbeDueAt = resetAt.Add(cfg.ResetProbeAfterResetDelay)
+	if resetAt.After(now) {
 		a.ProbeStatus = "scheduled_after_reset"
 	} else {
 		a.ProbeStatus = "waiting_after_reset"
 	}
-}
-
-func coreFiveHourWindowIsLazy(window *QuotaWindow) bool {
-	if window == nil || window.Kind != WindowFiveHour || window.UsedPercent == nil || *window.UsedPercent != 0 {
-		return false
-	}
-	if window.LimitWindowSeconds == nil || window.ResetAfterSeconds == nil || *window.LimitWindowSeconds <= 0 {
-		return false
-	}
-	// Allow one second of rounding jitter from the upstream response. An active
-	// window counts down; a lazy window keeps returning the full 18,000 seconds.
-	return *window.ResetAfterSeconds >= *window.LimitWindowSeconds-1
 }
 
 func (e *CoreEngine) ProbeAccount(authID string) error {
@@ -482,15 +451,6 @@ func (e *CoreEngine) ProbeAccount(authID string) error {
 	if account.Quota.FiveHour == nil || account.Quota.FiveHour.ResetAt.IsZero() {
 		e.retryProbe(authID, "precheck_missing_five_hour")
 		return errors.New("reset probe precheck returned no five-hour window")
-	}
-	if account.Quota.FiveHour.ResetAt.After(baselineReset.Add(coreResetAdvanceSlop)) && !coreFiveHourWindowIsLazy(account.Quota.FiveHour) {
-		// A real active window advanced naturally. A lazy zero-usage window also
-		// reports a later reset_at on every read, so it must not skip the probe.
-		return nil
-	}
-	if account.Quota.FiveHour.ResetAt.Before(baselineReset.Add(-coreResetAdvanceSlop)) {
-		e.retryProbe(authID, "precheck_reset_ambiguous")
-		return errors.New("reset probe precheck returned an unexpected earlier reset")
 	}
 	if account.Quota.LongWindow != nil && account.Quota.LongWindow.Exhausted {
 		e.retryProbe(authID, "precheck_long_window_exhausted")
@@ -554,14 +514,30 @@ func (e *CoreEngine) ProbeAccount(authID string) error {
 		return err
 	}
 	updated, ok := e.accountByID(authID)
-	if !ok {
-		return nil
+	if !ok || updated.Quota.FiveHour == nil || updated.Quota.FiveHour.ResetAt.IsZero() {
+		e.retryProbe(authID, "verify_missing_five_hour")
+		return errors.New("reset probe verification returned no five-hour window")
 	}
-	if updated.Quota.FiveHour != nil && updated.Quota.FiveHour.ResetAt.After(baselineReset.Add(coreResetAdvanceSlop)) && !coreFiveHourWindowIsLazy(updated.Quota.FiveHour) {
-		e.recordLog("info", "quota.reset_probe_verified", "reset probe activated a new five-hour window", map[string]any{"auth_id": authID})
-		return nil
+
+	// A successful probe owns the transition to the next cycle. Replace the old
+	// fixed timer exactly once with the reset reported after the probe; ordinary
+	// quota refreshes will preserve this new timer until it fires.
+	nextReset := updated.Quota.FiveHour.ResetAt
+	now = e.now()
+	e.mu.Lock()
+	if a := e.accounts[authID]; a != nil {
+		a.ProbeBaselineResetAt = nextReset
+		a.ProbeDueAt = nextReset.Add(e.cfg.ResetProbeAfterResetDelay)
+		if nextReset.After(now) {
+			a.ProbeStatus = "scheduled_after_reset"
+		} else {
+			a.ProbeStatus = "waiting_after_reset"
+		}
+		e.persisted[authID] = corePersistedFromAccount(*a)
+		_ = e.persistLocked()
 	}
-	e.retryProbe(authID, "window_not_advanced")
+	e.mu.Unlock()
+	e.recordLog("info", "quota.reset_probe_verified", "reset probe completed and next five-hour deadline scheduled", map[string]any{"auth_id": authID, "reset_at": nextReset})
 	return nil
 }
 

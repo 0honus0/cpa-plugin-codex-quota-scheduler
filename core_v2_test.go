@@ -254,23 +254,13 @@ func TestCoreFutureFiveHourResetIsScheduledImmediately(t *testing.T) {
 	}
 }
 
-func TestCoreLazyFiveHourRefreshDoesNotDriftScheduledProbe(t *testing.T) {
+func TestCoreQuotaRefreshDoesNotDriftScheduledProbe(t *testing.T) {
 	now := time.Date(2026, 8, 30, 10, 0, 0, 0, time.UTC)
 	engine := newCoreTestEngine(t, &coreTestHost{}, now)
-	used := 0.0
-	windowSeconds := int64(18000)
-	resetAfter := int64(18000)
 	baseline := now.Add(5 * time.Hour)
 	due := baseline.Add(5 * time.Minute)
-	previous := ParsedQuota{FiveHour: &QuotaWindow{
-		Kind:               WindowFiveHour,
-		UsedPercent:        &used,
-		LimitWindowSeconds: &windowSeconds,
-		ResetAfterSeconds:  &resetAfter,
-		ResetAt:            baseline,
-	}}
-	current := cloneCoreQuota(previous)
-	current.FiveHour.ResetAt = baseline.Add(30 * time.Minute)
+	previous := ParsedQuota{FiveHour: &QuotaWindow{Kind: WindowFiveHour, ResetAt: baseline}}
+	current := ParsedQuota{FiveHour: &QuotaWindow{Kind: WindowFiveHour, ResetAt: baseline.Add(30 * time.Minute)}}
 	account := &CoreAccount{
 		ID:                   "a",
 		ProbeBaselineResetAt: baseline,
@@ -283,10 +273,10 @@ func TestCoreLazyFiveHourRefreshDoesNotDriftScheduledProbe(t *testing.T) {
 	engine.mu.Unlock()
 
 	if !account.ProbeBaselineResetAt.Equal(baseline) {
-		t.Fatalf("lazy refresh drifted probe baseline: got %v want %v", account.ProbeBaselineResetAt, baseline)
+		t.Fatalf("quota refresh drifted probe baseline: got %v want %v", account.ProbeBaselineResetAt, baseline)
 	}
 	if !account.ProbeDueAt.Equal(due) {
-		t.Fatalf("lazy refresh drifted probe due: got %v want %v", account.ProbeDueAt, due)
+		t.Fatalf("quota refresh drifted probe due: got %v want %v", account.ProbeDueAt, due)
 	}
 }
 
@@ -595,7 +585,7 @@ func TestCoreProbePostsOnlyForLazyFiveHourReset(t *testing.T) {
 		wantPost     bool
 		wantRequests int
 	}{
-		{name: "same lazy reset posts even when five hour is not exhausted", used5h: 20, usedLong: 20, status: "window_not_advanced", wantPost: true, wantRequests: 3},
+		{name: "scheduled deadline posts even when five hour is not exhausted", used5h: 20, usedLong: 20, status: "waiting_after_reset", wantPost: true, wantRequests: 3},
 		{name: "long window exhausted", used5h: 100, usedLong: 100, status: "precheck_long_window_exhausted", wantRequests: 1},
 	}
 	for _, tc := range tests {

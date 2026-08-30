@@ -180,9 +180,6 @@ func parseQuotaWindow(raw map[string]any, now time.Time, fallbackKind WindowKind
 	if seconds, ok := getInt64(raw, "limit_window_seconds", "limitWindowSeconds"); ok {
 		window.LimitWindowSeconds = &seconds
 	}
-	if seconds, ok := getInt64(raw, "reset_after_seconds", "resetAfterSeconds"); ok {
-		window.ResetAfterSeconds = &seconds
-	}
 	if resetAt, ok := getResetAt(raw, now); ok {
 		window.ResetAt = resetAt
 	}
