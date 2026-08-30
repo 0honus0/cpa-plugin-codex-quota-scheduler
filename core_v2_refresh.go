@@ -418,14 +418,25 @@ func (e *CoreEngine) updateProbeScheduleLocked(a *CoreAccount, _ ParsedQuota, cu
 		return
 	}
 
-	// The first observed 5h reset owns the timer. Quota reads may report a
-	// different reset_at later, but they must not move an already scheduled
-	// probe. The schedule is replaced only after that probe is executed.
+	resetAt := current.FiveHour.ResetAt
+	// A non-current-start reset is an anchored real window. If an earlier lazy
+	// observation left a different pinned deadline behind, replace it with the
+	// real window's reset so maintenance cannot fire before the active window
+	// actually expires.
 	if !a.ProbeBaselineResetAt.IsZero() && !a.ProbeDueAt.IsZero() {
+		if coreSameReset(a.ProbeBaselineResetAt, resetAt) {
+			return
+		}
+		a.ProbeBaselineResetAt = resetAt
+		a.ProbeDueAt = resetAt.Add(cfg.ResetProbeAfterResetDelay)
+		if resetAt.After(now) {
+			a.ProbeStatus = "scheduled_after_reset"
+		} else {
+			a.ProbeStatus = "waiting_after_reset"
+		}
 		return
 	}
 
-	resetAt := current.FiveHour.ResetAt
 	a.ProbeBaselineResetAt = resetAt
 	a.ProbeDueAt = resetAt.Add(cfg.ResetProbeAfterResetDelay)
 	if resetAt.After(now) {

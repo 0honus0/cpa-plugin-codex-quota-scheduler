@@ -287,53 +287,59 @@ func TestCoreCurrentStartFiveHourIsImmediatelyDue(t *testing.T) {
 	}
 }
 
-func TestCoreActiveFiveHourDoesNotBecomeImmediatelyDue(t *testing.T) {
+func TestCoreAnchoredActiveFiveHourRebasesPinnedProbe(t *testing.T) {
 	now := time.Date(2026, 8, 30, 19, 30, 0, 0, time.UTC)
 	engine := newCoreTestEngine(t, &coreTestHost{}, now)
 	used := 0.0
 	windowSeconds := int64(18000)
 	baseline := now.Add(4*time.Hour + 30*time.Minute)
-	due := baseline.Add(5 * time.Minute)
+	currentReset := now.Add(4*time.Hour + 59*time.Minute)
 	current := ParsedQuota{FiveHour: &QuotaWindow{
 		Kind:               WindowFiveHour,
 		UsedPercent:        &used,
 		LimitWindowSeconds: &windowSeconds,
-		ResetAt:            now.Add(4*time.Hour + 59*time.Minute),
+		ResetAt:            currentReset,
 	}}
-	account := &CoreAccount{ID: "a", ProbeBaselineResetAt: baseline, ProbeDueAt: due, ProbeStatus: "scheduled_after_reset"}
+	account := &CoreAccount{ID: "a", ProbeBaselineResetAt: baseline, ProbeDueAt: baseline.Add(5 * time.Minute), ProbeStatus: "scheduled_after_reset"}
 
 	engine.mu.Lock()
 	engine.updateProbeScheduleLocked(account, ParsedQuota{}, current, now)
 	engine.mu.Unlock()
 
-	if !account.ProbeDueAt.Equal(due) {
-		t.Fatalf("active window changed pinned probe due: got %v want %v", account.ProbeDueAt, due)
+	if !account.ProbeBaselineResetAt.Equal(currentReset) {
+		t.Fatalf("active window baseline=%v, want %v", account.ProbeBaselineResetAt, currentReset)
+	}
+	wantDue := currentReset.Add(5 * time.Minute)
+	if !account.ProbeDueAt.Equal(wantDue) {
+		t.Fatalf("active window probe due=%v, want %v", account.ProbeDueAt, wantDue)
 	}
 }
 
-func TestCoreQuotaRefreshDoesNotDriftScheduledProbe(t *testing.T) {
+func TestCoreCurrentStartRefreshRespectsProbeRetryBackoff(t *testing.T) {
 	now := time.Date(2026, 8, 30, 10, 0, 0, 0, time.UTC)
 	engine := newCoreTestEngine(t, &coreTestHost{}, now)
+	used := 0.0
+	windowSeconds := int64(18000)
 	baseline := now.Add(5 * time.Hour)
-	due := baseline.Add(5 * time.Minute)
-	previous := ParsedQuota{FiveHour: &QuotaWindow{Kind: WindowFiveHour, ResetAt: baseline}}
-	current := ParsedQuota{FiveHour: &QuotaWindow{Kind: WindowFiveHour, ResetAt: baseline.Add(30 * time.Minute)}}
+	due := now.Add(4 * time.Minute)
+	current := ParsedQuota{FiveHour: &QuotaWindow{Kind: WindowFiveHour, UsedPercent: &used, LimitWindowSeconds: &windowSeconds, ResetAt: now.Add(5 * time.Hour)}}
 	account := &CoreAccount{
 		ID:                   "a",
 		ProbeBaselineResetAt: baseline,
 		ProbeDueAt:           due,
-		ProbeStatus:          "scheduled_after_reset",
+		LastProbeAt:          now.Add(-time.Minute),
+		ProbeStatus:          "rate_limited",
 	}
 
 	engine.mu.Lock()
-	engine.updateProbeScheduleLocked(account, previous, current, now.Add(30*time.Minute))
+	engine.updateProbeScheduleLocked(account, ParsedQuota{}, current, now)
 	engine.mu.Unlock()
 
 	if !account.ProbeBaselineResetAt.Equal(baseline) {
-		t.Fatalf("quota refresh drifted probe baseline: got %v want %v", account.ProbeBaselineResetAt, baseline)
+		t.Fatalf("retry backoff changed baseline: got %v want %v", account.ProbeBaselineResetAt, baseline)
 	}
 	if !account.ProbeDueAt.Equal(due) {
-		t.Fatalf("quota refresh drifted probe due: got %v want %v", account.ProbeDueAt, due)
+		t.Fatalf("retry backoff changed probe due: got %v want %v", account.ProbeDueAt, due)
 	}
 }
 
