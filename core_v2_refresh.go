@@ -404,6 +404,14 @@ func (e *CoreEngine) updateProbeScheduleLocked(a *CoreAccount, previous, current
 		return
 	}
 	currentReset := current.FiveHour.ResetAt
+	// An unused Codex 5h window is lazy: quota reads report used_percent=0 and
+	// reset_after_seconds equal to the full window length, which makes reset_at
+	// slide to roughly "now + 5h" on every read. Once a probe is scheduled for
+	// that lazy window, ordinary quota refreshes must not move its baseline or
+	// due time forward forever.
+	if coreFiveHourWindowIsLazy(current.FiveHour) && !a.ProbeBaselineResetAt.IsZero() && !a.ProbeDueAt.IsZero() {
+		return
+	}
 	if previous.FiveHour != nil && !previous.FiveHour.ResetAt.IsZero() {
 		oldReset := previous.FiveHour.ResetAt
 		if !oldReset.After(now) && currentReset.After(oldReset.Add(coreResetAdvanceSlop)) {
@@ -430,6 +438,18 @@ func (e *CoreEngine) updateProbeScheduleLocked(a *CoreAccount, previous, current
 	} else {
 		a.ProbeStatus = "waiting_after_reset"
 	}
+}
+
+func coreFiveHourWindowIsLazy(window *QuotaWindow) bool {
+	if window == nil || window.Kind != WindowFiveHour || window.UsedPercent == nil || *window.UsedPercent != 0 {
+		return false
+	}
+	if window.LimitWindowSeconds == nil || window.ResetAfterSeconds == nil || *window.LimitWindowSeconds <= 0 {
+		return false
+	}
+	// Allow one second of rounding jitter from the upstream response. An active
+	// window counts down; a lazy window keeps returning the full 18,000 seconds.
+	return *window.ResetAfterSeconds >= *window.LimitWindowSeconds-1
 }
 
 func (e *CoreEngine) ProbeAccount(authID string) error {
@@ -463,9 +483,9 @@ func (e *CoreEngine) ProbeAccount(authID string) error {
 		e.retryProbe(authID, "precheck_missing_five_hour")
 		return errors.New("reset probe precheck returned no five-hour window")
 	}
-	if account.Quota.FiveHour.ResetAt.After(baselineReset.Add(coreResetAdvanceSlop)) {
-		// Natural reset already advanced the window; finishRefreshSuccess has
-		// scheduled the next reset, so no POST is needed.
+	if account.Quota.FiveHour.ResetAt.After(baselineReset.Add(coreResetAdvanceSlop)) && !coreFiveHourWindowIsLazy(account.Quota.FiveHour) {
+		// A real active window advanced naturally. A lazy zero-usage window also
+		// reports a later reset_at on every read, so it must not skip the probe.
 		return nil
 	}
 	if account.Quota.FiveHour.ResetAt.Before(baselineReset.Add(-coreResetAdvanceSlop)) {
@@ -537,7 +557,7 @@ func (e *CoreEngine) ProbeAccount(authID string) error {
 	if !ok {
 		return nil
 	}
-	if updated.Quota.FiveHour != nil && updated.Quota.FiveHour.ResetAt.After(baselineReset.Add(coreResetAdvanceSlop)) {
+	if updated.Quota.FiveHour != nil && updated.Quota.FiveHour.ResetAt.After(baselineReset.Add(coreResetAdvanceSlop)) && !coreFiveHourWindowIsLazy(updated.Quota.FiveHour) {
 		e.recordLog("info", "quota.reset_probe_verified", "reset probe activated a new five-hour window", map[string]any{"auth_id": authID})
 		return nil
 	}

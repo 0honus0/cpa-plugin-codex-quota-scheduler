@@ -22,6 +22,7 @@ type QuotaWindow struct {
 	Kind               WindowKind `json:"kind"`
 	UsedPercent        *float64   `json:"used_percent,omitempty"`
 	LimitWindowSeconds *int64     `json:"limit_window_seconds,omitempty"`
+	ResetAfterSeconds  *int64     `json:"reset_after_seconds,omitempty"`
 	ResetAt            time.Time  `json:"reset_at"`
 	Exhausted          bool       `json:"exhausted"`
 }
